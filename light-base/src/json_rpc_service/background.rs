@@ -23,35 +23,37 @@ use crate::{
 use super::StartConfig;
 
 use alloc::{
-    borrow::ToOwned as _,
+    borrow::{Cow, ToOwned as _},
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
-    vec,
-    vec::Vec,
+    vec::{self, Vec},
 };
-use async_lock::Mutex;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
     ops,
+    pin::Pin,
     sync::atomic,
     time::Duration,
 };
 use futures_channel::oneshot;
+use futures_lite::StreamExt as _;
 use futures_util::{future, stream};
 use rand_chacha::{
     rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
 };
 use smoldot::{
+    chain::fork_tree,
     header,
     json_rpc::{self, methods, parse, service},
     libp2p::{multiaddr, PeerId},
+    network::codec,
 };
 
 mod legacy_state_sub;
-mod state_chain;
 
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
@@ -75,11 +77,10 @@ struct Background<TPlat: PlatformRef> {
     system_version: String,
 
     /// Randomness used for various purposes, such as generating subscription IDs.
-    randomness: ChaCha20,
+    randomness: ChaCha20Rng,
 
     /// See [`StartConfig::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-
     /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`StartConfig::runtime_service`].
@@ -87,21 +88,21 @@ struct Background<TPlat: PlatformRef> {
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
-    events: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event> + Send>>>,
+    /// Tasks that are spawned by the service and running in the background.
+    background_tasks:
+        stream::FuturesUnordered<Pin<Box<dyn future::Future<Output = Event<TPlat>> + Send>>>,
 
-    /// Channel where to send responses and notifications.
+    /// Channel where to send responses and notifications to the foreground.
     responses_tx: async_channel::Sender<String>,
-
-    /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
-    /// a dedicated task.
-    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
 
     /// Stream of notifications coming from the runtime service. Used for legacy JSON-RPC API
     /// subscriptions. `None` if not subscribed yet.
     runtime_service_subscription: Option<(
         runtime_service::SubscriptionId,
-        Pin<Box<dyn Stream<Item = runtime_service::Notification> + Send>>,
+        Pin<Box<dyn stream::Stream<Item = runtime_service::Notification> + Send>>,
     )>,
+    /// Best block used for legacy API functions that target the best block.
+    legacy_api_best_block: [u8; 32],
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?
@@ -127,12 +128,42 @@ struct Background<TPlat: PlatformRef> {
     chain_head_follow_subscriptions:
         hashbrown::HashMap<String, ChainHeadFollow, fnv::FnvBuildHasher>,
 
+    /// List of multi-stage requests (i.e. JSON-RPC requests that require multiple asynchronous
+    /// operations) that are ready to make progress.
+    multistage_requests_to_advance: VecDeque<(String, MultiStageRequest)>,
+
+    /// Cache of known state trie root hashes and numbers of blocks.
+    ///
+    /// Can also be an `Err` if the header is in an invalid format.
+    block_state_root_hashes_numbers_cache:
+        lru::LruCache<[u8; 32], Result<([u8; 32], u64), header::Error>, fnv::FnvBuildHasher>,
+
+    /// Requests for blocks state root hash and numbers that are still in progress.
+    /// For each block hash, contains a list of requests that are interested in the response.
+    /// Once the operation has been finished, the value is inserted in
+    /// [`Task::block_state_root_hashes_numbers_cache`].
+    block_state_root_hashes_numbers_pending:
+        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequest)>, fnv::FnvBuildHasher>,
+
+    /// Cache of known runtimes of blocks.
+    ///
+    /// Note that runtimes that have failed to compile can be found here as well.
+    block_runtimes_cache:
+        lru::LruCache<[u8; 32], runtime_service::PinnedRuntime, fnv::FnvBuildHasher>,
+
+    /// Requests for block runtimes that are still in progress.
+    /// For each block hash, contains a list of requests that are interested in the response.
+    /// Once the operation has been finished, the value is inserted in
+    /// [`Task::block_runtimes_cache`].
+    block_runtimes_pending:
+        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequest)>, fnv::FnvBuildHasher>,
+
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
     /// The values are list of keys.
     state_get_keys_paged_cache:
-        Mutex<lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>>,
+        lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -144,7 +175,7 @@ struct Background<TPlat: PlatformRef> {
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
 }
 
-struct ChainHeadFollow<TPlat: PlatformRef> {
+struct ChainHeadFollow {
     /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
     non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
 
@@ -168,9 +199,115 @@ struct Operation {
     interrupt: event_listener::Event,
 }
 
+enum MultiStageRequest {
+    StateCallStage1 {
+        block_hash: [u8; 32],
+        name: String,
+        parameters: Vec<u8>,
+    },
+    StateCallStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        name: String,
+        parameters: Vec<u8>,
+    },
+    StateGetKeysStage1 {
+        block_hash: [u8; 32],
+        prefix: Vec<u8>,
+    },
+    StateGetKeysStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        prefix: Vec<u8>,
+    },
+    StateGetKeysStage3 {
+        in_progress_results: Vec<methods::HexString>,
+    },
+    StateGetKeysPagedStage1 {
+        block_hash: [u8; 32],
+        prefix: Vec<u8>,
+        count: u32,
+        start_key: Vec<u8>,
+    },
+    StateGetKeysPagedStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        prefix: Vec<u8>,
+        count: u32,
+        start_key: Vec<u8>,
+    },
+    StateGetKeysPagedStage3 {
+        in_progress_results: Vec<Vec<u8>>,
+    },
+    StateQueryStorageAtStage1 {
+        block_hash: [u8; 32],
+        keys: Vec<Vec<u8>>,
+    },
+    StateQueryStorageAtStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        keys: Vec<Vec<u8>>,
+    },
+    StateQueryStorageAtStage3 {
+        block_hash: [u8; 32],
+        in_progress_results: Vec<(methods::HexString, Option<methods::HexString>)>,
+    },
+    StateGetMetadataStage1 {
+        block_hash: [u8; 32],
+    },
+    StateGetMetadataStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+    },
+    StateGetStorageStage1 {
+        block_hash: [u8; 32],
+        key: Vec<u8>,
+    },
+    StateGetStorageStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        key: Vec<u8>,
+    },
+    StateGetStorageStage3 {},
+    StateGetRuntimeVersionStage1 {
+        block_hash: [u8; 32],
+    },
+    StateGetRuntimeVersionStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+    },
+    PaymentQueryInfoStage1 {
+        block_hash: [u8; 32],
+        extrinsic: Vec<u8>,
+    },
+    PaymentQueryInfoStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        extrinsic: Vec<u8>,
+    },
+    SystemAccountNextIndexStage1 {
+        block_hash: [u8; 32],
+        account_id: Vec<u8>,
+    },
+    SystemAccountNextIndexStage2 {
+        block_hash: [u8; 32],
+        block_state_trie_root_hash: [u8; 32],
+        block_number: u64,
+        account_id: Vec<u8>,
+    },
+}
+
 enum Event<TPlat: PlatformRef> {
     TransactionEvent {
-        suscription_id: String,
+        subscription_id: String,
         event: transactions_service::TransactionStatus,
         watcher: Pin<Box<transactions_service::TransactionWatcher>>,
     },
@@ -187,20 +324,30 @@ enum Event<TPlat: PlatformRef> {
         notification: runtime_service::Notification,
         stream: runtime_service::Subscription<TPlat>,
     },
-    ChainHeadSubscriptionWithRuntimeDeadSubcription {
-        subscription_id: String,
-    },
     ChainHeadSubscriptionWithoutRuntimeReady {
         subscription_id: String,
-        subscription: sync_service::SubscribeAll<TPlat>,
+        subscription: sync_service::SubscribeAll,
     },
     ChainHeadSubscriptionWithoutRuntimeNotification {
         subscription_id: String,
         notification: sync_service::Notification,
-        stream: Pin<Box<async_channel::Receiver<Notification>>>,
+        stream: Pin<Box<async_channel::Receiver<sync_service::Notification>>>,
     },
-    ChainHeadSubscriptionWithoutRuntimeDeadSubcription {
+    ChainHeadSubscriptionDeadSubcription {
         subscription_id: String,
+    },
+    BlockInfoRetrieved {
+        block_hash: [u8; 32],
+        result: Result<Result<([u8; 32], u64), header::Error>, ()>,
+    },
+    RuntimeDownloaded {
+        block_hash: [u8; 32],
+        result: Result<runtime_service::PinnedRuntime, ()>,
+    },
+    StorageRequestInProgress {
+        request_id_json: String,
+        request: MultiStageRequest,
+        progress: sync_service::StorageQueryProgress<TPlat>,
     },
 }
 
@@ -255,8 +402,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        events: stream::FuturesUnordered::new(),
-        to_legacy: Mutex::new(to_legacy_tx),
+        background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: None,
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
@@ -280,14 +426,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
         ),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         responses_tx: async_channel::bounded(64).0, // TODO: /!\ do properly
-        state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
+        state_get_keys_paged_cache: lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new({
                 let mut seed = [0; 16];
                 config.platform.fill_random_bytes(&mut seed);
                 seed
             }),
-        )),
+        ),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         platform: config.platform,
@@ -300,11 +446,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
         enum WakeUpReason<TPlat: PlatformRef> {
             ForegroundDead,
             IncomingJsonRpcRequest(String),
+            AdvanceMultiStageRequest {
+                request_id_json: String,
+                request: MultiStageRequest,
+            },
             Event(Event<TPlat>),
             SubscriptionNotification(runtime_service::Notification),
         }
 
-        let wake_up_reason: WakeUpReason = { todo!() };
+        let wake_up_reason = { WakeUpReason::ForegroundDead }; // TODO:
 
         match wake_up_reason {
             WakeUpReason::ForegroundDead => {
@@ -391,10 +541,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                         debug_assert!(_prev_value.is_none());
 
-                        me.events.push(Box::pin(async move {
-                            let status = transaction_updates.next().await;
+                        me.background_tasks.push(Box::pin(async move {
+                            let status = transaction_updates.as_mut().next().await;
                             Event::TransactionEvent {
-                                suscription_id,
+                                subscription_id,
                                 event: status,
                                 watcher: transaction_updates,
                             }
@@ -403,8 +553,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::author_submitAndWatchExtrinsic(subscription_id)
-                                    .to_json_response(request_id_json),
+                                methods::Response::author_submitAndWatchExtrinsic(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
                             )
                             .await;
                     }
@@ -412,10 +564,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::author_unwatchExtrinsic { subscription } => {
                         let exists = me
                             .transactions_subscriptions
-                            .get(&subscription)
+                            .get(&*subscription)
                             .map_or(false, |sub| matches!(sub.ty, TransactionWatchTy::Legacy));
                         if exists {
-                            me.transactions_subscriptions.remove(&subscription);
+                            me.transactions_subscriptions.remove(&*subscription);
                         }
                         let _ = me
                             .responses_tx
@@ -426,23 +578,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chain_getBlock { .. } => {
+                    methods::MethodCall::chain_getBlock { hash } => {
                         // `hash` equal to `None` means "the current best block".
-                        let hash = match hash {
-                            Some(h) => h.0,
-                            None => {
-                                let (tx, rx) = oneshot::channel();
-                                self.to_legacy
-                                    .lock()
-                                    .await
-                                    .send(legacy_state_sub::Message::CurrentBestBlockHash {
-                                        result_tx: tx,
-                                    })
-                                    .await
-                                    .unwrap();
-                                rx.await.unwrap()
-                            }
-                        };
+                        let hash = hash.map_or(me.legacy_api_best_block, |b| b.0);
 
                         // Try to determine the block number by looking for the block in cache.
                         // The request can be fulfilled no matter whether the block number is known or not, but
@@ -463,7 +601,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         // Block bodies and headers aren't stored locally. Ask the network.
-                        me.events.push({
+                        me.background_tasks.push({
                             let sync_service = me.sync_service.clone();
                             let request_id_json = request_id_json.to_owned();
                             Box::pin(async move {
@@ -513,42 +651,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(
                                         methods::Response::chain_getBlockHash(
-                                            methods::HashHexString(self.genesis_block_hash),
+                                            methods::HashHexString(me.genesis_block_hash),
                                         )
                                         .to_json_response(request_id_json),
                                     )
                                     .await;
                             }
                             None => {
-                                // TODO: no
-                                let best_block = {
-                                    let (tx, rx) = oneshot::channel();
-                                    self.to_legacy
-                                        .lock()
-                                        .await
-                                        .send(legacy_state_sub::Message::CurrentBestBlockHash {
-                                            result_tx: tx,
-                                        })
-                                        .await
-                                        .unwrap();
-                                    rx.await.unwrap()
-                                };
-
                                 let _ = me
                                     .responses_tx
                                     .send(
                                         methods::Response::chain_getBlockHash(
-                                            methods::HashHexString(best_block),
+                                            methods::HashHexString(me.legacy_api_best_block),
                                         )
                                         .to_json_response(request_id_json),
                                     )
                                     .await;
                             }
                             Some(_) => {
-                                // While the block could be found in `known_blocks`, there is
-                                // no guarantee that blocks in `known_blocks` are canonical, and
-                                // we have no choice but to return null.
-                                // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
+                                // TODO: look into some list of known blocks
+
+                                // While could ask a full node for the block with a specific
+                                // number, there is absolutely no way to verify the answer of
+                                // the full node.
                                 let _ = me
                                     .responses_tx
                                     .send(parse::build_success_response(request_id_json, "null"))
@@ -661,8 +786,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::payment_queryInfo { .. } => {
-                        self.payment_query_info(request).await;
+                    methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::PaymentQueryInfoStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                                extrinsic: extrinsic.0,
+                            },
+                        ));
                     }
 
                     methods::MethodCall::rpc_methods {} => {
@@ -679,26 +810,85 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::state_call { .. } => {
-                        self.state_call(request).await;
+                    methods::MethodCall::state_call {
+                        name,
+                        parameters,
+                        hash,
+                    } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateCallStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                                name: name.into_owned(),
+                                parameters: parameters.0,
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_getKeys { .. } => {
-                        self.state_get_keys(request).await;
+
+                    methods::MethodCall::state_getKeys { prefix, hash } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateGetKeysStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                                prefix: prefix.0,
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_getKeysPaged { .. } => {
-                        self.state_get_keys_paged(request).await;
+
+                    methods::MethodCall::state_getKeysPaged {
+                        prefix,
+                        count,
+                        start_key,
+                        hash,
+                    } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateGetKeysPagedStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                                prefix: prefix.0,
+                                count,
+                                start_key,
+                                hash,
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_queryStorageAt { .. } => {
-                        self.state_query_storage_at(request).await;
+
+                    methods::MethodCall::state_queryStorageAt { keys, at } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateQueryStorageAtStage1 {
+                                block_hash: at.map_or(me.legacy_api_best_block, |h| h.0),
+                                keys,
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_getMetadata { .. } => {
-                        self.state_get_metadata(request).await;
+
+                    methods::MethodCall::state_getMetadata { hash } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateGetMetadataStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_getStorage { .. } => {
-                        self.state_get_storage(request).await;
+
+                    methods::MethodCall::state_getStorage { key, hash } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateGetStorageStage1 {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                                key: key.0,
+                            },
+                        ));
                     }
-                    methods::MethodCall::state_getRuntimeVersion { .. } => {
-                        self.state_get_runtime_version(request).await;
+
+                    methods::MethodCall::state_getRuntimeVersion { at } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::StateGetRuntimeVersionStage1 {
+                                block_hash: at.map_or(me.legacy_api_best_block, |h| h.0),
+                            },
+                        ));
                     }
 
                     methods::MethodCall::state_subscribeRuntimeVersion {} => {
@@ -717,7 +907,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                        let exists = me.runtime_version_subscriptions.remove(&subscription);
+                        let exists = me.runtime_version_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
                             .send(
@@ -727,7 +917,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::system_accountNextIndex { .. } => {
+                    methods::MethodCall::system_accountNextIndex { account } => {
                         self.account_next_index(request).await;
                     }
 
@@ -735,7 +925,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::system_chain((&self.chain_name).into())
+                                methods::Response::system_chain((&me.chain_name).into())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -745,7 +935,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::system_chainType((&self.chain_ty).into())
+                                methods::Response::system_chainType((&me.chain_ty).into())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -759,15 +949,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
                                     // is finished and that the block notifications report blocks that are
                                     // believed to be near the head of the chain.
-                                    is_syncing: !self
+                                    is_syncing: !me
                                         .runtime_service
                                         .is_near_head_of_chain_heuristic()
                                         .await,
                                     peers: u64::try_from(
-                                        self.sync_service.syncing_peers().await.len(),
+                                        me.sync_service.syncing_peers().await.len(),
                                     )
                                     .unwrap_or(u64::max_value()),
-                                    should_have_peers: self.chain_is_live,
+                                    should_have_peers: me.chain_is_live,
                                 })
                                 .to_json_response(request_id_json),
                             )
@@ -789,7 +979,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::system_name((&self.system_name).into())
+                                methods::Response::system_name((&me.system_name).into())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -812,20 +1002,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::system_peers(
-                                    self.sync_service
+                                    me.sync_service
                                         .syncing_peers()
                                         .await
                                         .map(|(peer_id, role, best_number, best_hash)| {
                                             methods::SystemPeer {
                                                 peer_id: peer_id.to_string(),
                                                 roles: match role {
-                                                    codec::Role::Authority => {
+                                                    sync_service::Role::Authority => {
                                                         methods::SystemPeerRole::Authority
                                                     }
-                                                    codec::Role::Full => {
+                                                    sync_service::Role::Full => {
                                                         methods::SystemPeerRole::Full
                                                     }
-                                                    codec::Role::Light => {
+                                                    sync_service::Role::Light => {
                                                         methods::SystemPeerRole::Light
                                                     }
                                                 },
@@ -845,7 +1035,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::system_properties(
-                                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                                    serde_json::from_str(&me.chain_properties_json).unwrap(),
                                 )
                                 .to_json_response(request_id_json),
                             )
@@ -856,7 +1046,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::system_version((&self.system_version).into())
+                                methods::Response::system_version((&me.system_version).into())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -874,7 +1064,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(
                                     methods::Response::chainHead_unstable_body(
-                                        methods::ChainHeadStorageReturn::LimitReached {},
+                                        methods::ChainHeadBodyCallReturn::LimitReached {},
                                     )
                                     .to_json_response(request_id_json),
                                 )
@@ -893,27 +1083,46 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 (decoded.number, *decoded.extrinsics_root)
                             } else {
                                 // Block isn't pinned. Request is invalid.
-                                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ))
+                                    .await;
                                 continue;
                             }
                         };
 
                         // Check whether there is an operation slot available.
-                        self.available_operation_slots =
-                            match self.available_operation_slots.checked_sub(1) {
+                        subscription.available_operation_slots =
+                            match subscription.available_operation_slots.checked_sub(1) {
                                 Some(s) => s,
                                 None => {
-                                    request.respond(methods::Response::chainHead_unstable_body(
-                                        methods::ChainHeadBodyCallReturn::LimitReached {},
-                                    ));
+                                    let _ = me
+                                        .responses_tx
+                                        .send(
+                                            methods::Response::chainHead_unstable_body(
+                                                methods::ChainHeadBodyCallReturn::LimitReached {},
+                                            )
+                                            .to_json_response(request_id_json),
+                                        )
+                                        .await;
                                     continue;
                                 }
                             };
 
+                        let operation_id = {
+                            let mut operation_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut operation_id);
+                            bs58::encode(operation_id).into_string()
+                        };
+
                         let interrupt = event_listener::Event::new();
                         let mut on_interrupt = interrupt.listen();
 
-                        let _was_in = subscriptions.operations_in_progress.insert(
+                        let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
                                 occupied_slots: 1,
@@ -935,7 +1144,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
 
                         // Finish the operation asynchronously.
-                        me.events.push_back({
+                        me.background_tasks.push({
                             let sync_service = me.sync_service.clone();
                             async move {
                                 let future = sync_service.clone().block_query(
@@ -1012,42 +1221,56 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         });
                     }
 
-                    methods::MethodCall::chainHead_unstable_call { .. } => {
-                        let (hash, function_to_call, call_parameters) = {
-                            let methods::MethodCall::chainHead_unstable_call {
-                                hash,
-                                function,
-                                call_parameters,
-                                ..
-                            } = request.request()
-                            else {
-                                unreachable!()
-                            };
-
-                            (hash, function.into_owned(), call_parameters.0)
+                    methods::MethodCall::chainHead_unstable_call {
+                        follow_subscription,
+                        hash,
+                        function,
+                        call_parameters: methods::HexString(call_parameters),
+                    } => {
+                        let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        else {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chainHead_unstable_call(
+                                        methods::ChainHeadBodyCallReturn::LimitReached {},
+                                    )
+                                    .to_json_response(request_id_json),
+                                )
+                                .await;
+                            continue;
                         };
 
                         // Check whether there is an operation slot available.
-                        self.available_operation_slots =
-                            match self.available_operation_slots.checked_sub(1) {
+                        subscription.available_operation_slots =
+                            match subscription.available_operation_slots.checked_sub(1) {
                                 Some(s) => s,
                                 None => {
-                                    request.respond(methods::Response::chainHead_unstable_call(
-                                        methods::ChainHeadBodyCallReturn::LimitReached {},
-                                    ));
-                                    return;
+                                    let _ = me
+                                        .responses_tx
+                                        .send(
+                                            methods::Response::chainHead_unstable_call(
+                                                methods::ChainHeadBodyCallReturn::LimitReached {},
+                                            )
+                                            .to_json_response(request_id_json),
+                                        )
+                                        .await;
+                                    continue;
                                 }
                             };
 
-                        // Determine whether the requested block hash is valid and create a future of the call.
-                        // This is done immediately is order to guarantee that the block is still pinned.
+                        // Determine whether the requested block hash is valid and create a
+                        // future of the call. This is done immediately is order to guarantee
+                        // that the block is still pinned.
                         let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
                             .subscription
                         {
                             Subscription::WithRuntime {
                                 subscription_id, ..
                             } => {
-                                if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                                if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
                                     // Block isn't pinned. Request is invalid.
                                     request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                                     return;
@@ -1072,21 +1295,31 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             }
                             Subscription::WithoutRuntime(_) => {
-                                // It is invalid to call this function for a "without runtime" subscription.
-                                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                                return;
+                                // It is invalid to call this function for
+                                // a "without runtime" subscription.
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ))
+                                    .await;
+                                continue;
                             }
                         };
 
-                        let operation_id = self.next_operation_id.to_string();
-                        self.next_operation_id += 1;
-                        let to_main_task = self.to_main_task.clone();
+                        let operation_id = {
+                            let mut operation_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut operation_id);
+                            bs58::encode(operation_id).into_string()
+                        };
 
                         let interrupt = event_listener::Event::new();
                         let on_interrupt = interrupt.listen();
-                        let runtime_service = self.runtime_service.clone();
+                        let runtime_service = me.runtime_service.clone();
 
-                        let _was_in = self.operations_in_progress.insert(
+                        let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
                                 occupied_slots: 1,
@@ -1095,142 +1328,151 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                         debug_assert!(_was_in.is_none());
 
-                        request.respond(methods::Response::chainHead_unstable_call(
-                            methods::ChainHeadBodyCallReturn::Started {
-                                operation_id: (&operation_id).into(),
-                            },
-                        ));
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_call(
+                                    methods::ChainHeadBodyCallReturn::Started {
+                                        operation_id: (&operation_id).into(),
+                                    },
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
 
                         // Finish the call asynchronously.
-                        self.platform.spawn_task(
-                            format!("{}-chain-head-call", self.log_target).into(),
-                            async move {
-                                // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
-                                let runtime_call_result = {
-                                    let runtime_call = runtime_service.runtime_call(
-                                        pinned_runtime,
-                                        hash.0,
-                                        block_number,
-                                        block_state_trie_root_hash,
-                                        function_to_call,
-                                        None,
-                                        call_parameters,
-                                        3,
-                                        Duration::from_secs(20),
-                                        NonZeroU32::new(2).unwrap(),
-                                    );
+                        me.background_tasks.push(async move {
+                            // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
+                            let runtime_call_result = {
+                                let runtime_call = runtime_service.runtime_call(
+                                    pinned_runtime,
+                                    hash.0,
+                                    block_number,
+                                    block_state_trie_root_hash,
+                                    function_to_call,
+                                    None,
+                                    call_parameters,
+                                    3,
+                                    Duration::from_secs(20),
+                                    NonZeroU32::new(2).unwrap(),
+                                );
 
-                                    match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
-                                        Some(v) => v,
-                                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
-                                    }
-                                };
-
-                                match runtime_call_result {
-                                    Ok(success) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationCallDone {
-                                                    operation_id: operation_id.clone().into(),
-                                                    output: methods::HexString(success.output),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: error.to_string().into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
-                                        // We pass `None` for the API requirement, thus this error can never
-                                        // happen.
-                                        unreachable!()
-                                    }
-                                    Err(runtime_service::RuntimeCallError::Crash) => {
-                                        // TODO: is this the appropriate error?
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationInaccessible {
-                                                    operation_id: operation_id.clone().into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::Execution(
-                                        runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
-                                    )) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: "Runtime has called an offchain host function"
-                                                        .to_string()
-                                                        .into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::Execution(
-                                        runtime_service::RuntimeCallExecutionError::Start(error),
-                                    )) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: error.to_string().into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::Execution(
-                                        runtime_service::RuntimeCallExecutionError::Execution(error),
-                                    )) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: error.to_string().into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationInaccessible {
-                                                    operation_id: operation_id.clone().into(),
-                                                },
-                                            })
-                                            .await;
-                                    }
+                                match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
+                                    Some(v) => v,
+                                    None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                                 }
-                            },
-                        );
+                            };
+
+                            match runtime_call_result {
+                                Ok(success) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationCallDone {
+                                                operation_id: operation_id.clone().into(),
+                                                output: methods::HexString(success.output),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationError {
+                                                operation_id: operation_id.clone().into(),
+                                                error: error.to_string().into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                                    // We pass `None` for the API requirement, thus this error can never
+                                    // happen.
+                                    unreachable!()
+                                }
+                                Err(runtime_service::RuntimeCallError::Crash) => {
+                                    // TODO: is this the appropriate error?
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationInaccessible {
+                                                operation_id: operation_id.clone().into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::Execution(
+                                    runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
+                                )) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationError {
+                                                operation_id: operation_id.clone().into(),
+                                                error: "Runtime has called an offchain host function"
+                                                    .to_string()
+                                                    .into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::Execution(
+                                    runtime_service::RuntimeCallExecutionError::Start(error),
+                                )) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationError {
+                                                operation_id: operation_id.clone().into(),
+                                                error: error.to_string().into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::Execution(
+                                    runtime_service::RuntimeCallExecutionError::Execution(error),
+                                )) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationError {
+                                                operation_id: operation_id.clone().into(),
+                                                error: error.to_string().into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                                Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
+                                    let _ = to_main_task
+                                        .send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationInaccessible {
+                                                operation_id: operation_id.clone().into(),
+                                            },
+                                        })
+                                        .await;
+                                }
+                            }
+                        });
                     }
 
                     methods::MethodCall::chainHead_unstable_continue { .. } => {
                         // TODO: not implemented properly
-                        request.respond(methods::Response::chainHead_unstable_continue(()));
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_continue(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chainHead_unstable_storage {
@@ -1271,19 +1513,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 "Child key storage queries not supported yet",
                             ));
                             log!(
-                                &self.platform,
+                                &me.platform,
                                 Warn,
-                                &self.log_target,
+                                &me.log_target,
                                 "chainHead_unstable_storage has been called with a non-null childTrie. \
                                 This isn't supported by smoldot yet."
                             );
                             continue;
                         }
 
+                        let operation_id = {
+                            let mut operation_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut operation_id);
+                            bs58::encode(operation_id).into_string()
+                        };
+
                         let interrupt = event_listener::Event::new();
                         let mut on_interrupt = interrupt.listen();
 
-                        me.events.push_back({
+                        me.background_tasks.push({
                             let sync_service = me.sync_service.clone();
                             async move {
                                 let decoded_header = match header::decode(
@@ -1485,7 +1733,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if me.chain_head_follow_subscriptions.len() >= 2 {
                             let _ = me
                                 .responses_tx
-                                .send(parse::build_error_response(request_id_json, -32800, None))
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32800,
+                                        "too many active follow subscriptions",
+                                    ),
+                                    None,
+                                ))
                                 .await;
                             continue;
                         }
@@ -1496,7 +1751,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             bs58::encode(subscription_id).into_string()
                         };
 
-                        let _was_inserted = me.chain_head_follow_subscriptions.insert(
+                        let _prev_value = me.chain_head_follow_subscriptions.insert(
                             subscription_id,
                             ChainHeadFollow {
                                 non_finalized_blocks: todo!(),
@@ -1509,12 +1764,58 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 available_operation_slots: 32, // TODO: make configurable? adjust dynamically?
                             },
                         );
-                        debug_assert!(_was_inserted);
+                        debug_assert!(_prev_value.is_none());
 
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_follow(subscription_id)
+                                methods::Response::chainHead_unstable_follow(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        if with_runtime {
+                            let runtime_service = me.runtime_service.clone();
+                            me.background_tasks.push(Box::pin(async move {
+                                Event::ChainHeadSubscriptionWithRuntimeReady {
+                                    subscription_id,
+                                    subscription: runtime_service
+                                        .subscribe_all(
+                                            32,
+                                            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+                                        )
+                                        .await,
+                                }
+                            }))
+                        } else {
+                            let sync_service = me.sync_service.clone();
+                            me.background_tasks.push(Box::pin(async move {
+                                Event::ChainHeadSubscriptionWithoutRuntimeReady {
+                                    subscription_id,
+                                    subscription: sync_service.subscribe_all(32, false).await,
+                                }
+                            }))
+                        }
+                    }
+
+                    methods::MethodCall::chainHead_unstable_unfollow {
+                        follow_subscription,
+                    } => {
+                        if let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .remove(&*follow_subscription)
+                        {
+                            for (_, operation) in subscription.operations_in_progress {
+                                operation.interrupt.notify(usize::max_value());
+                            }
+                        };
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_unfollow(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -1556,8 +1857,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_header(Some(block.clone()))
-                                    .to_json_response(request_id_json),
+                                methods::Response::chainHead_unstable_header(Some(
+                                    methods::HexString(block.clone()),
+                                ))
+                                .to_json_response(request_id_json),
                             )
                             .await;
                     }
@@ -1624,7 +1927,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                    methods::MethodCall::chainHead_unstable_finalizedDatabase {
+                        max_size_bytes,
+                    } => {
                         let response = crate::database::encode_database(
                             &me.network_service,
                             &me.sync_service,
@@ -1661,7 +1966,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::chainSpec_v1_genesisHash(
-                                    methods::HashHexString(self.genesis_block_hash),
+                                    methods::HashHexString(me.genesis_block_hash),
                                 )
                                 .to_json_response(request_id_json),
                             )
@@ -1673,7 +1978,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::chainSpec_v1_properties(
-                                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                                    serde_json::from_str(&me.chain_properties_json).unwrap(),
                                 )
                                 .to_json_response(request_id_json),
                             )
@@ -1698,7 +2003,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                                 match PeerId::from_bytes(peer_id_bytes) {
                                     Ok(peer_id) => {
-                                        self.network_service
+                                        me.network_service
                                             .discover(
                                                 iter::once((peer_id, iter::once(addr))),
                                                 false,
@@ -1722,9 +2027,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                                     &serde_json::to_string(
                                                         "multiaddr doesn't end with /p2p",
                                                     )
-                                                    .unwrap_or_else(|| unreachable!()),
-                                                )
-                                                .unwrap(),
+                                                    .unwrap_or_else(|_| unreachable!()),
+                                                ),
                                             ))
                                             .await;
                                     }
@@ -1740,9 +2044,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             &serde_json::to_string(
                                                 "multiaddr doesn't end with /p2p",
                                             )
-                                            .unwrap_or_else(|| unreachable!()),
-                                        )
-                                        .unwrap(),
+                                            .unwrap_or_else(|_| unreachable!()),
+                                        ),
                                     ))
                                     .await;
                             }
@@ -1754,9 +2057,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         parse::ErrorResponse::InvalidParams,
                                         Some(
                                             &serde_json::to_string(&err.to_string())
-                                                .unwrap_or_else(|| unreachable!()),
-                                        )
-                                        .unwrap(),
+                                                .unwrap_or_else(|_| unreachable!()),
+                                        ),
                                     ))
                                     .await;
                             }
@@ -1768,14 +2070,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::sudo_unstable_version(
-                                    format!("{} {}", self.system_name, self.system_version).into(),
+                                    format!("{} {}", me.system_name, me.system_version).into(),
                                 )
                                 .to_json_response(request_id_json),
                             )
                             .await;
                     }
 
-                    methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
+                    methods::MethodCall::transactionWatch_unstable_submitAndWatch {
+                        transaction: methods::HexString(transaction),
+                    } => {
                         let subscription_id = {
                             let mut subscription_id = [0u8; 32];
                             me.randomness.fill_bytes(&mut subscription_id);
@@ -1798,10 +2102,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                         debug_assert!(_prev_value.is_none());
 
-                        me.events.push(Box::pin(async move {
-                            let status = transaction_updates.next().await;
+                        me.background_tasks.push(Box::pin(async move {
+                            let status = transaction_updates.as_mut().next().await;
                             Event::TransactionEvent {
-                                suscription_id,
+                                subscription_id,
                                 event: status,
                                 watcher: transaction_updates,
                             }
@@ -1811,7 +2115,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::transactionWatch_unstable_submitAndWatch(
-                                    subscription_id,
+                                    Cow::Borrowed(&subscription_id),
                                 )
                                 .to_json_response(request_id_json),
                             )
@@ -1821,10 +2125,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::transactionWatch_unstable_unwatch { subscription } => {
                         let exists = me
                             .transactions_subscriptions
-                            .get(&subscription)
+                            .get(&*subscription)
                             .map_or(false, |sub| matches!(sub.ty, TransactionWatchTy::NewApi));
                         if exists {
-                            me.transactions_subscriptions.remove(&subscription);
+                            me.transactions_subscriptions.remove(&*subscription);
                         }
                         let _ = me
                             .responses_tx
@@ -1858,14 +2162,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::system_dryRun { .. }
                     | methods::MethodCall::system_localPeerId { .. }
                     | methods::MethodCall::system_networkState { .. }
-                    | methods::MethodCall::system_removeReservedPeer { .. })
+                    | methods::MethodCall::system_removeReservedPeer { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
-                    | methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                    | methods::MethodCall::sudo_network_unstable_unwatch { .. }) => {
                         // TODO: implement the ones that make sense to implement ^
                         log!(
-                            &self.platform,
+                            &me.platform,
                             Warn,
-                            &self.log_target,
+                            &me.log_target,
                             format!("JSON-RPC call not supported yet: {:?}", _method)
                         );
                         let _ = me
@@ -1885,6 +2189,621 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
             }
 
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json: request_id,
+                request:
+                    request @ (MultiStageRequest::StateCallStage1 { .. }
+                    | MultiStageRequest::StateGetKeysStage1 { .. }
+                    | MultiStageRequest::StateGetKeysPagedStage1 { .. }
+                    | MultiStageRequest::StateQueryStorageAtStage1 { .. }
+                    | MultiStageRequest::StateGetMetadataStage1 { .. }
+                    | MultiStageRequest::StateGetStorageStage1 { .. }
+                    | MultiStageRequest::StateGetRuntimeVersionStage1 { .. }
+                    | MultiStageRequest::PaymentQueryInfoStage1 { .. }
+                    | MultiStageRequest::SystemAccountNextIndexStage1 { .. }),
+            } => {
+                let block_hash = match &request {
+                    MultiStageRequest::StateCallStage1 { block_hash, .. }
+                    | MultiStageRequest::StateGetKeysStage1 { block_hash, .. }
+                    | MultiStageRequest::StateGetKeysPagedStage1 { block_hash, .. }
+                    | MultiStageRequest::StateQueryStorageAtStage1 { block_hash, .. }
+                    | MultiStageRequest::StateGetMetadataStage1 { block_hash }
+                    | MultiStageRequest::StateGetStorageStage1 { block_hash, .. }
+                    | MultiStageRequest::StateGetRuntimeVersionStage1 { block_hash }
+                    | MultiStageRequest::PaymentQueryInfoStage1 { block_hash, .. }
+                    | MultiStageRequest::SystemAccountNextIndexStage1 { block_hash, .. } => {
+                        *block_hash
+                    }
+                    _ => unreachable!(),
+                };
+
+                // If the value is available in cache, switch the request to the next stage.
+                if let Some(in_cache) = me.block_state_root_hashes_numbers_cache.get(&block_hash) {
+                    let Ok((state_trie_root_hash, block_number)) = in_cache else {
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id,
+                                parse::ErrorResponse::ServerError(-32800, "invalid block header"),
+                                None,
+                            ))
+                            .await;
+                        continue;
+                    };
+
+                    // TODO: advance to stage 2
+
+                    continue;
+                }
+
+                // Value is not available in cache.
+                match me.block_state_root_hashes_numbers_pending.entry(block_hash) {
+                    hashbrown::hash_map::Entry::Occupied(entry) => {
+                        // We are already in the process of asking the networking service for
+                        // the block information.
+                        // Keep track of the request.
+                        debug_assert!(!entry.get().is_empty());
+                        entry.into_mut().push((request_id, request));
+                    }
+                    hashbrown::hash_map::Entry::Vacant(entry) => {
+                        // No network request is in progress yet. Start one.
+                        me.background_tasks.push({
+                            let block_info_retrieve_future =
+                                me.sync_service.clone().block_query_unknown_number(
+                                    block_hash,
+                                    codec::BlocksRequestFields {
+                                        header: true,
+                                        body: false,
+                                        justifications: false,
+                                    },
+                                    3,
+                                    Duration::from_secs(5),
+                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                );
+                            // TODO: must check accuracy of hash
+                            Box::pin(async move {
+                                Event::BlockInfoRetrieved {
+                                    block_hash,
+                                    result: block_info_retrieve_future.await,
+                                }
+                            })
+                        });
+
+                        // Keep track of the request.
+                        let mut list = Vec::with_capacity(4);
+                        list.push((request_id, request));
+                        entry.insert(list);
+                    }
+                }
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json: request_id,
+                request:
+                    request @ (MultiStageRequest::StateCallStage2 { .. }
+                    | MultiStageRequest::StateGetMetadataStage2 { .. }
+                    | MultiStageRequest::StateGetRuntimeVersionStage2 { .. }
+                    | MultiStageRequest::PaymentQueryInfoStage2 { .. }
+                    | MultiStageRequest::SystemAccountNextIndexStage2 { .. }),
+            } => {
+                let (block_hash, block_state_trie_root_hash, block_number) = match &request {
+                    MultiStageRequest::StateGetMetadataStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                    }
+                    | MultiStageRequest::StateGetRuntimeVersionStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                    }
+                    | MultiStageRequest::PaymentQueryInfoStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        ..
+                    }
+                    | MultiStageRequest::SystemAccountNextIndexStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        ..
+                    } => (*block_hash, *block_state_trie_root_hash, *block_number),
+                    _ => unreachable!(),
+                };
+
+                // If the value is available in cache, do the runtime call.
+                if let Some(in_cache) = me.block_runtimes_cache.get(&block_hash) {
+                    if let MultiStageRequest::StateGetRuntimeVersionStage2 { .. } = &request {
+                        match me
+                            .runtime_service
+                            .pinned_runtime_specification(in_cache.clone())
+                            .await
+                        {
+                            Ok(spec) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::state_getRuntimeVersion(
+                                            convert_runtime_version(&spec),
+                                        )
+                                        .to_json_response(&request_id),
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        &request_id,
+                                        json_rpc::parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            &error.to_string(),
+                                        ),
+                                        None,
+                                    ))
+                                    .await;
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    let (function_name, required_api_version, parameters_vectored) = match request {
+                        MultiStageRequest::StateCallStage2 {
+                            name, parameters, ..
+                        } => (name, None, Vec::new()),
+                        MultiStageRequest::StateGetMetadataStage2 { .. } => (
+                            "Metadata_metadata".to_owned(),
+                            Some(("Metadata".to_owned(), 1..=2)),
+                            Vec::new(),
+                        ),
+                        MultiStageRequest::PaymentQueryInfoStage2 { extrinsic, .. } => (
+                            json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
+                            Some(("TransactionPaymentApi".to_owned(), 1..=2)),
+                            json_rpc::payment_info::payment_info_parameters(&extrinsic).fold(
+                                Vec::new(),
+                                |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                },
+                            ),
+                        ),
+                        MultiStageRequest::SystemAccountNextIndexStage2 { account_id, .. } => (
+                            "AccountNonceApi_account_nonce".to_owned(),
+                            Some(("AccountNonceApi".to_owned(), 1..=1)),
+                            account_id,
+                        ),
+                        _ => unreachable!(),
+                    };
+
+                    let runtime_call_future = me.runtime_service.runtime_call(
+                        in_cache.clone(),
+                        block_hash,
+                        block_number,
+                        block_state_trie_root_hash,
+                        function_name,
+                        required_api_version,
+                        parameters_vectored,
+                        3,
+                        Duration::from_secs(5),
+                        NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                    );
+
+                    me.background_tasks.push(Box::pin(async move { todo!() }));
+                    continue;
+                }
+
+                // Runtime is not available in cache.
+                match me.block_runtimes_pending.entry(block_hash) {
+                    hashbrown::hash_map::Entry::Occupied(entry) => {
+                        // We are already in the process of asking the networking service for
+                        // the runtime.
+                        // Keep track of the request.
+                        debug_assert!(!entry.get().is_empty());
+                        entry.into_mut().push((request_id, request));
+                    }
+                    hashbrown::hash_map::Entry::Vacant(entry) => {
+                        // No network request is in progress yet. Start one.
+                        me.background_tasks.push(Box::pin({
+                            let sync_service = me.sync_service.clone();
+                            let runtime_service = me.runtime_service.clone();
+                            // TODO: move to separate function
+                            async move {
+                                let (
+                                    storage_code,
+                                    storage_heap_pages,
+                                    code_merkle_value,
+                                    code_closest_ancestor_excluding,
+                                ) = {
+                                    let mut storage_code = None;
+                                    let mut storage_heap_pages = None;
+                                    let mut code_merkle_value = None;
+                                    let mut code_closest_ancestor_excluding = None;
+
+                                    let mut query =
+                                        sync_service
+                                        .storage_query(
+                                            block_number,
+                                            block_hash,
+                                            block_state_trie_root_hash,
+                                            [
+                                                sync_service::StorageRequestItem {
+                                                    key: b":code".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                                                },
+                                                sync_service::StorageRequestItem {
+                                                    key: b":code".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::Value,
+                                                },
+                                                sync_service::StorageRequestItem {
+                                                    key: b":heappages".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::Value,
+                                                },
+                                            ]
+                                            .into_iter(),
+                                            3,
+                                            Duration::from_secs(20),
+                                            NonZeroU32::new(1).unwrap(),
+                                        )
+                                        .advance()
+                                        .await;
+
+                                    loop {
+                                        match query {
+                                            sync_service::StorageQueryProgress::Finished => {
+                                                break (
+                                                    storage_code,
+                                                    storage_heap_pages,
+                                                    code_merkle_value,
+                                                    code_closest_ancestor_excluding,
+                                                )
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 0,
+                                                item:
+                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                                                        closest_descendant_merkle_value,
+                                                        found_closest_ancestor_excluding,
+                                                        ..
+                                                    },
+                                                query: next,
+                                            } => {
+                                                code_merkle_value = closest_descendant_merkle_value;
+                                                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 1,
+                                                item: sync_service::StorageResultItem::Value { value, .. },
+                                                query: next,
+                                            } => {
+                                                storage_code = value;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 2,
+                                                item: sync_service::StorageResultItem::Value { value, .. },
+                                                query: next,
+                                            } => {
+                                                storage_heap_pages = value;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                                            sync_service::StorageQueryProgress::Error(error) => {
+                                                return Event::RuntimeDownloaded {
+                                                    block_hash,
+                                                    result: Err(()),
+                                                }
+                                            }
+                                        }
+                                    }
+                                };
+
+                                // Give the code and heap pages to the runtime service. The runtime service will
+                                // try to find any similar runtime it might have, and if not will compile it.
+                                let pinned_runtime = runtime_service
+                                    .compile_and_pin_runtime(
+                                        storage_code,
+                                        storage_heap_pages,
+                                        code_merkle_value,
+                                        code_closest_ancestor_excluding,
+                                    )
+                                    .await;
+
+                                Event::RuntimeDownloaded {
+                                    block_hash,
+                                    result: pinned_runtime.map_err(|_| ()),
+                                }
+                            }
+                        }));
+
+                        // Keep track of the request.
+                        let mut list = Vec::with_capacity(4);
+                        list.push((request_id, request));
+                        entry.insert(list);
+                    }
+                }
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json,
+                request:
+                    request @ (MultiStageRequest::StateGetKeysStage2 { .. }
+                    | MultiStageRequest::StateGetKeysPagedStage2 { .. }
+                    | MultiStageRequest::StateQueryStorageAtStage2 { .. }
+                    | MultiStageRequest::StateGetStorageStage2 { .. }),
+            } => {
+                let (
+                    block_hash,
+                    block_state_trie_root_hash,
+                    block_number,
+                    request,
+                    storage_request,
+                ) = match request {
+                    MultiStageRequest::StateGetKeysStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        prefix,
+                    } => (
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        MultiStageRequest::StateGetKeysStage3 {
+                            in_progress_results: Vec::with_capacity(32),
+                        },
+                        either::Left(iter::once(sync_service::StorageRequestItem {
+                            key: prefix.clone(),
+                            ty: sync_service::StorageRequestItemTy::DescendantsHashes,
+                        })),
+                    ),
+                    MultiStageRequest::StateGetKeysPagedStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        prefix,
+                        count,
+                        start_key,
+                    } => (
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        MultiStageRequest::StateGetKeysPagedStage3 {
+                            in_progress_results: Vec::with_capacity(32),
+                        },
+                        either::Left(iter::once(sync_service::StorageRequestItem {
+                            key: prefix.clone(),
+                            ty: sync_service::StorageRequestItemTy::DescendantsHashes,
+                        })),
+                    ),
+                    MultiStageRequest::StateQueryStorageAtStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        keys,
+                    } => (
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        MultiStageRequest::StateQueryStorageAtStage3 {
+                            block_hash,
+                            in_progress_results: Vec::with_capacity(keys.len()),
+                        },
+                        either::Right(keys.into_iter().map(|key| {
+                            sync_service::StorageRequestItem {
+                                key,
+                                ty: sync_service::StorageRequestItemTy::Value,
+                            }
+                        })),
+                    ),
+                    MultiStageRequest::StateGetStorageStage2 {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        key,
+                    } => (
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                        MultiStageRequest::StateGetStorageStage3 {},
+                        either::Left(iter::once(sync_service::StorageRequestItem {
+                            key,
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        })),
+                    ),
+                    _ => unreachable!(),
+                };
+
+                let storage_query = me.sync_service.clone().storage_query(
+                    block_number,
+                    block_hash,
+                    block_state_trie_root_hash,
+                    storage_request,
+                    3,
+                    Duration::from_secs(10),
+                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                );
+
+                me.background_tasks.push(Box::pin(async move {
+                    Event::StorageRequestInProgress {
+                        request_id_json,
+                        request,
+                        progress: storage_query.advance().await,
+                    }
+                }));
+            }
+
+            WakeUpReason::Event(Event::StorageRequestInProgress {
+                request_id_json,
+                request,
+                progress,
+            }) => match (progress, request) {
+                (
+                    sync_service::StorageQueryProgress::Progress {
+                        item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                        query: next,
+                        ..
+                    },
+                    MultiStageRequest::StateGetKeysStage3 {
+                        mut in_progress_results,
+                    },
+                ) => {
+                    in_progress_results.push(methods::HexString(key));
+                    me.background_tasks.push(Box::pin(async move {
+                        Event::StorageRequestInProgress {
+                            request_id_json,
+                            request: MultiStageRequest::StateGetKeysStage3 {
+                                in_progress_results,
+                            },
+                            progress: next.advance().await,
+                        }
+                    }));
+                }
+                (
+                    sync_service::StorageQueryProgress::Finished,
+                    MultiStageRequest::StateGetKeysStage3 {
+                        in_progress_results,
+                    },
+                ) => {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::state_getKeys(in_progress_results)
+                                .to_json_response(&request_id_json),
+                        )
+                        .await;
+                }
+                (
+                    sync_service::StorageQueryProgress::Progress {
+                        item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                        query: next,
+                        ..
+                    },
+                    MultiStageRequest::StateGetKeysPagedStage3 {
+                        mut in_progress_results,
+                    },
+                ) => {
+                    in_progress_results.push(key);
+                    me.background_tasks.push(Box::pin(async move {
+                        Event::StorageRequestInProgress {
+                            request_id_json,
+                            request: MultiStageRequest::StateGetKeysPagedStage3 {
+                                in_progress_results,
+                            },
+                            progress: next.advance().await,
+                        }
+                    }));
+                }
+                (
+                    sync_service::StorageQueryProgress::Finished,
+                    MultiStageRequest::StateGetKeysPagedStage3 {
+                        in_progress_results,
+                    },
+                ) => {
+                    // TODO: no; filter by count and start key and add to cache and all
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::state_getKeysPaged(
+                                in_progress_results
+                                    .into_iter()
+                                    .map(methods::HexString)
+                                    .collect(),
+                            )
+                            .to_json_response(&request_id_json),
+                        )
+                        .await;
+                }
+                (
+                    sync_service::StorageQueryProgress::Progress {
+                        item: sync_service::StorageResultItem::Value { key, value },
+                        query: next,
+                        ..
+                    },
+                    MultiStageRequest::StateQueryStorageAtStage3 {
+                        block_hash,
+                        mut in_progress_results,
+                    },
+                ) => {
+                    in_progress_results
+                        .push((methods::HexString(key), value.map(methods::HexString)));
+                    me.background_tasks.push(Box::pin(async move {
+                        Event::StorageRequestInProgress {
+                            request_id_json,
+                            request: MultiStageRequest::StateQueryStorageAtStage3 {
+                                block_hash,
+                                in_progress_results,
+                            },
+                            progress: next.advance().await,
+                        }
+                    }));
+                }
+                (
+                    sync_service::StorageQueryProgress::Finished,
+                    MultiStageRequest::StateQueryStorageAtStage3 {
+                        block_hash,
+                        in_progress_results,
+                    },
+                ) => {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::state_queryStorageAt(vec![
+                                methods::StorageChangeSet {
+                                    block: methods::HashHexString(block_hash),
+                                    changes: in_progress_results,
+                                },
+                            ])
+                            .to_json_response(&request_id_json),
+                        )
+                        .await;
+                }
+                (
+                    sync_service::StorageQueryProgress::Progress {
+                        item:
+                            sync_service::StorageResultItem::Value {
+                                value: Some(value), ..
+                            },
+                        query: next,
+                        ..
+                    },
+                    MultiStageRequest::StateGetStorageStage3 {},
+                ) => {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::state_getStorage(methods::HexString(value))
+                                .to_json_response(&request_id_json),
+                        )
+                        .await;
+                }
+                (
+                    sync_service::StorageQueryProgress::Progress {
+                        item: sync_service::StorageResultItem::Value { value: None, .. },
+                        query: next,
+                        ..
+                    },
+                    MultiStageRequest::StateGetStorageStage3 {},
+                ) => {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_success_response(&request_id_json, "null"))
+                        .await;
+                }
+                (sync_service::StorageQueryProgress::Error(error), _) => {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id_json,
+                            parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        ))
+                        .await;
+                }
+                _ => unreachable!(),
+            },
+
             WakeUpReason::Event(Event::ChainHeadSubscriptionWithRuntimeReady {
                 subscription_id,
                 subscription,
@@ -1902,13 +2821,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 ); // TODO: indicate hash in subscription?
                 let _ = me
                     .responses_tx
-                    .send(methods::ServerToClient::chainHead_unstable_followEvent {
-                        subscription: Cow::Borrowed(&subscription_id),
-                        result: methods::FollowEvent::Initialized {
-                            finalized_block_hash,
-                            finalized_block_runtime: Some(todo!()),
-                        },
-                    })
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::Initialized {
+                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
+                                finalized_block_runtime: Some(todo!()),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
                     .await;
                 subscription_info.pinned_blocks_headers.insert(
                     finalized_block_hash,
@@ -1919,24 +2841,30 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header); // TODO: indicate hash in subscription?
                     let _ = me
                         .responses_tx
-                        .send(methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::NewBlock {
-                                block_hash: hash,
-                                parent_block_hash: (),
-                                new_runtime: (),
-                            },
-                        })
+                        .send(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: Cow::Borrowed(&subscription_id),
+                                result: methods::FollowEvent::NewBlock {
+                                    block_hash: methods::HashHexString(hash),
+                                    parent_block_hash: (),
+                                    new_runtime: (),
+                                },
+                            }
+                            .to_json_request_object_parameters(None),
+                        )
                         .await;
                     if block.is_new_best {
                         let _ = me
                             .responses_tx
-                            .send(methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: Cow::Borrowed(&subscription_id),
-                                result: methods::FollowEvent::BestBlockChanged {
-                                    best_block_hash: hash,
-                                },
-                            })
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(hash),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
                             .await;
                     }
                     subscription_info.pinned_blocks_headers.insert(
@@ -1946,7 +2874,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     // TODO: subscription_info.non_finalized_blocks
                 }
 
-                me.events.push(Box::pin({
+                me.background_tasks.push(Box::pin({
                     let new_blocks = subscription.new_blocks;
                     async move {
                         if let Some(notification) = new_blocks.next().await {
@@ -1956,9 +2884,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 stream: new_blocks,
                             }
                         } else {
-                            Event::ChainHeadSubscriptionWithRuntimeDeadSubcription {
-                                subscription_id,
-                            }
+                            Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
                         }
                     }
                 }));
@@ -1978,8 +2904,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // TODO: send initialized event
 
-                me.events.push(Box::pin({
-                    let new_blocks = subscription.new_blocks;
+                me.background_tasks.push(Box::pin({
+                    let mut new_blocks = Box::pin(subscription.new_blocks);
                     async move {
                         if let Some(notification) = new_blocks.next().await {
                             Event::ChainHeadSubscriptionWithoutRuntimeNotification {
@@ -1988,12 +2914,90 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 stream: new_blocks,
                             }
                         } else {
-                            Event::ChainHeadSubscriptionWithoutRuntimeDeadSubcription {
-                                subscription_id,
-                            }
+                            Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
                         }
                     }
                 }));
+            }
+
+            WakeUpReason::Event(Event::ChainHeadSubscriptionWithRuntimeNotification {
+                subscription_id,
+                notification,
+                stream,
+            }) => {
+                // It might be that the JSON-RPC client has unsubscribed.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    continue;
+                };
+
+                todo!();
+
+                me.background_tasks.push(Box::pin(async move {
+                    if let Some(notification) = stream.next().await {
+                        Event::ChainHeadSubscriptionWithRuntimeNotification {
+                            subscription_id,
+                            notification,
+                            stream,
+                        }
+                    } else {
+                        Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
+                    }
+                }))
+            }
+
+            WakeUpReason::Event(Event::ChainHeadSubscriptionWithoutRuntimeNotification {
+                subscription_id,
+                notification,
+                stream,
+            }) => {
+                // It might be that the JSON-RPC client has unsubscribed.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    continue;
+                };
+
+                todo!();
+
+                me.background_tasks.push(Box::pin(async move {
+                    if let Some(notification) = stream.next().await {
+                        Event::ChainHeadSubscriptionWithoutRuntimeNotification {
+                            subscription_id,
+                            notification,
+                            stream,
+                        }
+                    } else {
+                        Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
+                    }
+                }))
+            }
+
+            WakeUpReason::Event(Event::ChainHeadSubscriptionDeadSubcription {
+                subscription_id,
+            }) => {
+                // It might be that the JSON-RPC client has already unsubscribed.
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.remove(&subscription_id)
+                else {
+                    continue;
+                };
+
+                for (_, operation) in subscription_info.operations_in_progress {
+                    operation.interrupt.notify(usize::max_value());
+                }
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::Stop {},
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
             }
 
             WakeUpReason::SubscriptionNotification(
@@ -2015,31 +3019,78 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 best_block_hash,
                 pruned_blocks,
             }) => {
-                for subscription_in in &me.finalized_heads_subscriptions {
+                for subscription_id in &me.finalized_heads_subscriptions {
                     let _ = me
                         .responses_tx
-                        .send(methods::ServerToClient::chain_finalizedHead {
-                            subscription: Cow::Borrowed(subscription_id),
-                            result: todo!(),
-                        })
+                        .send(
+                            methods::ServerToClient::chain_finalizedHead {
+                                subscription: Cow::Borrowed(subscription_id),
+                                result: todo!(),
+                            }
+                            .to_json_request_object_parameters(None),
+                        )
+                        .await;
+                }
+            }
+
+            WakeUpReason::Event(Event::BlockInfoRetrieved {
+                block_hash,
+                result: Ok(result),
+            }) => {
+                me.block_state_root_hashes_numbers_cache
+                    .put(block_hash, result);
+
+                for (request_id, request) in me
+                    .block_state_root_hashes_numbers_pending
+                    .remove(&block_hash)
+                    .into_iter()
+                    .flat_map(|l| l)
+                {
+                    // Note that we push_front in order to guarantee that the information is
+                    // not removed from cache before the request is processed.
+                    me.multistage_requests_to_advance
+                        .push_front((request_id, request));
+                }
+            }
+
+            WakeUpReason::Event(Event::BlockInfoRetrieved {
+                block_hash,
+                result: Err(()),
+            }) => {
+                for (request_id, _) in me
+                    .block_state_root_hashes_numbers_pending
+                    .remove(&block_hash)
+                    .into_iter()
+                    .flat_map(|l| l)
+                {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id,
+                            parse::ErrorResponse::ServerError(
+                                -32800,
+                                "failed to retrieve block information from the network",
+                            ),
+                            None,
+                        ))
                         .await;
                 }
             }
 
             WakeUpReason::Event(Event::TransactionEvent {
-                suscription_id,
+                subscription_id,
                 event,
                 watcher,
             }) => {
                 let Some(transaction_watch) =
-                    me.transactions_subscriptions.get_me(&subscription_id)
+                    me.transactions_subscriptions.get_mut(&subscription_id)
                 else {
                     // JSON-RPC client has unsubscribed from this transaction and is no longer
                     // interested in events.
                     continue;
                 };
 
-                match (status_update, transaction_watch.ty) {
+                match (event, transaction_watch.ty) {
                     (
                         transactions_service::TransactionStatus::Broadcast(peers),
                         TransactionWatchTy::Legacy,
@@ -2048,7 +3099,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::author_extrinsicUpdate {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionStatus::Broadcast(
                                         peers.into_iter().map(|peer| peer.to_base58()).collect(),
                                     ),
@@ -2066,7 +3117,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Broadcasted {
                                         num_peers: u32::try_from(
                                             transaction_watch.num_broadcasted_peers,
@@ -2093,7 +3144,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Validated {},
                                 }
                                 .to_json_request_object_parameters(None),
@@ -2112,7 +3163,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::author_extrinsicUpdate {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionStatus::InBlock(
                                         methods::HashHexString(block_hash),
                                     ),
@@ -2128,10 +3179,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         TransactionWatchTy::Legacy,
                     ) => {
                         if let Some(block_hash) = transaction_watch.included_block.take() {
-                            subscription
-                                .send_notification(
+                            let _ = me
+                                .responses_tx
+                                .send(
                                     methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: (&subscription_id).into(),
+                                        subscription: Cow::Borrowed(&subscription_id),
                                         result: methods::TransactionStatus::Retracted(
                                             methods::HashHexString(block_hash),
                                         ),
@@ -2152,7 +3204,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result:
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: Some(methods::TransactionWatchEventBlock {
@@ -2175,7 +3227,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result:
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: None,
@@ -2220,7 +3272,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::author_extrinsicUpdate {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionStatus::Dropped,
                                 }
                                 .to_json_request_object_parameters(None),
@@ -2237,7 +3289,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Dropped {
                                         error: "gap in chain of blocks".into(),
                                         broadcasted: transaction_watch.num_broadcasted_peers != 0,
@@ -2257,7 +3309,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Dropped {
                                         error: "transactions pool full".into(),
                                         broadcasted: transaction_watch.num_broadcasted_peers != 0,
@@ -2277,7 +3329,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Invalid {
                                         error: error.to_string().into(),
                                     },
@@ -2296,7 +3348,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Error {
                                         error: error.to_string().into(),
                                     },
@@ -2315,7 +3367,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Error {
                                         error: "transactions service has crashed".into(),
                                     },
@@ -2335,7 +3387,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::author_extrinsicUpdate {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionStatus::Finalized(
                                         methods::HashHexString(block_hash),
                                     ),
@@ -2354,7 +3406,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                    subscription: (&subscription_id).into(),
+                                    subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Finalized {
                                         block: methods::TransactionWatchEventBlock {
                                             hash: methods::HashHexString(block_hash),
@@ -2369,10 +3421,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
 
                 // Add back an item to the events stream.
-                me.events.push(Box::pin(async move {
+                me.background_tasks.push(Box::pin(async move {
                     let status = watcher.next().await;
                     Event::TransactionEvent {
-                        suscription_id,
+                        subscription_id,
                         event: status,
                         watcher,
                     }
@@ -2381,7 +3433,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::Event(Event::ChainGetBlockResult {
                 request_id_json,
-                result,
+                mut result,
             }) => {
                 // Check whether the header and body are present and valid.
                 // TODO: try the request again with a different peerin case the response is invalid, instead of returning null
@@ -2389,7 +3441,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     if let (Some(header), Some(body)) = (&block.header, &block.body) {
                         if header::hash_from_scale_encoded_header(header) == hash {
                             if let Ok(decoded) =
-                                header::decode(header, self.sync_service.block_number_bytes())
+                                header::decode(header, me.sync_service.block_number_bytes())
                             {
                                 if header::extrinsics_root(body) != *decoded.extrinsics_root {
                                     result = Err(());
@@ -2408,380 +3460,56 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
                 }
 
-                // Return the response.
+                // Send the response.
                 if let Ok(block) = result {
-                    request.respond(methods::Response::chain_getBlock(methods::Block {
-                        extrinsics: block
-                            .body
-                            .unwrap()
-                            .into_iter()
-                            .map(methods::HexString)
-                            .collect(),
-                        header: methods::Header::from_scale_encoded_header(
-                            &block.header.unwrap(),
-                            self.sync_service.block_number_bytes(),
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::chain_getBlock(methods::Block {
+                                extrinsics: block
+                                    .body
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(methods::HexString)
+                                    .collect(),
+                                header: methods::Header::from_scale_encoded_header(
+                                    &block.header.unwrap(),
+                                    me.sync_service.block_number_bytes(),
+                                )
+                                .unwrap(),
+                                // There's no way to verify the correctness of the justifications, consequently
+                                // we always return an empty list.
+                                justifications: None,
+                            })
+                            .to_json_response(&request_id_json),
                         )
-                        .unwrap(),
-                        // There's no way to verify the correctness of the justifications, consequently
-                        // we always return an empty list.
-                        justifications: None,
-                    }))
+                        .await;
                 } else {
-                    request.respond_null()
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_success_response(&request_id_json, "null"))
+                        .await;
                 }
             }
         }
     }
 }
 
-impl<TPlat: PlatformRef> Background<TPlat> {
-    async fn storage_query(
-        &self,
-        keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        hash: &[u8; 32],
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let (state_trie_root_hash, block_number) = {
-            let (tx, rx) = oneshot::channel();
-            self.to_legacy
-                .lock()
-                .await
-                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
-                    block_hash: *hash,
-                    result_tx: tx,
-                })
-                .await
-                .unwrap();
-
-            match rx.await.unwrap() {
-                Ok(v) => v,
-                Err(err) => {
-                    return Err(StorageQueryError::FindStorageRootHashError(err));
-                }
-            }
-        };
-
-        // TODO: weird that keys is an iterator; revisit
-        let mut results = vec![None; keys.clone().count()];
-
-        let mut query = self
-            .sync_service
-            .clone()
-            .storage_query(
-                block_number,
-                *hash,
-                state_trie_root_hash,
-                keys.clone().map(|key| sync_service::StorageRequestItem {
-                    key: key.as_ref().to_vec(), // TODO: overhead
-                    ty: sync_service::StorageRequestItemTy::Value,
-                }),
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .advance()
-            .await;
-
-        loop {
-            match query {
-                sync_service::StorageQueryProgress::Progress {
-                    query: next,
-                    request_index,
-                    item: sync_service::StorageResultItem::Value { value, .. },
-                    ..
-                } => {
-                    results[request_index] = value.clone();
-                    query = next.advance().await;
-                }
-                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
-                sync_service::StorageQueryProgress::Error(error) => {
-                    return Err(StorageQueryError::StorageRetrieval(error))
-                }
-                sync_service::StorageQueryProgress::Finished => return Ok(results),
-            }
-        }
+fn convert_runtime_version(
+    runtime_spec: &smoldot::executor::CoreVersion,
+) -> methods::RuntimeVersion {
+    let runtime_spec = runtime_spec.decode();
+    methods::RuntimeVersion {
+        spec_name: runtime_spec.spec_name.into(),
+        impl_name: runtime_spec.impl_name.into(),
+        authoring_version: u64::from(runtime_spec.authoring_version),
+        spec_version: u64::from(runtime_spec.spec_version),
+        impl_version: u64::from(runtime_spec.impl_version),
+        transaction_version: runtime_spec.transaction_version.map(u64::from),
+        state_version: runtime_spec.state_version.map(u8::from).map(u64::from),
+        apis: runtime_spec
+            .apis
+            .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
+            .collect(),
     }
-
-    /// Obtain a pin of the runtime of the given block against the runtime service, plus the
-    /// block hash and number.
-    // TODO: return better error?
-    async fn pinned_runtime_and_block_info(
-        self: &Arc<Self>,
-        block_hash: &[u8; 32],
-    ) -> Result<(runtime_service::PinnedRuntime, [u8; 32], u64), RuntimeCallError> {
-        // Try to find the block in the cache of recent blocks. Most of the time, the call target
-        // should be in there.
-        if let Some((pinned_runtime, state_trie_root_hash, block_number)) = {
-            let (tx, rx) = oneshot::channel();
-            self.to_legacy
-                .lock()
-                .await
-                .send(legacy_state_sub::Message::RecentBlockPinnedRuntime {
-                    block_hash: *block_hash,
-                    result_tx: tx,
-                })
-                .await
-                .unwrap();
-            rx.await.unwrap()
-        } {
-            return Ok((pinned_runtime, state_trie_root_hash, block_number));
-        };
-
-        // Second situation: the block is not in the cache of recent blocks. This isn't great.
-        // The only solution is to download the runtime of the block in question from the network.
-
-        // TODO: considering caching the runtime code the same way as the state trie root hash
-
-        // In order to grab the runtime code and perform the call network request, we need
-        // to know the state trie root hash and the height of the block.
-        let (state_trie_root_hash, block_number) = {
-            let (tx, rx) = oneshot::channel();
-            self.to_legacy
-                .lock()
-                .await
-                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
-                    block_hash: *block_hash,
-                    result_tx: tx,
-                })
-                .await
-                .unwrap();
-
-            match rx.await.unwrap() {
-                Ok(v) => v,
-                Err(err) => {
-                    return Err(RuntimeCallError::FindStorageRootHashError(err));
-                }
-            }
-        };
-
-        // Download the runtime of this block. This takes a long time as the runtime is rather
-        // big (around 1MiB in general).
-        let (storage_code, storage_heap_pages, code_merkle_value, code_closest_ancestor_excluding) = {
-            let mut storage_code = None;
-            let mut storage_heap_pages = None;
-            let mut code_merkle_value = None;
-            let mut code_closest_ancestor_excluding = None;
-
-            let mut query = self
-                .sync_service
-                .clone()
-                .storage_query(
-                    block_number,
-                    *block_hash,
-                    state_trie_root_hash,
-                    [
-                        sync_service::StorageRequestItem {
-                            key: b":code".to_vec(),
-                            ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                        },
-                        sync_service::StorageRequestItem {
-                            key: b":code".to_vec(),
-                            ty: sync_service::StorageRequestItemTy::Value,
-                        },
-                        sync_service::StorageRequestItem {
-                            key: b":heappages".to_vec(),
-                            ty: sync_service::StorageRequestItemTy::Value,
-                        },
-                    ]
-                    .into_iter(),
-                    3,
-                    Duration::from_secs(20),
-                    NonZeroU32::new(1).unwrap(),
-                )
-                .advance()
-                .await;
-
-            loop {
-                match query {
-                    sync_service::StorageQueryProgress::Finished => {
-                        break (
-                            storage_code,
-                            storage_heap_pages,
-                            code_merkle_value,
-                            code_closest_ancestor_excluding,
-                        )
-                    }
-                    sync_service::StorageQueryProgress::Progress {
-                        request_index: 0,
-                        item:
-                            sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                closest_descendant_merkle_value,
-                                found_closest_ancestor_excluding,
-                                ..
-                            },
-                        query: next,
-                    } => {
-                        code_merkle_value = closest_descendant_merkle_value;
-                        code_closest_ancestor_excluding = found_closest_ancestor_excluding;
-                        query = next.advance().await;
-                    }
-                    sync_service::StorageQueryProgress::Progress {
-                        request_index: 1,
-                        item: sync_service::StorageResultItem::Value { value, .. },
-                        query: next,
-                    } => {
-                        storage_code = value;
-                        query = next.advance().await;
-                    }
-                    sync_service::StorageQueryProgress::Progress {
-                        request_index: 2,
-                        item: sync_service::StorageResultItem::Value { value, .. },
-                        query: next,
-                    } => {
-                        storage_heap_pages = value;
-                        query = next.advance().await;
-                    }
-                    sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
-                    sync_service::StorageQueryProgress::Error(error) => {
-                        return Err(RuntimeCallError::StorageQuery(error))
-                    }
-                }
-            }
-        };
-
-        // Give the code and heap pages to the runtime service. The runtime service will
-        // try to find any similar runtime it might have, and if not will compile it.
-        let pinned_runtime = self
-            .runtime_service
-            .compile_and_pin_runtime(
-                storage_code,
-                storage_heap_pages,
-                code_merkle_value,
-                code_closest_ancestor_excluding,
-            )
-            .await
-            .map_err(|err| match err {
-                runtime_service::CompileAndPinRuntimeError::Crash => {
-                    RuntimeCallError::Call(runtime_service::RuntimeCallError::Crash)
-                }
-            })?;
-
-        // TODO: consider keeping pinned runtimes in a cache instead
-        Ok((pinned_runtime, state_trie_root_hash, block_number))
-    }
-
-    /// Performs a runtime call to a random block.
-    async fn runtime_call(
-        self: &Arc<Self>,
-        block_hash: &[u8; 32],
-        runtime_api: String,
-        required_api_version: ops::RangeInclusive<u32>,
-        function_to_call: String,
-        call_parameters: Vec<u8>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<RuntimeCallResult, RuntimeCallError> {
-        let (return_value, api_version) = self
-            .runtime_call_inner(
-                block_hash,
-                Some((runtime_api, required_api_version)),
-                function_to_call,
-                call_parameters,
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await?;
-        Ok(RuntimeCallResult {
-            return_value,
-            api_version: api_version.unwrap(),
-        })
-    }
-
-    /// Performs a runtime call to a random block.
-    ///
-    /// Similar to [`Background::runtime_call`], except that the API version isn't checked.
-    async fn runtime_call_no_api_check(
-        self: &Arc<Self>,
-        block_hash: &[u8; 32],
-        function_to_call: String,
-        call_parameters: Vec<u8>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<Vec<u8>, RuntimeCallError> {
-        let (return_value, _api_version) = self
-            .runtime_call_inner(
-                block_hash,
-                None,
-                function_to_call,
-                call_parameters,
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await?;
-        debug_assert!(_api_version.is_none());
-        Ok(return_value)
-    }
-
-    /// Performs a runtime call to a random block.
-    async fn runtime_call_inner(
-        self: &Arc<Self>,
-        block_hash: &[u8; 32],
-        runtime_api_check: Option<(String, ops::RangeInclusive<u32>)>,
-        function_to_call: String,
-        parameters_vectored: Vec<u8>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
-        // This function contains two steps: obtaining the runtime of the block in question,
-        // then performing the actual call. The first step is the longest and most difficult.
-        let (pinned_runtime, block_state_trie_root_hash, block_number) =
-            self.pinned_runtime_and_block_info(block_hash).await?;
-
-        match self
-            .runtime_service
-            .runtime_call(
-                pinned_runtime,
-                *block_hash,
-                block_number,
-                block_state_trie_root_hash,
-                function_to_call,
-                runtime_api_check,
-                parameters_vectored,
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await
-        {
-            Ok(output) => Ok((output.output, output.api_version)),
-            Err(error) => {
-                return Err(RuntimeCallError::Call(error));
-            }
-        }
-    }
-}
-
-#[derive(Debug, derive_more::Display)]
-enum StorageQueryError {
-    /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
-    /// Error while retrieving the storage item from other nodes.
-    #[display(fmt = "{_0}")]
-    StorageRetrieval(sync_service::StorageQueryError),
-}
-
-// TODO: doc and properly derive Display
-#[derive(Debug, derive_more::Display, Clone)]
-enum RuntimeCallError {
-    /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
-    /// Error while downloading the runtime from the network.
-    StorageQuery(sync_service::StorageQueryError),
-    #[display(fmt = "{_0}")]
-    Call(runtime_service::RuntimeCallError),
-}
-
-#[derive(Debug)]
-struct RuntimeCallResult {
-    return_value: Vec<u8>,
-    api_version: u32,
 }

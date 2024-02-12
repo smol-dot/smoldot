@@ -47,7 +47,7 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
-pub use network_service::EncodedMerkleProof;
+pub use network_service::{EncodedMerkleProof, Role};
 
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
