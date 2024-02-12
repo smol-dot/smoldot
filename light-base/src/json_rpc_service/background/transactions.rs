@@ -27,51 +27,6 @@ use futures_lite::future;
 use smoldot::json_rpc::{methods, service};
 
 impl<TPlat: PlatformRef> Background<TPlat> {
-    /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
-    pub(super) async fn author_pending_extrinsics(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        // Because multiple different chains ("chain" in the context of the public API of smoldot)
-        // might share the same transactions service, it could be possible for chain A to submit
-        // a transaction and then for chain B to read it by calling `author_pendingExtrinsics`.
-        // This would make it possible for the API user of chain A to be able to communicate with
-        // the API user of chain B. While the implications of permitting this are unclear, it is
-        // not a bad idea to prevent this communication from happening. Consequently, we always
-        // return an empty list of pending extrinsics.
-        request.respond(methods::Response::author_pendingExtrinsics(Vec::new()));
-    }
-
-    /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
-    pub(super) async fn author_submit_extrinsic(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        let methods::MethodCall::author_submitExtrinsic { transaction } = request.request() else {
-            unreachable!()
-        };
-
-        // Note that this function is misnamed. It should really be called
-        // "author_submitTransaction".
-
-        // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
-        // is unclear whether it has to actually be the hash of the transaction or if it
-        // could be any opaque value. Additionally, there isn't any other JSON-RPC method
-        // that accepts as parameter the value returned here. When in doubt, we return
-        // the hash as well.
-
-        let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
-        hash_context.update(&transaction.0);
-        let mut transaction_hash: [u8; 32] = Default::default();
-        transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
-        self.transactions_service
-            .submit_transaction(transaction.0)
-            .await;
-        request.respond(methods::Response::author_submitExtrinsic(
-            methods::HashHexString(transaction_hash),
-        ));
-    }
-
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`] (if `is_legacy`
     /// is `true`) or to [`methods::MethodCall::transactionWatch_unstable_submitAndWatch`] (if
     /// `is_legacy` is `false`).

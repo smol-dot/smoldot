@@ -40,7 +40,7 @@ use core::{
 };
 use futures_channel::oneshot;
 use smoldot::{
-    json_rpc::{self, methods, service},
+    json_rpc::{self, methods, parse, service},
     libp2p::{multiaddr, PeerId},
 };
 
@@ -87,6 +87,28 @@ struct Background<TPlat: PlatformRef> {
     /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
     /// a dedicated task.
     to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
+
+    /// Stream of notifications coming from the runtime service. Used for legacy JSON-RPC API
+    /// subscriptions. `None` if not subscribed yet.
+    runtime_service_subscription: Option<(
+        runtime_service::SubscriptionId,
+        Pin<Box<dyn Stream<Item = runtime_service::Notification> + Send>>,
+    )>,
+
+    /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
+    // TODO: shrink_to_fit?
+    all_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    /// List of all active `chain_subscribeNewHeads` subscriptions, indexed by the subscription ID.
+    // TODO: shrink_to_fit?
+    new_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    /// List of all active `chain_subscribeFinalizedHeads` subscriptions, indexed by the
+    /// subscription ID.
+    finalized_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
+    /// subscription ID.
+    runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
 
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
@@ -150,6 +172,23 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         to_legacy: Mutex::new(to_legacy_tx),
+        runtime_service_subscription: None,
+        all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        finalized_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        runtime_version_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
         responses_tx: async_channel::bounded(64).0, // TODO: /!\ do properly
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
@@ -177,497 +216,313 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
         match wake_up_reason {
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
-                let Ok((request_id, request_parsed)) =
+                let Ok((request_id_json, request_parsed)) =
                     methods::parse_jsonrpc_client_to_server(&request_json)
                 else {
                     todo!()
                 };
 
                 match request_parsed {
+                    methods::MethodCall::author_pendingExtrinsics {} => {
+                        // Because multiple different chains ("chain" in the context of the
+                        // public API of smoldot) might share the same transactions service, it
+                        // could be possible for chain A to submit a transaction and then for
+                        // chain B to read it by calling `author_pendingExtrinsics`. This would
+                        // make it possible for the API user of chain A to be able to communicate
+                        // with the API user of chain B. While the implications of permitting
+                        // this are unclear, it is not a bad idea to prevent this communication
+                        // from happening. Consequently, we always return an empty list of
+                        // pending extrinsics.
+                        // TODO: could store the list of pending transactions in the JSON-RPC service instead
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_pendingExtrinsics(Vec::new())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::author_submitExtrinsic { transaction } => {
+                        // Note that this function is misnamed. It should really be called
+                        // "author_submitTransaction".
+
+                        // In Substrate, `author_submitExtrinsic` returns the hash of the
+                        // transaction. It is unclear whether it has to actually be the hash of
+                        // the transaction or if it could be any opaque value. Additionally, there
+                        // isn't any other JSON-RPC method that accepts as parameter the value
+                        // returned here. When in doubt, we return the hash as well.
+
+                        let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
+                        hash_context.update(&transaction.0);
+                        let mut transaction_hash: [u8; 32] = Default::default();
+                        transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
+                        me.transactions_service
+                            .submit_transaction(transaction.0)
+                            .await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_submitExtrinsic(methods::HashHexString(
+                                    transaction_hash,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+                    methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
+                        self.submit_and_watch_transaction(request).await
+                    }
+
+                    methods::MethodCall::chain_getBlock { .. } => {
+                        self.chain_get_block(request).await;
+                    }
+                    methods::MethodCall::chain_getBlockHash { .. } => {
+                        self.chain_get_block_hash(request).await;
+                    }
+                    methods::MethodCall::chain_getFinalizedHead {} => {
+                        self.chain_get_finalized_head(request).await;
+                    }
+                    methods::MethodCall::chain_getHeader { .. } => {
+                        self.chain_get_header(request).await;
+                    }
+
+                    methods::MethodCall::chain_subscribeAllHeads {} => {
+                        let subscription_id: String = todo!();
+
+                        // TODO: check max subscriptions
+
+                        let _was_inserted = me.all_heads_subscriptions.insert(subscription_id);
+                        debug_assert!(_was_inserted);
+
+                        todo!() // TODO: send current finalized block
+                    }
+
+                    methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                        let subscription_id: String = todo!();
+
+                        // TODO: check max subscriptions
+
+                        let _was_inserted =
+                            me.finalized_heads_subscriptions.insert(subscription_id);
+                        debug_assert!(_was_inserted);
+
+                        todo!() // TODO: send current finalized block
+                    }
+
+                    methods::MethodCall::chain_subscribeNewHeads {} => {
+                        let subscription_id: String = todo!();
+
+                        // TODO: check max subscriptions
+
+                        let _was_inserted = me.new_heads_subscriptions.insert(subscription_id);
+                        debug_assert!(_was_inserted);
+
+                        todo!() // TODO: send current finalized block
+                    }
+
+                    methods::MethodCall::state_subscribeRuntimeVersion {}
+                    | methods::MethodCall::state_subscribeStorage { .. } => todo!(),
+
+                    methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
+                        let exists = me.all_heads_subscriptions.remove(&subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_unsubscribeAllHeads(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
+                        let exists = me.finalized_heads_subscriptions.remove(&subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_unsubscribeFinalizedHeads(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
+                        let exists = me.new_heads_subscriptions.remove(&subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_unsubscribeNewHeads(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::payment_queryInfo { .. } => {
+                        self.payment_query_info(request).await;
+                    }
+                    methods::MethodCall::rpc_methods {} => {
+                        self.rpc_methods(request).await;
+                    }
+                    methods::MethodCall::state_call { .. } => {
+                        self.state_call(request).await;
+                    }
+                    methods::MethodCall::state_getKeys { .. } => {
+                        self.state_get_keys(request).await;
+                    }
+                    methods::MethodCall::state_getKeysPaged { .. } => {
+                        self.state_get_keys_paged(request).await;
+                    }
+                    methods::MethodCall::state_queryStorageAt { .. } => {
+                        self.state_query_storage_at(request).await;
+                    }
+                    methods::MethodCall::state_getMetadata { .. } => {
+                        self.state_get_metadata(request).await;
+                    }
+                    methods::MethodCall::state_getStorage { .. } => {
+                        self.state_get_storage(request).await;
+                    }
+                    methods::MethodCall::state_getRuntimeVersion { .. } => {
+                        self.state_get_runtime_version(request).await;
+                    }
+                    methods::MethodCall::system_accountNextIndex { .. } => {
+                        self.account_next_index(request).await;
+                    }
+                    methods::MethodCall::system_chain {} => {
+                        self.system_chain(request).await;
+                    }
+                    methods::MethodCall::system_chainType {} => {
+                        self.system_chain_type(request).await;
+                    }
+                    methods::MethodCall::system_health {} => {
+                        self.system_health(request).await;
+                    }
+                    methods::MethodCall::system_localListenAddresses {} => {
+                        self.system_local_listen_addresses(request).await;
+                    }
+                    methods::MethodCall::system_name {} => {
+                        self.system_name(request).await;
+                    }
+                    methods::MethodCall::system_nodeRoles {} => {
+                        self.system_node_roles(request).await;
+                    }
+                    methods::MethodCall::system_peers {} => {
+                        self.system_peers(request).await;
+                    }
+                    methods::MethodCall::system_properties {} => {
+                        self.system_properties(request).await;
+                    }
+                    methods::MethodCall::system_version {} => {
+                        self.system_version(request).await;
+                    }
+
+                    methods::MethodCall::chainHead_unstable_body { .. } => {
+                        self.chain_head_unstable_body(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_call { .. } => {
+                        self.chain_head_call(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_continue { .. } => {
+                        self.chain_head_continue(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_storage { .. } => {
+                        self.chain_head_storage(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
+                        self.chain_head_stop_operation(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_follow { .. } => {
+                        self.chain_head_follow(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_header { .. } => {
+                        self.chain_head_unstable_header(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                        self.chain_head_unstable_unpin(request).await;
+                    }
+                    methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                        self.chain_head_unstable_finalized_database(request).await;
+                    }
+                    methods::MethodCall::chainSpec_v1_chainName {} => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainSpec_v1_chainName((&me.chain_name).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::chainSpec_v1_genesisHash {} => {
+                        self.chain_spec_unstable_genesis_hash(request).await;
+                    }
+                    methods::MethodCall::chainSpec_v1_properties {} => {
+                        self.chain_spec_unstable_properties(request).await;
+                    }
+                    methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
+                        self.sudo_unstable_p2p_discover(request).await;
+                    }
+                    methods::MethodCall::sudo_unstable_version {} => {
+                        self.sudo_unstable_version(request).await;
+                    }
+
+                    methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
+                        self.submit_and_watch_transaction(request).await
+                    }
+
+                    _method @ (methods::MethodCall::account_nextIndex { .. }
+                    | methods::MethodCall::author_hasKey { .. }
+                    | methods::MethodCall::author_hasSessionKeys { .. }
+                    | methods::MethodCall::author_insertKey { .. }
+                    | methods::MethodCall::author_removeExtrinsic { .. }
+                    | methods::MethodCall::author_rotateKeys { .. }
+                    | methods::MethodCall::babe_epochAuthorship { .. }
+                    | methods::MethodCall::childstate_getKeys { .. }
+                    | methods::MethodCall::childstate_getStorage { .. }
+                    | methods::MethodCall::childstate_getStorageHash { .. }
+                    | methods::MethodCall::childstate_getStorageSize { .. }
+                    | methods::MethodCall::grandpa_roundState { .. }
+                    | methods::MethodCall::offchain_localStorageGet { .. }
+                    | methods::MethodCall::offchain_localStorageSet { .. }
+                    | methods::MethodCall::state_getPairs { .. }
+                    | methods::MethodCall::state_getReadProof { .. }
+                    | methods::MethodCall::state_getStorageHash { .. }
+                    | methods::MethodCall::state_getStorageSize { .. }
+                    | methods::MethodCall::state_queryStorage { .. }
+                    | methods::MethodCall::system_addReservedPeer { .. }
+                    | methods::MethodCall::system_dryRun { .. }
+                    | methods::MethodCall::system_localPeerId { .. }
+                    | methods::MethodCall::system_networkState { .. }
+                    | methods::MethodCall::system_removeReservedPeer { .. })
+                    | methods::MethodCall::sudo_network_unstable_watch { .. }
+                    | methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                        // TODO: implement the ones that make sense to implement ^
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("JSON-RPC call not supported yet: {:?}", _method)
+                        );
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                request_id_json,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Not implemented in smoldot yet",
+                                ),
+                                None,
+                            ))
+                            .await;
+                    }
+
                     _ => todo!(),
                 }
-            }
-        }
-    }
-
-    loop {
-        // Yield at every loop in order to provide better tasks granularity.
-        futures_lite::future::yield_now().await;
-
-        match requests_processing_task.run_until_event().await {
-            service::Event::HandleRequest {
-                task,
-                request_process,
-            } => {
-                requests_processing_task = task;
-                me.handle_request(request_process).await;
-            }
-            service::Event::HandleSubscriptionStart {
-                task,
-                subscription_start,
-            } => {
-                requests_processing_task = task;
-                match subscription_start.request() {
-                    methods::MethodCall::chain_subscribeAllHeads {}
-                    | methods::MethodCall::chain_subscribeNewHeads {}
-                    | methods::MethodCall::chain_subscribeFinalizedHeads {}
-                    | methods::MethodCall::state_subscribeRuntimeVersion {}
-                    | methods::MethodCall::state_subscribeStorage { .. } => {
-                        me.to_legacy
-                            .lock()
-                            .await
-                            .send(legacy_state_sub::Message::SubscriptionStart(
-                                subscription_start,
-                            ))
-                            .await
-                            .unwrap();
-                    }
-                    _ => {
-                        me.handle_subscription_start(subscription_start).await;
-                    }
-                }
-            }
-            service::Event::SubscriptionDestroyed {
-                task,
-                subscription_id,
-            } => {
-                requests_processing_task = task;
-                let _ = me
-                    .chain_head_follow_tasks
-                    .lock()
-                    .await
-                    .remove(&subscription_id);
-                me.to_legacy
-                    .lock()
-                    .await
-                    .send(legacy_state_sub::Message::SubscriptionDestroyed { subscription_id })
-                    .await
-                    .unwrap();
-            }
-            service::Event::SerializedRequestsIoClosed => {
-                break;
             }
         }
     }
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
-    /// Pulls one request from the inner state machine, and processes it.
-    async fn handle_request(self: &Arc<Self>, request: service::RequestProcess) {
-        // Print a warning for legacy JSON-RPC functions.
-        match request.request() {
-            methods::MethodCall::account_nextIndex { .. }
-            | methods::MethodCall::author_hasKey { .. }
-            | methods::MethodCall::author_hasSessionKeys { .. }
-            | methods::MethodCall::author_insertKey { .. }
-            | methods::MethodCall::author_pendingExtrinsics { .. }
-            | methods::MethodCall::author_removeExtrinsic { .. }
-            | methods::MethodCall::author_rotateKeys { .. }
-            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-            | methods::MethodCall::author_submitExtrinsic { .. }
-            | methods::MethodCall::author_unwatchExtrinsic { .. }
-            | methods::MethodCall::babe_epochAuthorship { .. }
-            | methods::MethodCall::chain_getBlock { .. }
-            | methods::MethodCall::chain_getBlockHash { .. }
-            | methods::MethodCall::chain_getFinalizedHead { .. }
-            | methods::MethodCall::chain_getHeader { .. }
-            | methods::MethodCall::chain_subscribeAllHeads { .. }
-            | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
-            | methods::MethodCall::chain_subscribeNewHeads { .. }
-            | methods::MethodCall::chain_unsubscribeAllHeads { .. }
-            | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
-            | methods::MethodCall::chain_unsubscribeNewHeads { .. }
-            | methods::MethodCall::childstate_getKeys { .. }
-            | methods::MethodCall::childstate_getStorage { .. }
-            | methods::MethodCall::childstate_getStorageHash { .. }
-            | methods::MethodCall::childstate_getStorageSize { .. }
-            | methods::MethodCall::grandpa_roundState { .. }
-            | methods::MethodCall::offchain_localStorageGet { .. }
-            | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::payment_queryInfo { .. }
-            | methods::MethodCall::state_call { .. }
-            | methods::MethodCall::state_getKeys { .. }
-            | methods::MethodCall::state_getKeysPaged { .. }
-            | methods::MethodCall::state_getMetadata { .. }
-            | methods::MethodCall::state_getPairs { .. }
-            | methods::MethodCall::state_getReadProof { .. }
-            | methods::MethodCall::state_getRuntimeVersion { .. }
-            | methods::MethodCall::state_getStorage { .. }
-            | methods::MethodCall::state_getStorageHash { .. }
-            | methods::MethodCall::state_getStorageSize { .. }
-            | methods::MethodCall::state_queryStorage { .. }
-            | methods::MethodCall::state_queryStorageAt { .. }
-            | methods::MethodCall::state_subscribeRuntimeVersion { .. }
-            | methods::MethodCall::state_subscribeStorage { .. }
-            | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
-            | methods::MethodCall::state_unsubscribeStorage { .. }
-            | methods::MethodCall::system_accountNextIndex { .. }
-            | methods::MethodCall::system_addReservedPeer { .. }
-            | methods::MethodCall::system_chain { .. }
-            | methods::MethodCall::system_chainType { .. }
-            | methods::MethodCall::system_dryRun { .. }
-            | methods::MethodCall::system_health { .. }
-            | methods::MethodCall::system_localListenAddresses { .. }
-            | methods::MethodCall::system_localPeerId { .. }
-            | methods::MethodCall::system_name { .. }
-            | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_peers { .. }
-            | methods::MethodCall::system_properties { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }
-            | methods::MethodCall::system_version { .. } => {
-                if !self
-                    .printed_legacy_json_rpc_warning
-                    .swap(true, atomic::Ordering::Relaxed)
-                {
-                    log!(
-                        &self.platform,
-                        Warn,
-                        &self.log_target,
-                        format!(
-                            "The JSON-RPC client has just called a JSON-RPC function from \
-                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
-                            loose semantics and cannot be properly implemented on a light \
-                            client. You are encouraged to use the new JSON-RPC API \
-                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                            legacy JSON-RPC API functions will be deprecated and removed in the \
-                            distant future.",
-                            request.request().name()
-                        )
-                    )
-                }
-            }
-            methods::MethodCall::chainHead_unstable_body { .. }
-            | methods::MethodCall::chainHead_unstable_call { .. }
-            | methods::MethodCall::chainHead_unstable_continue { .. }
-            | methods::MethodCall::chainHead_unstable_follow { .. }
-            | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
-            | methods::MethodCall::chainHead_unstable_storage { .. }
-            | methods::MethodCall::chainHead_unstable_unfollow { .. }
-            | methods::MethodCall::chainHead_unstable_unpin { .. }
-            | methods::MethodCall::chainSpec_v1_chainName { .. }
-            | methods::MethodCall::chainSpec_v1_genesisHash { .. }
-            | methods::MethodCall::chainSpec_v1_properties { .. }
-            | methods::MethodCall::rpc_methods { .. }
-            | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
-            | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
-            | methods::MethodCall::sudo_network_unstable_watch { .. }
-            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
-        }
-
-        // Each call is handled in a separate method.
-        match request.request() {
-            methods::MethodCall::author_pendingExtrinsics {} => {
-                self.author_pending_extrinsics(request).await;
-            }
-            methods::MethodCall::author_submitExtrinsic { .. } => {
-                self.author_submit_extrinsic(request).await;
-            }
-            methods::MethodCall::chain_getBlock { .. } => {
-                self.chain_get_block(request).await;
-            }
-            methods::MethodCall::chain_getBlockHash { .. } => {
-                self.chain_get_block_hash(request).await;
-            }
-            methods::MethodCall::chain_getFinalizedHead {} => {
-                self.chain_get_finalized_head(request).await;
-            }
-            methods::MethodCall::chain_getHeader { .. } => {
-                self.chain_get_header(request).await;
-            }
-            methods::MethodCall::payment_queryInfo { .. } => {
-                self.payment_query_info(request).await;
-            }
-            methods::MethodCall::rpc_methods {} => {
-                self.rpc_methods(request).await;
-            }
-            methods::MethodCall::state_call { .. } => {
-                self.state_call(request).await;
-            }
-            methods::MethodCall::state_getKeys { .. } => {
-                self.state_get_keys(request).await;
-            }
-            methods::MethodCall::state_getKeysPaged { .. } => {
-                self.state_get_keys_paged(request).await;
-            }
-            methods::MethodCall::state_queryStorageAt { .. } => {
-                self.state_query_storage_at(request).await;
-            }
-            methods::MethodCall::state_getMetadata { .. } => {
-                self.state_get_metadata(request).await;
-            }
-            methods::MethodCall::state_getStorage { .. } => {
-                self.state_get_storage(request).await;
-            }
-            methods::MethodCall::state_getRuntimeVersion { .. } => {
-                self.state_get_runtime_version(request).await;
-            }
-            methods::MethodCall::system_accountNextIndex { .. } => {
-                self.account_next_index(request).await;
-            }
-            methods::MethodCall::system_chain {} => {
-                self.system_chain(request).await;
-            }
-            methods::MethodCall::system_chainType {} => {
-                self.system_chain_type(request).await;
-            }
-            methods::MethodCall::system_health {} => {
-                self.system_health(request).await;
-            }
-            methods::MethodCall::system_localListenAddresses {} => {
-                self.system_local_listen_addresses(request).await;
-            }
-            methods::MethodCall::system_name {} => {
-                self.system_name(request).await;
-            }
-            methods::MethodCall::system_nodeRoles {} => {
-                self.system_node_roles(request).await;
-            }
-            methods::MethodCall::system_peers {} => {
-                self.system_peers(request).await;
-            }
-            methods::MethodCall::system_properties {} => {
-                self.system_properties(request).await;
-            }
-            methods::MethodCall::system_version {} => {
-                self.system_version(request).await;
-            }
-
-            methods::MethodCall::chainHead_unstable_body { .. } => {
-                self.chain_head_unstable_body(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_call { .. } => {
-                self.chain_head_call(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_continue { .. } => {
-                self.chain_head_continue(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_storage { .. } => {
-                self.chain_head_storage(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
-                self.chain_head_stop_operation(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_header { .. } => {
-                self.chain_head_unstable_header(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_unpin { .. } => {
-                self.chain_head_unstable_unpin(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
-                self.chain_head_unstable_finalized_database(request).await;
-            }
-            methods::MethodCall::chainSpec_v1_chainName {} => {
-                self.chain_spec_unstable_chain_name(request).await;
-            }
-            methods::MethodCall::chainSpec_v1_genesisHash {} => {
-                self.chain_spec_unstable_genesis_hash(request).await;
-            }
-            methods::MethodCall::chainSpec_v1_properties {} => {
-                self.chain_spec_unstable_properties(request).await;
-            }
-            methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
-                self.sudo_unstable_p2p_discover(request).await;
-            }
-            methods::MethodCall::sudo_unstable_version {} => {
-                self.sudo_unstable_version(request).await;
-            }
-
-            _method @ (methods::MethodCall::account_nextIndex { .. }
-            | methods::MethodCall::author_hasKey { .. }
-            | methods::MethodCall::author_hasSessionKeys { .. }
-            | methods::MethodCall::author_insertKey { .. }
-            | methods::MethodCall::author_removeExtrinsic { .. }
-            | methods::MethodCall::author_rotateKeys { .. }
-            | methods::MethodCall::babe_epochAuthorship { .. }
-            | methods::MethodCall::childstate_getKeys { .. }
-            | methods::MethodCall::childstate_getStorage { .. }
-            | methods::MethodCall::childstate_getStorageHash { .. }
-            | methods::MethodCall::childstate_getStorageSize { .. }
-            | methods::MethodCall::grandpa_roundState { .. }
-            | methods::MethodCall::offchain_localStorageGet { .. }
-            | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_getPairs { .. }
-            | methods::MethodCall::state_getReadProof { .. }
-            | methods::MethodCall::state_getStorageHash { .. }
-            | methods::MethodCall::state_getStorageSize { .. }
-            | methods::MethodCall::state_queryStorage { .. }
-            | methods::MethodCall::system_addReservedPeer { .. }
-            | methods::MethodCall::system_dryRun { .. }
-            | methods::MethodCall::system_localPeerId { .. }
-            | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }) => {
-                // TODO: implement the ones that make sense to implement ^
-                log!(
-                    &self.platform,
-                    Warn,
-                    &self.log_target,
-                    format!("JSON-RPC call not supported yet: {:?}", _method)
-                );
-                request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                    -32000,
-                    "Not implemented in smoldot yet",
-                ));
-            }
-
-            _ => unreachable!(),
-        }
-    }
-
-    /// Pulls one request from the inner state machine, and processes it.
-    async fn handle_subscription_start(
-        self: &Arc<Self>,
-        request: service::SubscriptionStartProcess,
-    ) {
-        // TODO: restore some form of logging
-
-        // Print a warning for legacy JSON-RPC functions.
-        match request.request() {
-            methods::MethodCall::account_nextIndex { .. }
-            | methods::MethodCall::author_hasKey { .. }
-            | methods::MethodCall::author_hasSessionKeys { .. }
-            | methods::MethodCall::author_insertKey { .. }
-            | methods::MethodCall::author_pendingExtrinsics { .. }
-            | methods::MethodCall::author_removeExtrinsic { .. }
-            | methods::MethodCall::author_rotateKeys { .. }
-            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-            | methods::MethodCall::author_submitExtrinsic { .. }
-            | methods::MethodCall::author_unwatchExtrinsic { .. }
-            | methods::MethodCall::babe_epochAuthorship { .. }
-            | methods::MethodCall::chain_getBlock { .. }
-            | methods::MethodCall::chain_getBlockHash { .. }
-            | methods::MethodCall::chain_getFinalizedHead { .. }
-            | methods::MethodCall::chain_getHeader { .. }
-            | methods::MethodCall::chain_subscribeAllHeads { .. }
-            | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
-            | methods::MethodCall::chain_subscribeNewHeads { .. }
-            | methods::MethodCall::chain_unsubscribeAllHeads { .. }
-            | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
-            | methods::MethodCall::chain_unsubscribeNewHeads { .. }
-            | methods::MethodCall::childstate_getKeys { .. }
-            | methods::MethodCall::childstate_getStorage { .. }
-            | methods::MethodCall::childstate_getStorageHash { .. }
-            | methods::MethodCall::childstate_getStorageSize { .. }
-            | methods::MethodCall::grandpa_roundState { .. }
-            | methods::MethodCall::offchain_localStorageGet { .. }
-            | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::payment_queryInfo { .. }
-            | methods::MethodCall::state_call { .. }
-            | methods::MethodCall::state_getKeys { .. }
-            | methods::MethodCall::state_getKeysPaged { .. }
-            | methods::MethodCall::state_getMetadata { .. }
-            | methods::MethodCall::state_getPairs { .. }
-            | methods::MethodCall::state_getReadProof { .. }
-            | methods::MethodCall::state_getRuntimeVersion { .. }
-            | methods::MethodCall::state_getStorage { .. }
-            | methods::MethodCall::state_getStorageHash { .. }
-            | methods::MethodCall::state_getStorageSize { .. }
-            | methods::MethodCall::state_queryStorage { .. }
-            | methods::MethodCall::state_queryStorageAt { .. }
-            | methods::MethodCall::state_subscribeRuntimeVersion { .. }
-            | methods::MethodCall::state_subscribeStorage { .. }
-            | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
-            | methods::MethodCall::state_unsubscribeStorage { .. }
-            | methods::MethodCall::system_accountNextIndex { .. }
-            | methods::MethodCall::system_addReservedPeer { .. }
-            | methods::MethodCall::system_chain { .. }
-            | methods::MethodCall::system_chainType { .. }
-            | methods::MethodCall::system_dryRun { .. }
-            | methods::MethodCall::system_health { .. }
-            | methods::MethodCall::system_localListenAddresses { .. }
-            | methods::MethodCall::system_localPeerId { .. }
-            | methods::MethodCall::system_name { .. }
-            | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_peers { .. }
-            | methods::MethodCall::system_properties { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }
-            | methods::MethodCall::system_version { .. } => {
-                if !self
-                    .printed_legacy_json_rpc_warning
-                    .swap(true, atomic::Ordering::Relaxed)
-                {
-                    log!(
-                        &self.platform,
-                        Warn,
-                        &self.log_target,
-                        format!(
-                            "The JSON-RPC client has just called a JSON-RPC function from \
-                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
-                            loose semantics and cannot be properly implemented on a light \
-                            client. You are encouraged to use the new JSON-RPC API \
-                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                            legacy JSON-RPC API functions will be deprecated and removed in the \
-                            distant future.",
-                            request.request().name()
-                        )
-                    )
-                }
-            }
-            methods::MethodCall::chainHead_unstable_body { .. }
-            | methods::MethodCall::chainHead_unstable_call { .. }
-            | methods::MethodCall::chainHead_unstable_continue { .. }
-            | methods::MethodCall::chainHead_unstable_follow { .. }
-            | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
-            | methods::MethodCall::chainHead_unstable_storage { .. }
-            | methods::MethodCall::chainHead_unstable_unfollow { .. }
-            | methods::MethodCall::chainHead_unstable_unpin { .. }
-            | methods::MethodCall::chainSpec_v1_chainName { .. }
-            | methods::MethodCall::chainSpec_v1_genesisHash { .. }
-            | methods::MethodCall::chainSpec_v1_properties { .. }
-            | methods::MethodCall::rpc_methods { .. }
-            | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
-            | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
-            | methods::MethodCall::sudo_network_unstable_watch { .. }
-            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
-        }
-
-        // Each call is handled in a separate method.
-        match request.request() {
-            methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
-                self.submit_and_watch_transaction(request).await
-            }
-            methods::MethodCall::chain_subscribeAllHeads {}
-            | methods::MethodCall::chain_subscribeFinalizedHeads {}
-            | methods::MethodCall::chain_subscribeNewHeads {}
-            | methods::MethodCall::state_subscribeRuntimeVersion {}
-            | methods::MethodCall::state_subscribeStorage { .. } => {
-                unreachable!()
-            }
-
-            methods::MethodCall::chainHead_unstable_follow { .. } => {
-                self.chain_head_follow(request).await;
-            }
-            methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
-                self.submit_and_watch_transaction(request).await
-            }
-
-            _method @ methods::MethodCall::sudo_network_unstable_watch { .. } => {
-                // TODO: implement the ones that make sense to implement ^
-                log!(
-                    &self.platform,
-                    Warn,
-                    &self.log_target,
-                    format!("JSON-RPC call not supported yet: {:?}", _method)
-                );
-                request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                    -32000,
-                    "Not implemented in smoldot yet",
-                ));
-            }
-
-            _ => unreachable!(),
-        }
-    }
-
     /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
     async fn sudo_unstable_p2p_discover(self: &Arc<Self>, request: service::RequestProcess) {
         let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request() else {
