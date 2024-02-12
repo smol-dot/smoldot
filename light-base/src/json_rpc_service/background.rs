@@ -50,10 +50,8 @@ use smoldot::{
 };
 
 mod chain_head;
-mod getters;
 mod legacy_state_sub;
 mod state_chain;
-mod transactions;
 
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
