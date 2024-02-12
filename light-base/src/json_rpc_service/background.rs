@@ -282,13 +282,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
         futures_lite::future::yield_now().await;
 
         enum WakeUpReason {
+            ForegroundDead,
             IncomingJsonRpcRequest(String),
             Event(Event),
+            SubscriptionNotification(runtime_service::Notification),
         }
 
         let wake_up_reason: WakeUpReason = { todo!() };
 
         match wake_up_reason {
+            WakeUpReason::ForegroundDead => {
+                // Service foreground has been destroyed. Stop the background task.
+                return;
+            }
+
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
                 let Ok((request_id_json, request_parsed)) =
                     methods::parse_jsonrpc_client_to_server(&request_json)
@@ -1682,21 +1689,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             )
                                             .await;
                                     }
-                                    Err(_) => request.fail_with_attached_json(
-                                        json_rpc::parse::ErrorResponse::InvalidParams,
-                                        &serde_json::to_string("multiaddr doesn't end with /p2p")
-                                            .unwrap(),
-                                    ),
+                                    Err(_) => {
+                                        let _ = me
+                                            .responses_tx
+                                            .send(parse::build_error_response(request_id_json, parse::ErrorResponse::InvalidParams, Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap_or_else(|| unreachable!()))
+                                            .unwrap()))
+                                            .await;
+                                    }
                                 }
                             }
-                            Ok(_) => request.fail_with_attached_json(
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
-                            ),
-                            Err(err) => request.fail_with_attached_json(
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                &serde_json::to_string(&err.to_string()).unwrap(),
-                            ),
+                            Ok(_) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(request_id_json, parse::ErrorResponse::InvalidParams, Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap_or_else(|| unreachable!()))
+                                    .unwrap()))
+                                    .await;
+                            },
+                            Err(err) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(request_id_json, parse::ErrorResponse::InvalidParams, Some(&serde_json::to_string(&err.to_string()).unwrap_or_else(|| unreachable!()))
+                                    .unwrap()))
+                                    .await;
+                            },
                         }
                     }
 
@@ -1816,6 +1831,23 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     _ => todo!(),
+                }
+            }
+
+            WakeUpReason::SubscriptionNotification(runtime_service::Notification::BestBlockChanged { hash }) => {
+                // TODO: notify subscriptions
+                // TODO: start storage requests
+            }
+
+            WakeUpReason::SubscriptionNotification(runtime_service::Notification::Block(block_notification)) => {
+                // TODO: notify subscriptions
+                // TODO: start storage requests
+            }
+
+            WakeUpReason::SubscriptionNotification(runtime_service::Notification::Finalized { hash, best_block_hash, pruned_blocks }) => {
+                for subscription_in in &me.finalized_heads_subscriptions {
+                    let _ = me.responses_tx
+                        .send(methods::ServerToClient::chain_finalizedHead { subscription: Cow::Borrowed(subscription_id), result: todo!() }).await;
                 }
             }
 
