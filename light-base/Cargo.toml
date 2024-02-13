@@ -51,4 +51,4 @@ std = ["dep:parking_lot", "dep:log", "dep:smol", "rand/std", "rand/std_rng", "sm
 wasmtime = ["smoldot/wasmtime"]
 
 [dev-dependencies]
-env_logger = "0.11.0"
+env_logger = "0.11.2"
