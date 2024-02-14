@@ -40,7 +40,7 @@ use core::{
 };
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
-use futures_util::{future, stream};
+use futures_util::{future, stream, FutureExt as _};
 use rand_chacha::{
     rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
@@ -346,6 +346,18 @@ enum Event<TPlat: PlatformRef> {
     ChainHeadSubscriptionDeadSubcription {
         subscription_id: String,
     },
+    ChainHeadCallOperationDone {
+        subscription_id: String,
+        operation_id: String,
+        result: Result<runtime_service::RuntimeCallSuccess, runtime_service::RuntimeCallError>,
+    },
+    ChainHeadBodyOperationDone {
+        subscription_id: String,
+        operation_id: String,
+        expected_extrinsics_root: [u8; 32],
+        result: Result<codec::BlockData, ()>,
+    },
+    ChainHeadOperationCancelled,
     BlockInfoRetrieved {
         block_hash: [u8; 32],
         result: Result<Result<([u8; 32], u64), header::Error>, ()>,
@@ -1156,15 +1168,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             };
 
+                        // Build the future that will grab the block body.
+                        let body_download_future = me.sync_service.clone().block_query(
+                            block_number,
+                            hash.0,
+                            codec::BlocksRequestFields {
+                                header: false,
+                                body: true,
+                                justifications: false,
+                            },
+                            3,
+                            Duration::from_secs(20),
+                            NonZeroU32::new(2).unwrap(),
+                        );
+
+                        // Allocate an operation ID, update the local state, and notify the
+                        // JSON-RPC client.
                         let operation_id = {
                             let mut operation_id = [0u8; 32];
                             me.randomness.fill_bytes(&mut operation_id);
                             bs58::encode(operation_id).into_string()
                         };
-
                         let interrupt = event_listener::Event::new();
                         let mut on_interrupt = interrupt.listen();
-
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
@@ -1173,7 +1199,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             },
                         );
                         debug_assert!(_was_in.is_none());
-
                         let _ = me
                             .responses_tx
                             .send(
@@ -1186,82 +1211,23 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
 
-                        // Finish the operation asynchronously.
-                        me.background_tasks.push({
-                            let sync_service = me.sync_service.clone();
+                        // Finish the download asynchronously.
+                        let subscription_id = follow_subscription.into_owned();
+                        me.background_tasks.push(Box::pin(async move {
                             async move {
-                                let future = sync_service.clone().block_query(
-                                    block_number,
-                                    hash.0,
-                                    codec::BlocksRequestFields {
-                                        header: false,
-                                        body: true,
-                                        justifications: false,
-                                    },
-                                    3,
-                                    Duration::from_secs(20),
-                                    NonZeroU32::new(2).unwrap(),
-                                );
-
-                                // Drive the future, but cancel execution if the JSON-RPC client
-                                // unsubscribes.
-                                let outcome =
-                                    match future.map(Some).or(on_interrupt.map(|()| None)).await {
-                                        Some(v) => v,
-                                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
-                                    };
-
-                                // We must check whether the body is present in the response
-                                // and valid.
-                                // TODO: should try the request again with a different peer instead of failing immediately
-                                let body = match outcome {
-                                    Ok(outcome) => {
-                                        if let Some(body) = outcome.body {
-                                            if header::extrinsics_root(&body) == extrinsics_root {
-                                                Ok(body)
-                                            } else {
-                                                Err(())
-                                            }
-                                        } else {
-                                            Err(())
-                                        }
-                                    }
-                                    Err(err) => Err(err),
-                                };
-
-                                // Send back the response.
-                                match body {
-                                    Ok(body) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification:
-                                                    methods::FollowEvent::OperationBodyDone {
-                                                        operation_id: operation_id.clone().into(),
-                                                        value: body
-                                                            .into_iter()
-                                                            .map(methods::HexString)
-                                                            .collect(),
-                                                    },
-                                            })
-                                            .await;
-                                    }
-                                    Err(()) => {
-                                        let _ = to_main_task
-                                            .send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification:
-                                                    methods::FollowEvent::OperationInaccessible {
-                                                        operation_id: operation_id.clone().into(),
-                                                    },
-                                            })
-                                            .await;
-                                    }
-                                }
+                                on_interrupt.await;
+                                Event::ChainHeadOperationCancelled
                             }
-                        });
+                            .or(async move {
+                                Event::ChainHeadBodyOperationDone {
+                                    subscription_id,
+                                    operation_id,
+                                    expected_extrinsics_root: extrinsics_root,
+                                    result: body_download_future.await,
+                                }
+                            })
+                            .await
+                        }));
                     }
 
                     methods::MethodCall::chainHead_unstable_call {
@@ -1286,6 +1252,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             continue;
                         };
 
+                        // Determine whether the requested block hash is valid.
+                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                            // Block isn't pinned. Request is invalid.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
+
                         // Check whether there is an operation slot available.
                         subscription.available_operation_slots =
                             match subscription.available_operation_slots.checked_sub(1) {
@@ -1303,20 +1283,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     continue;
                                 }
                             };
-
-                        // Determine whether the requested block hash is valid.
-                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
-                            // Block isn't pinned. Request is invalid.
-                            let _ = me
-                                .responses_tx
-                                .send(parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
-                                    None,
-                                ))
-                                .await;
-                            continue;
-                        }
 
                         // Make sure that the subscription is `withRuntime: true`.
                         let Some(runtime_service_subscription_id) =
@@ -1365,7 +1331,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        // At this point, we know for sure that the call can start.
+                        // Create a future that will perform the runtime call.
+                        let runtime_call_future = me.runtime_service.clone().runtime_call(
+                            pinned_runtime,
+                            hash.0,
+                            block_number,
+                            block_state_trie_root_hash,
+                            function.into_owned(),
+                            None,
+                            call_parameters,
+                            3,
+                            Duration::from_secs(20),
+                            NonZeroU32::new(2).unwrap(),
+                        );
+
                         // Allocate a new operation ID, update the local state, and send the
                         // confirmation to the JSON-RPC client.
                         let operation_id = {
@@ -1397,127 +1376,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
 
                         // Finish the call asynchronously.
-                        me.background_tasks.push(async move {
-                            // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
-                            let runtime_call_result = {
-                                let runtime_call = runtime_service.runtime_call(
-                                    pinned_runtime,
-                                    hash.0,
-                                    block_number,
-                                    block_state_trie_root_hash,
-                                    function_to_call,
-                                    None,
-                                    call_parameters,
-                                    3,
-                                    Duration::from_secs(20),
-                                    NonZeroU32::new(2).unwrap(),
-                                );
-
-                                match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
-                                    Some(v) => v,
-                                    None => return, // JSON-RPC client has unsubscribed in the meanwhile.
-                                }
-                            };
-
-                            match runtime_call_result {
-                                Ok(success) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationCallDone {
-                                                operation_id: operation_id.clone().into(),
-                                                output: methods::HexString(success.output),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: error.to_string().into(),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
-                                    // We pass `None` for the API requirement, thus this error can never
-                                    // happen.
-                                    unreachable!()
-                                }
-                                Err(runtime_service::RuntimeCallError::Crash) => {
-                                    // TODO: is this the appropriate error?
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationInaccessible {
-                                                operation_id: operation_id.clone().into(),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::Execution(
-                                    runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
-                                )) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: "Runtime has called an offchain host function"
-                                                    .to_string()
-                                                    .into(),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::Execution(
-                                    runtime_service::RuntimeCallExecutionError::Start(error),
-                                )) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: error.to_string().into(),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::Execution(
-                                    runtime_service::RuntimeCallExecutionError::Execution(error),
-                                )) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: error.to_string().into(),
-                                            },
-                                        })
-                                        .await;
-                                }
-                                Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
-                                    let _ = to_main_task
-                                        .send(OperationEvent {
-                                            operation_id: operation_id.clone(),
-                                            is_done: true,
-                                            notification: methods::FollowEvent::OperationInaccessible {
-                                                operation_id: operation_id.clone().into(),
-                                            },
-                                        })
-                                        .await;
-                                }
+                        let subscription_id = follow_subscription.into_owned();
+                        me.background_tasks.push(Box::pin(async move {
+                            async move {
+                                on_interrupt.await;
+                                Event::ChainHeadOperationCancelled
                             }
-                        });
+                            .or(async move {
+                                Event::ChainHeadCallOperationDone {
+                                    subscription_id,
+                                    operation_id,
+                                    result: runtime_call_future.await,
+                                }
+                            })
+                            .await
+                        }));
                     }
 
                     methods::MethodCall::chainHead_unstable_continue { .. } => {
@@ -1835,6 +1708,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         Default::default(),
                                     ),
                                 available_operation_slots: 32, // TODO: make configurable? adjust dynamically?
+                                runtime_service_subscription_id: None,
                             },
                         );
                         debug_assert!(_prev_value.is_none());
@@ -3111,6 +2985,286 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }))
             }
 
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result: Ok(success),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationCallDone {
+                                operation_id: operation_id.clone().into(),
+                                output: methods::HexString(success.output),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result: Err(runtime_service::RuntimeCallError::InvalidRuntime(error)),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result: Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled),
+            }) => {
+                // We pass `None` for the API requirement, thus this error can never happen.
+                unreachable!()
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result: Err(runtime_service::RuntimeCallError::Crash),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                // TODO: is this the appropriate error?
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationInaccessible {
+                                operation_id: operation_id.clone().into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result: Err(runtime_service::RuntimeCallError::Inaccessible(_)),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationInaccessible {
+                                operation_id: operation_id.clone().into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result:
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
+                    )),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: "Runtime has called an offchain host function"
+                                    .to_string()
+                                    .into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result:
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::Start(error),
+                    )),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
+                subscription_id,
+                operation_id,
+                result:
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::Execution(error),
+                    )),
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: Cow::Borrowed(&subscription_id),
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadBodyOperationDone {
+                subscription_id,
+                operation_id,
+                expected_extrinsics_root,
+                result,
+            }) => {
+                let _prev_value = me
+                    .chain_head_follow_subscriptions
+                    .get_mut(&subscription_id)
+                    .unwrap_or_else(|| unreachable!())
+                    .operations_in_progress
+                    .remove(&operation_id);
+                debug_assert!(_prev_value.is_some());
+
+                // We must check whether the body is present in the response and valid.
+                // TODO: should try the request again with a different peer instead of failing immediately
+                let body = match result {
+                    Ok(result) => {
+                        if let Some(body) = result.body {
+                            if header::extrinsics_root(&body) == expected_extrinsics_root {
+                                Ok(body)
+                            } else {
+                                Err(())
+                            }
+                        } else {
+                            Err(())
+                        }
+                    }
+                    Err(err) => Err(err),
+                };
+
+                // Send back the response.
+                match body {
+                    Ok(body) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::OperationBodyDone {
+                                        operation_id: operation_id.clone().into(),
+                                        value: body.into_iter().map(methods::HexString).collect(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    Err(()) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::OperationInaccessible {
+                                        operation_id: operation_id.clone().into(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                }
+            }
+
             WakeUpReason::Event(Event::ChainHeadSubscriptionDeadSubcription {
                 subscription_id,
             }) => {
@@ -3135,6 +3289,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .to_json_request_object_parameters(None),
                     )
                     .await;
+            }
+
+            WakeUpReason::Event(Event::ChainHeadOperationCancelled) => {
+                // Nothing to do.
             }
 
             WakeUpReason::SubscriptionNotification(
