@@ -39,7 +39,7 @@ use core::{
     time::Duration,
 };
 use futures_channel::oneshot;
-use futures_lite::StreamExt as _;
+use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
 use rand_chacha::{
     rand_core::{RngCore as _, SeedableRng as _},
@@ -91,6 +91,9 @@ struct Background<TPlat: PlatformRef> {
     /// Tasks that are spawned by the service and running in the background.
     background_tasks:
         stream::FuturesUnordered<Pin<Box<dyn future::Future<Output = Event<TPlat>> + Send>>>,
+
+    /// Channel where requests are pulled from.
+    requests_rx: Pin<Box<async_channel::Receiver<String>>>,
 
     /// Channel where to send responses and notifications to the foreground.
     responses_tx: async_channel::Sender<String>,
@@ -186,6 +189,13 @@ struct ChainHeadFollow {
     operations_in_progress: hashbrown::HashMap<String, Operation, fnv::FnvBuildHasher>,
 
     available_operation_slots: u32,
+
+    /// If the subscription was created with `withRuntime: true`, contains the subscription ID
+    /// according to the runtime service.
+    ///
+    /// Contains `None` if `withRuntime` was `false`, or if the subscription hasn't been
+    /// initialized yet.
+    runtime_service_subscription_id: Option<runtime_service::SubscriptionId>,
 }
 
 struct OperationEvent {
@@ -244,13 +254,13 @@ enum MultiStageRequest {
     },
     StateQueryStorageAtStage1 {
         block_hash: [u8; 32],
-        keys: Vec<Vec<u8>>,
+        keys: Vec<methods::HexString>,
     },
     StateQueryStorageAtStage2 {
         block_hash: [u8; 32],
         block_state_trie_root_hash: [u8; 32],
         block_number: u64,
-        keys: Vec<Vec<u8>>,
+        keys: Vec<methods::HexString>,
     },
     StateQueryStorageAtStage3 {
         block_hash: [u8; 32],
@@ -376,8 +386,8 @@ struct GetKeysPagedCacheKey {
 pub(super) async fn run<TPlat: PlatformRef>(
     log_target: String,
     config: StartConfig<'_, TPlat>,
-    mut requests_processing_task: service::ClientMainTask,
-    max_parallel_requests: NonZeroU32,
+    requests_rx: async_channel::Receiver<String>,
+    responses_tx: async_channel::Sender<String>,
 ) {
     let to_legacy_tx = legacy_state_sub::start_task(legacy_state_sub::Config {
         platform: config.platform.clone(),
@@ -425,7 +435,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
             Default::default(),
         ),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
-        responses_tx: async_channel::bounded(64).0, // TODO: /!\ do properly
+        requests_rx: Box::pin(requests_rx),
+        responses_tx,
         state_get_keys_paged_cache: lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new({
@@ -454,7 +465,34 @@ pub(super) async fn run<TPlat: PlatformRef>(
             SubscriptionNotification(runtime_service::Notification),
         }
 
-        let wake_up_reason = { WakeUpReason::ForegroundDead }; // TODO:
+        let wake_up_reason = {
+            async {
+                if let Some((request_id_json, request)) =
+                    me.multistage_requests_to_advance.pop_front()
+                {
+                    WakeUpReason::AdvanceMultiStageRequest {
+                        request_id_json,
+                        request,
+                    }
+                } else {
+                    future::pending().await
+                }
+            }
+            .or(async {
+                me.requests_rx.next().await.map_or(
+                    WakeUpReason::ForegroundDead,
+                    WakeUpReason::IncomingJsonRpcRequest,
+                )
+            })
+            .or(async {
+                if let Some(event) = me.background_tasks.next().await {
+                    WakeUpReason::Event(event)
+                } else {
+                    future::pending().await
+                }
+            })
+            .await // TODO: subscription notification missing
+        };
 
         match wake_up_reason {
             WakeUpReason::ForegroundDead => {
@@ -845,10 +883,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             request_id_json.to_owned(),
                             MultiStageRequest::StateGetKeysPagedStage1 {
                                 block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
-                                prefix: prefix.0,
+                                prefix: prefix.map_or(Vec::new(), |p| p.0),
                                 count,
-                                start_key,
-                                hash,
+                                start_key: start_key.map_or(Vec::new(), |p| p.0),
                             },
                         ));
                     }
@@ -918,7 +955,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::system_accountNextIndex { account } => {
-                        self.account_next_index(request).await;
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::SystemAccountNextIndexStage1 {
+                                block_hash: me.legacy_api_best_block,
+                                account_id: account.0,
+                            },
+                        ));
                     }
 
                     methods::MethodCall::system_chain {} => {
@@ -1261,64 +1304,78 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 }
                             };
 
-                        // Determine whether the requested block hash is valid and create a
-                        // future of the call. This is done immediately is order to guarantee
-                        // that the block is still pinned.
-                        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
-                            .subscription
-                        {
-                            Subscription::WithRuntime {
-                                subscription_id, ..
-                            } => {
-                                if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
-                                    // Block isn't pinned. Request is invalid.
-                                    request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                                    return;
-                                }
+                        // Determine whether the requested block hash is valid.
+                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                            // Block isn't pinned. Request is invalid.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
 
-                                match self
-                                    .runtime_service
-                                    .pin_pinned_block_runtime(subscription_id, hash.0)
-                                    .await
-                                {
-                                    Ok(r) => r,
-                                    Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
-                                        unreachable!()
-                                    }
-                                    Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
-                                        // The runtime service subscription is dead.
-                                        request.respond(methods::Response::chainHead_unstable_call(
-                                            methods::ChainHeadBodyCallReturn::LimitReached {},
-                                        ));
-                                        return;
-                                    }
-                                }
+                        // Make sure that the subscription is `withRuntime: true`.
+                        let Some(runtime_service_subscription_id) =
+                            subscription.runtime_service_subscription_id
+                        else {
+                            // Subscription is "without runtime".
+                            // This path is in principle also reachable if the subscription isn't
+                            // initialized yet, but in that case the block hash can't possibly be
+                            // pinned.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        };
+
+                        // Pin the pinned block's runtime and extract information about the block.
+                        let (pinned_runtime, block_state_trie_root_hash, block_number) = match me
+                            .runtime_service
+                            .pin_pinned_block_runtime(runtime_service_subscription_id, hash.0)
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                                // This has been verified above.
+                                unreachable!()
                             }
-                            Subscription::WithoutRuntime(_) => {
-                                // It is invalid to call this function for
-                                // a "without runtime" subscription.
+                            Err(
+                                runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription,
+                            ) => {
+                                // The runtime service subscription is dead.
                                 let _ = me
                                     .responses_tx
-                                    .send(parse::build_error_response(
-                                        request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    ))
+                                    .send(
+                                        methods::Response::chainHead_unstable_call(
+                                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                                        )
+                                        .to_json_response(request_id_json),
+                                    )
                                     .await;
                                 continue;
                             }
                         };
 
+                        // At this point, we know for sure that the call can start.
+                        // Allocate a new operation ID, update the local state, and send the
+                        // confirmation to the JSON-RPC client.
                         let operation_id = {
                             let mut operation_id = [0u8; 32];
                             me.randomness.fill_bytes(&mut operation_id);
                             bs58::encode(operation_id).into_string()
                         };
-
                         let interrupt = event_listener::Event::new();
                         let on_interrupt = interrupt.listen();
                         let runtime_service = me.runtime_service.clone();
-
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
@@ -1327,7 +1384,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             },
                         );
                         debug_assert!(_was_in.is_none());
-
                         let _ = me
                             .responses_tx
                             .send(
@@ -1502,16 +1558,30 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             subscription.pinned_blocks_headers.get(&hash.0).cloned()
                         else {
                             // Block isn't pinned. Request is invalid.
-                            request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ))
+                                .await;
                             continue;
                         };
 
                         if child_trie.is_some() {
                             // TODO: implement this
-                            request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Child key storage queries not supported yet",
-                            ));
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        "Child key storage queries not supported yet",
+                                    ),
+                                    None,
+                                ))
+                                .await;
                             log!(
                                 &me.platform,
                                 Warn,
@@ -1754,8 +1824,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _prev_value = me.chain_head_follow_subscriptions.insert(
                             subscription_id,
                             ChainHeadFollow {
-                                non_finalized_blocks: todo!(),
-                                pinned_blocks_headers: todo!(),
+                                non_finalized_blocks: fork_tree::ForkTree::new(), // TODO: capacity?
+                                pinned_blocks_headers: hashbrown::HashMap::with_capacity_and_hasher(
+                                    0,
+                                    Default::default(),
+                                ), // TODO: capacity?
                                 operations_in_progress:
                                     hashbrown::HashMap::with_capacity_and_hasher(
                                         32,
@@ -1910,9 +1983,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         for hash in all_hashes {
                             subscription.pinned_blocks_headers.remove(hash);
-                            if let Subscription::WithRuntime {
-                                subscription_id, ..
-                            } = subscription.subscription
+                            if let Some(subscription_id) =
+                                subscription.runtime_service_subscription_id
                             {
                                 me.runtime_service.unpin_block(subscription_id, *hash).await;
                             }
@@ -2592,7 +2664,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         },
                         either::Right(keys.into_iter().map(|key| {
                             sync_service::StorageRequestItem {
-                                key,
+                                key: key.0,
                                 ty: sync_service::StorageRequestItemTy::Value,
                             }
                         })),
@@ -2804,10 +2876,51 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 _ => unreachable!(),
             },
 
-            WakeUpReason::Event(Event::ChainHeadSubscriptionWithRuntimeReady {
-                subscription_id,
-                subscription,
-            }) => {
+            WakeUpReason::Event(
+                event @ (Event::ChainHeadSubscriptionWithRuntimeReady { .. }
+                | Event::ChainHeadSubscriptionWithoutRuntimeReady { .. }),
+            ) => {
+                // Extract the event information.
+                let (
+                    subscription_id,
+                    new_blocks,
+                    finalized_block_scale_encoded_header,
+                    finalized_block_runtime,
+                    non_finalized_blocks_ancestry_order,
+                ) = match event {
+                    Event::ChainHeadSubscriptionWithRuntimeReady {
+                        subscription_id,
+                        subscription,
+                    } => (
+                        subscription_id,
+                        either::Left(subscription.new_blocks),
+                        subscription.finalized_block_scale_encoded_header,
+                        Some(subscription.finalized_block_runtime),
+                        either::Left(
+                            subscription
+                                .non_finalized_blocks_ancestry_order
+                                .into_iter()
+                                .map(either::Left),
+                        ),
+                    ),
+                    Event::ChainHeadSubscriptionWithoutRuntimeReady {
+                        subscription_id,
+                        subscription,
+                    } => (
+                        subscription_id,
+                        either::Right(Box::pin(subscription.new_blocks)),
+                        subscription.finalized_block_scale_encoded_header,
+                        None,
+                        either::Right(
+                            subscription
+                                .non_finalized_blocks_ancestry_order
+                                .into_iter()
+                                .map(either::Right),
+                        ),
+                    ),
+                    _ => unreachable!(),
+                };
+
                 // It might be that the JSON-RPC client has unsubscribed before the subscription
                 // was initialized.
                 let Some(subscription_info) =
@@ -2816,9 +2929,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 };
 
-                let finalized_block_hash = header::hash_from_scale_encoded_header(
-                    &subscription.finalized_block_scale_encoded_header,
-                ); // TODO: indicate hash in subscription?
+                // Store the subscription ID in the subscription.
+                if let either::Left(new_blocks) = &new_blocks {
+                    subscription_info.runtime_service_subscription_id = Some(new_blocks.id());
+                }
+
+                // Send the `initialized` event and pin the finalized block.
+                let finalized_block_hash =
+                    header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header); // TODO: indicate hash in subscription?
                 let _ = me
                     .responses_tx
                     .send(
@@ -2826,19 +2944,35 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
-                                finalized_block_runtime: Some(todo!()),
+                                finalized_block_runtime: finalized_block_runtime.map(|runtime| {
+                                    match runtime {
+                                        Ok(rt) => methods::MaybeRuntimeSpec::Valid {
+                                            spec: convert_runtime_version(&rt),
+                                        },
+                                        Err(error) => methods::MaybeRuntimeSpec::Invalid {
+                                            error: error.to_string(),
+                                        },
+                                    }
+                                }),
                             },
                         }
                         .to_json_request_object_parameters(None),
                     )
                     .await;
-                subscription_info.pinned_blocks_headers.insert(
-                    finalized_block_hash,
-                    subscription.finalized_block_scale_encoded_header,
-                );
+                subscription_info
+                    .pinned_blocks_headers
+                    .insert(finalized_block_hash, finalized_block_scale_encoded_header);
 
-                for block in subscription.non_finalized_blocks_ancestry_order {
-                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header); // TODO: indicate hash in subscription?
+                // Send an event for each non-finalized block.
+                for block in non_finalized_blocks_ancestry_order {
+                    let parent_block_hash = header::hash_from_scale_encoded_header(match block {
+                        either::Left(b) => b.parent_hash,
+                        either::Right(b) => b.parent_hash,
+                    }); // TODO: indicate hash in subscription?
+                    let hash = header::hash_from_scale_encoded_header(match block {
+                        either::Left(b) => &b.scale_encoded_header,
+                        either::Right(b) => &b.scale_encoded_header,
+                    }); // TODO: indicate hash in subscription?
                     let _ = me
                         .responses_tx
                         .send(
@@ -2846,14 +2980,36 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 subscription: Cow::Borrowed(&subscription_id),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
-                                    parent_block_hash: (),
-                                    new_runtime: (),
+                                    parent_block_hash: methods::HashHexString(parent_block_hash),
+                                    new_runtime: if let either::Left(block) = block {
+                                        if let Some(rt) = block.new_runtime {
+                                            match rt {
+                                                Ok(spec) => {
+                                                    Some(methods::MaybeRuntimeSpec::Valid {
+                                                        spec: todo!(),
+                                                    })
+                                                }
+                                                Err(error) => {
+                                                    Some(methods::MaybeRuntimeSpec::Invalid {
+                                                        error: error.to_string(),
+                                                    })
+                                                }
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    },
                                 },
                             }
                             .to_json_request_object_parameters(None),
                         )
                         .await;
-                    if block.is_new_best {
+                    if match block {
+                        either::Left(b) => b.is_new_best,
+                        either::Right(b) => b.is_new_best,
+                    } {
                         let _ = me
                             .responses_tx
                             .send(
@@ -2867,57 +3023,38 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    subscription_info.pinned_blocks_headers.insert(
-                        finalized_block_hash,
-                        subscription.finalized_block_scale_encoded_header,
-                    );
+                    subscription_info
+                        .pinned_blocks_headers
+                        .insert(hash, finalized_block_scale_encoded_header);
                     // TODO: subscription_info.non_finalized_blocks
                 }
 
-                me.background_tasks.push(Box::pin({
-                    let new_blocks = subscription.new_blocks;
-                    async move {
-                        if let Some(notification) = new_blocks.next().await {
-                            Event::ChainHeadSubscriptionWithRuntimeNotification {
-                                subscription_id,
-                                notification,
-                                stream: new_blocks,
+                me.background_tasks.push({
+                    match new_blocks {
+                        either::Left(new_blocks) => Box::pin(async move {
+                            if let Some(notification) = new_blocks.next().await {
+                                Event::ChainHeadSubscriptionWithRuntimeNotification {
+                                    subscription_id,
+                                    notification,
+                                    stream: new_blocks,
+                                }
+                            } else {
+                                Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
                             }
-                        } else {
-                            Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
-                        }
-                    }
-                }));
-            }
-
-            WakeUpReason::Event(Event::ChainHeadSubscriptionWithoutRuntimeReady {
-                subscription_id,
-                subscription,
-            }) => {
-                // It might be that the JSON-RPC client has unsubscribed before the subscription
-                // was initialized.
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    continue;
-                };
-
-                // TODO: send initialized event
-
-                me.background_tasks.push(Box::pin({
-                    let mut new_blocks = Box::pin(subscription.new_blocks);
-                    async move {
-                        if let Some(notification) = new_blocks.next().await {
-                            Event::ChainHeadSubscriptionWithoutRuntimeNotification {
-                                subscription_id,
-                                notification,
-                                stream: new_blocks,
+                        }),
+                        either::Right(mut new_blocks) => Box::pin(async move {
+                            if let Some(notification) = new_blocks.next().await {
+                                Event::ChainHeadSubscriptionWithoutRuntimeNotification {
+                                    subscription_id,
+                                    notification,
+                                    stream: new_blocks,
+                                }
+                            } else {
+                                Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
                             }
-                        } else {
-                            Event::ChainHeadSubscriptionDeadSubcription { subscription_id }
-                        }
+                        }),
                     }
-                }));
+                });
             }
 
             WakeUpReason::Event(Event::ChainHeadSubscriptionWithRuntimeNotification {
