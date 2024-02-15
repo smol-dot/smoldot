@@ -16,8 +16,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    log, network_service, platform::PlatformRef, runtime_service, sync_service,
-    transactions_service, util,
+    log, network_service,
+    platform::PlatformRef,
+    runtime_service, sync_service, transactions_service,
+    util::{self, SipHasherBuild},
 };
 
 use super::StartConfig;
@@ -48,12 +50,10 @@ use smoldot::{
     chain::fork_tree,
     header,
     informant::HashDisplay,
-    json_rpc::{self, methods, parse, service},
+    json_rpc::{self, methods, parse},
     libp2p::{multiaddr, PeerId},
     network::codec,
 };
-
-mod legacy_state_sub;
 
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
@@ -450,6 +450,10 @@ enum Event<TPlat: PlatformRef> {
         request: MultiStageRequest,
         progress: sync_service::StorageQueryProgress<TPlat>,
     },
+    StorageSubscriptionsUpdate {
+        block_hash: [u8; 32],
+        result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
+    },
 }
 
 struct TransactionWatch {
@@ -579,6 +583,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 finalized_heads_subscriptions_stale: &'a mut bool,
             },
             RuntimeServiceSubscriptionDead,
+            StartStorageSubscriptions,
+            NotifyFinalizedHeads,
+            NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
         }
 
         let wake_up_reason = {
@@ -596,21 +603,41 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         new_heads_and_runtime_subscriptions_stale,
                         current_finalized_block,
                         finalized_heads_subscriptions_stale,
-                    } => match subscription.next().await {
-                        Some(notification) => {
-                            WakeUpReason::RuntimeServiceSubscriptionNotification {
-                                notification,
-                                subscription,
-                                pinned_blocks,
-                                finalized_and_pruned_lru,
-                                current_best_block,
-                                new_heads_and_runtime_subscriptions_stale,
-                                current_finalized_block,
-                                finalized_heads_subscriptions_stale,
-                            }
+                    } => {
+                        if !me.storage_query_in_progress
+                            && !me.stale_storage_subscriptions.is_empty()
+                        {
+                            return WakeUpReason::StartStorageSubscriptions;
                         }
-                        None => WakeUpReason::RuntimeServiceSubscriptionDead,
-                    },
+
+                        if *finalized_heads_subscriptions_stale {
+                            return WakeUpReason::NotifyFinalizedHeads;
+                        }
+
+                        if let Some(previous_best_block) =
+                            new_heads_and_runtime_subscriptions_stale.take()
+                        {
+                            return WakeUpReason::NotifyNewHeadsRuntimeSubscriptions(
+                                previous_best_block,
+                            );
+                        }
+
+                        match subscription.next().await {
+                            Some(notification) => {
+                                WakeUpReason::RuntimeServiceSubscriptionNotification {
+                                    notification,
+                                    subscription,
+                                    pinned_blocks,
+                                    finalized_and_pruned_lru,
+                                    current_best_block,
+                                    new_heads_and_runtime_subscriptions_stale,
+                                    current_finalized_block,
+                                    finalized_heads_subscriptions_stale,
+                                }
+                            }
+                            None => WakeUpReason::RuntimeServiceSubscriptionDead,
+                        }
+                    }
                     RuntimeServiceSubscription::Pending(pending) => {
                         WakeUpReason::RuntimeServiceSubscriptionReady(pending.await)
                     }
@@ -1193,7 +1220,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             me.runtime_version_subscriptions.insert(subscription_id);
                         debug_assert!(_was_inserted);
 
-                        todo!() // TODO: send current runtime state
+                        let to_send = if let Subscription::Active {
+                            current_best_block,
+                            pinned_blocks,
+                            ..
+                        } = &task.subscription
+                        {
+                            Some(convert_runtime_version(
+                                &pinned_blocks
+                                    .get(current_best_block)
+                                    .unwrap()
+                                    .runtime_version,
+                            ))
+                        } else {
+                            None
+                        };
+                        if let Some(to_send) = to_send {
+                            subscription
+                                .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                    subscription: (&subscription_id).into(),
+                                    result: to_send,
+                                })
+                                .await;
+                        }
                     }
 
                     methods::MethodCall::state_subscribeStorage { list } => {
@@ -4498,6 +4547,287 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .send(parse::build_success_response(&request_id_json, "null"))
                         .await;
                 }
+            }
+
+            WakeUpReason::StartStorageSubscriptions => {
+                let RuntimeServiceSubscription::Active {
+                    pinned_blocks,
+                    current_best_block,
+                    ..
+                } = &mut me.runtime_service_subscription
+                else {
+                    unreachable!()
+                };
+
+                // If the header of the current best block can't be decoded, we don't start
+                // the task.
+                let (block_number, state_trie_root) = match header::decode(
+                    &pinned_blocks
+                        .get(current_best_block)
+                        .unwrap()
+                        .scale_encoded_header,
+                    me.runtime_service.block_number_bytes(),
+                ) {
+                    Ok(header) => (header.number, *header.state_root),
+                    Err(_) => {
+                        // Can't decode the header of the current best block.
+                        // All the subscriptions are marked as non-stale, since they are up-to-date
+                        // with the current best block.
+                        // TODO: print warning?
+                        me.stale_storage_subscriptions.clear();
+                        continue;
+                    }
+                };
+
+                // Build the list of keys that must be requested by aggregating the keys requested
+                // by all stale storage subscriptions.
+                let mut keys = hashbrown::HashSet::with_hasher(SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    me.platform.fill_random_bytes(&mut seed);
+                    seed
+                }));
+                keys.extend(
+                    me.stale_storage_subscriptions
+                        .iter()
+                        .map(|s_id: &Arc<str>| &me.storage_subscriptions.get(s_id).unwrap().1)
+                        .flat_map(|keys_list| keys_list.iter().cloned()),
+                );
+
+                // If the list of keys to query is empty, we mark all subscriptions as no longer
+                // stale and loop again. This is necessary in order to prevent infinite loops if
+                // the JSON-RPC client subscribes to an empty list of items.
+                if keys.is_empty() {
+                    me.stale_storage_subscriptions.clear();
+                    continue;
+                }
+
+                // Start the task in the background.
+                // The task will send a `Message::StorageFetch` once it is done.
+                me.storage_query_in_progress = true;
+                me.background_tasks.push(Box::pin({
+                    let block_hash = *current_best_block;
+                    let sync_service = me.sync_service.clone();
+                    async move {
+                        let mut out = Vec::with_capacity(keys.len());
+                        let mut query = sync_service
+                            .storage_query(
+                                block_number,
+                                block_hash,
+                                state_trie_root,
+                                keys.into_iter()
+                                    .map(|key| sync_service::StorageRequestItem {
+                                        key,
+                                        ty: sync_service::StorageRequestItemTy::Value,
+                                    }),
+                                4,
+                                Duration::from_secs(12),
+                                NonZeroU32::new(2).unwrap(),
+                            )
+                            .advance()
+                            .await;
+                        loop {
+                            match query {
+                                sync_service::StorageQueryProgress::Progress {
+                                    item,
+                                    query: next,
+                                    ..
+                                } => {
+                                    out.push(item);
+                                    query = next.advance().await;
+                                }
+                                sync_service::StorageQueryProgress::Finished => {
+                                    break Event::StorageSubscriptionsUpdate {
+                                        block_hash,
+                                        result: Ok(out),
+                                    };
+                                }
+                                sync_service::StorageQueryProgress::Error(error) => {
+                                    break Event::StorageSubscriptionsUpdate {
+                                        block_hash,
+                                        result: Err(error),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+
+            // Background task dedicated to performing a storage query for the storage
+            // subscription has finished.
+            WakeUpReason::Event(Message::StorageSubscriptionsUpdate {
+                block_hash,
+                result: Ok(result),
+            }) => {
+                debug_assert!(task.storage_query_in_progress);
+                task.storage_query_in_progress = false;
+
+                // Determine whether another storage query targeting a more up-to-date block
+                // must be started afterwards.
+                let is_up_to_date = match task.subscription {
+                    Subscription::Active {
+                        current_best_block, ..
+                    } => current_best_block == block_hash,
+                    Subscription::NotCreated | Subscription::Pending(_) => true,
+                };
+
+                // Because all the keys of all the subscriptions are merged into one network
+                // request, we must now attribute each item in the result back to its subscription.
+                // While this solution is a bit CPU-heavy, it is a more elegant solution than
+                // keeping track of subscription in the background task.
+                let mut notifications_to_send = hashbrown::HashMap::<
+                    String,
+                    Vec<(methods::HexString, Option<methods::HexString>)>,
+                    _,
+                >::with_capacity_and_hasher(
+                    task.storage_subscriptions.len(),
+                    fnv::FnvBuildHasher::default(),
+                );
+                for item in result {
+                    let sync_service::StorageResultItem::Value { key, value } = item else {
+                        unreachable!()
+                    };
+                    for subscription_id in task
+                        .storage_subscriptions_by_key
+                        .get(&key)
+                        .into_iter()
+                        .flat_map(|list| list.iter())
+                    {
+                        notifications_to_send
+                            .entry_ref(subscription_id)
+                            .or_insert_with(Vec::new)
+                            .push((
+                                methods::HexString(key.clone()),
+                                value.clone().map(methods::HexString),
+                            ));
+                    }
+                }
+
+                // Send the notifications and mark the subscriptions as no longer stale if
+                // relevant.
+                for (subscription_id, changes) in notifications_to_send {
+                    if is_up_to_date {
+                        me.stale_storage_subscriptions.remove(&subscription_id);
+                    }
+                    me.storage_subscriptions
+                        .get_mut(&subscription_id)
+                        .unwrap()
+                        .0
+                        .send_notification(methods::ServerToClient::state_storage {
+                            subscription: subscription_id.into(),
+                            result: methods::StorageChangeSet {
+                                block: methods::HashHexString(block_hash),
+                                changes,
+                            },
+                        })
+                        .await;
+                }
+            }
+
+            // Background task dedicated to performing a storage query for the storage
+            // subscription has finished but was unsuccessful.
+            WakeUpReason::Event(Event::StorageSubscriptionsUpdate { result: Err(_), .. }) => {
+                debug_assert!(me.storage_query_in_progress);
+                task.storage_query_in_progress = false;
+                // TODO: add a delay or something?
+            }
+
+            WakeUpReason::NotifyFinalizedHeads => {
+                let finalized_block_header = &pinned_blocks
+                    .get(current_finalized_block)
+                    .unwrap()
+                    .scale_encoded_header;
+                let finalized_block_json_rpc_header =
+                    match methods::Header::from_scale_encoded_header(
+                        finalized_block_header,
+                        task.runtime_service.block_number_bytes(),
+                    ) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log!(
+                                &task.platform,
+                                Warn,
+                                &task.log_target,
+                                format!(
+                                    "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                    block due to undecodable header. Hash: {}. Error: {}",
+                                    HashDisplay(current_finalized_block),
+                                    error,
+                                )
+                            );
+                            continue;
+                        }
+                    };
+
+                for (subscription_id, subscription) in &mut task.finalized_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_finalizedHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: finalized_block_json_rpc_header.clone(),
+                        })
+                        .await;
+                }
+
+                *finalized_heads_subscriptions_stale = false;
+            }
+
+            WakeUpReason::NotifyNewHeadsRuntimeSubscriptions(previous_best_block) => {
+                let best_block_header = &pinned_blocks
+                    .get(current_best_block)
+                    .unwrap()
+                    .scale_encoded_header;
+                let best_block_json_rpc_header = match methods::Header::from_scale_encoded_header(
+                    best_block_header,
+                    task.runtime_service.block_number_bytes(),
+                ) {
+                    Ok(h) => h,
+                    Err(error) => {
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(current_best_block),
+                                error
+                            )
+                        );
+                        continue;
+                    }
+                };
+
+                for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_newHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: best_block_json_rpc_header.clone(),
+                        })
+                        .await;
+                }
+
+                let new_best_runtime = &pinned_blocks
+                    .get(current_best_block)
+                    .unwrap()
+                    .runtime_version;
+                if previous_best_block.map_or(true, |prev_best_block| {
+                    !Arc::ptr_eq(
+                        new_best_runtime,
+                        &pinned_blocks.get(&prev_best_block).unwrap().runtime_version,
+                    )
+                }) {
+                    for (subscription_id, subscription) in &mut task.runtime_version_subscriptions {
+                        subscription
+                            .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                subscription: subscription_id.as_str().into(),
+                                result: convert_runtime_version(new_best_runtime),
+                            })
+                            .await;
+                    }
+                }
+
+                task.stale_storage_subscriptions
+                    .extend(task.storage_subscriptions.keys().cloned());
             }
         }
     }
