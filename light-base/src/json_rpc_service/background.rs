@@ -25,7 +25,7 @@ use super::StartConfig;
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeSet, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -35,12 +35,9 @@ use alloc::{
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
-    ops,
     pin::Pin,
-    sync::atomic,
     time::Duration,
 };
-use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream, FutureExt as _};
 use rand_chacha::{
@@ -50,6 +47,7 @@ use rand_chacha::{
 use smoldot::{
     chain::fork_tree,
     header,
+    informant::HashDisplay,
     json_rpc::{self, methods, parse, service},
     libp2p::{multiaddr, PeerId},
     network::codec,
@@ -102,10 +100,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Stream of notifications coming from the runtime service. Used for legacy JSON-RPC API
     /// subscriptions. `None` if not subscribed yet.
-    runtime_service_subscription: Option<(
-        runtime_service::SubscriptionId,
-        Pin<Box<dyn stream::Stream<Item = runtime_service::Notification> + Send>>,
-    )>,
+    runtime_service_subscription: RuntimeServiceSubscription<TPlat>,
     /// Best block used for legacy API functions that target the best block.
     legacy_api_best_block: [u8; 32],
 
@@ -132,6 +127,19 @@ struct Background<TPlat: PlatformRef> {
     // TODO: shrink_to_fit?
     chain_head_follow_subscriptions:
         hashbrown::HashMap<String, ChainHeadFollow, fnv::FnvBuildHasher>,
+
+    /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
+    /// Values are the list of keys requested by this subscription.
+    storage_subscriptions: BTreeSet<(Arc<str>, Vec<u8>)>,
+    /// Identical to [`Task::storage_subscriptions`] by indexed by requested key.
+    storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
+    /// List of storage subscriptions whose latest sent notification isn't about the current
+    /// best block.
+    // TODO: shrink_to_fit?
+    stale_storage_subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
+    /// `true` if there exists a background task in [`Background::background_tasks`] currently
+    /// fetching storage items for storage subscriptions.
+    storage_query_in_progress: bool,
 
     /// List of multi-stage requests (i.e. JSON-RPC requests that require multiple asynchronous
     /// operations) that are ready to make progress.
@@ -180,7 +188,63 @@ struct Background<TPlat: PlatformRef> {
 
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
-    printed_legacy_json_rpc_warning: atomic::AtomicBool,
+    printed_legacy_json_rpc_warning: bool,
+}
+
+/// State of the subscription towards the runtime service. See [`Task::subscription`].
+enum RuntimeServiceSubscription<TPlat: PlatformRef> {
+    /// Subscription is active.
+    Active {
+        /// Object representing the subscription.
+        subscription: runtime_service::Subscription<TPlat>,
+
+        /// Hash of the current best block. Guaranteed to be in
+        /// [`RuntimeServiceSubscription::Active::pinned_blocks`].
+        current_best_block: [u8; 32],
+
+        /// If `Some`, the new heads and runtime version subscriptions haven't been updated about
+        /// the new current best block yet. Contains the previous best block that the
+        /// subscriptions are aware of. The previous best block is guaranteed to be in
+        /// [`RuntimeServiceSubscription::Active::pinned_blocks`].
+        new_heads_and_runtime_subscriptions_stale: Option<Option<[u8; 32]>>,
+
+        /// Hash of the current finalized block. Guaranteed to be in
+        /// [`RuntimeServiceSubscription::Active::pinned_blocks`].
+        current_finalized_block: [u8; 32],
+
+        /// If `true`, the finalized heads subscriptions haven't been updated about the new
+        /// current finalized block yet.
+        finalized_heads_subscriptions_stale: bool,
+
+        /// When the runtime service reports a new block, it is kept pinned and inserted in this
+        /// list.
+        ///
+        /// Blocks are removed from this container and unpinned when they leave
+        /// [`Subscription::Active::finalized_and_pruned_lru`].
+        ///
+        /// JSON-RPC clients are more likely to ask for information about recent blocks and
+        /// perform calls on them, hence a cache of recent blocks.
+        pinned_blocks: hashbrown::HashMap<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
+
+        /// When a block is finalized or pruned, it is inserted into this LRU cache. The least
+        /// recently used blocks are removed and unpinned.
+        // TODO: duplicate with other caches?
+        finalized_and_pruned_lru: lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
+    },
+
+    /// Wiating for the runtime service to start the subscription. Can potentially take a long
+    /// time.
+    Pending(Pin<Box<dyn future::Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
+
+    /// Subscription not requested yet. Should transition to [`Subscription::Pending`] as soon
+    /// as possible.
+    NotCreated,
+}
+
+struct RecentBlock {
+    scale_encoded_header: Vec<u8>,
+    // TODO: do we really need to keep the runtime version here, given that the block is still pinned in the runtime service?
+    runtime_version: Arc<Result<smoldot::executor::CoreVersion, runtime_service::RuntimeError>>,
 }
 
 struct ChainHeadFollow {
@@ -434,7 +498,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
-        runtime_service_subscription: None,
+        runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
         legacy_api_best_block: config.genesis_block_hash, // TODO: better block
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
@@ -457,6 +521,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             Default::default(),
         ),
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
+        storage_subscriptions: BTreeSet::new(),
+        storage_subscriptions_by_key: BTreeSet::new(),
+        stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+            0,
+            Default::default(),
+        ),
+        storage_query_in_progress: false,
         requests_rx: Box::pin(requests_rx),
         responses_tx,
         multistage_requests_to_advance: VecDeque::new(),
@@ -479,7 +550,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }),
         ),
         genesis_block_hash: config.genesis_block_hash,
-        printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
+        printed_legacy_json_rpc_warning: false,
         platform: config.platform,
     };
 
@@ -487,7 +558,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
 
-        enum WakeUpReason<TPlat: PlatformRef> {
+        enum WakeUpReason<'a, TPlat: PlatformRef> {
             ForegroundDead,
             IncomingJsonRpcRequest(String),
             AdvanceMultiStageRequest {
@@ -495,11 +566,57 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 request: MultiStageRequest,
             },
             Event(Event<TPlat>),
-            SubscriptionNotification(runtime_service::Notification),
+            RuntimeServiceSubscriptionReady(runtime_service::SubscribeAll<TPlat>),
+            RuntimeServiceSubscriptionNotification {
+                notification: runtime_service::Notification,
+                subscription: &'a mut runtime_service::Subscription<TPlat>,
+                pinned_blocks:
+                    &'a mut hashbrown::HashMap<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
+                finalized_and_pruned_lru: &'a mut lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
+                current_best_block: &'a mut [u8; 32],
+                new_heads_and_runtime_subscriptions_stale: &'a mut Option<Option<[u8; 32]>>,
+                current_finalized_block: &'a mut [u8; 32],
+                finalized_heads_subscriptions_stale: &'a mut bool,
+            },
+            RuntimeServiceSubscriptionDead,
         }
 
         let wake_up_reason = {
+            // TODO: do storage subscriptions
             async {
+                match &mut me.runtime_service_subscription {
+                    RuntimeServiceSubscription::NotCreated => {
+                        WakeUpReason::RuntimeServiceSubscriptionDead
+                    }
+                    RuntimeServiceSubscription::Active {
+                        subscription,
+                        pinned_blocks,
+                        finalized_and_pruned_lru,
+                        current_best_block,
+                        new_heads_and_runtime_subscriptions_stale,
+                        current_finalized_block,
+                        finalized_heads_subscriptions_stale,
+                    } => match subscription.next().await {
+                        Some(notification) => {
+                            WakeUpReason::RuntimeServiceSubscriptionNotification {
+                                notification,
+                                subscription,
+                                pinned_blocks,
+                                finalized_and_pruned_lru,
+                                current_best_block,
+                                new_heads_and_runtime_subscriptions_stale,
+                                current_finalized_block,
+                                finalized_heads_subscriptions_stale,
+                            }
+                        }
+                        None => WakeUpReason::RuntimeServiceSubscriptionDead,
+                    },
+                    RuntimeServiceSubscription::Pending(pending) => {
+                        WakeUpReason::RuntimeServiceSubscriptionReady(pending.await)
+                    }
+                }
+            }
+            .or(async {
                 if let Some((request_id_json, request)) =
                     me.multistage_requests_to_advance.pop_front()
                 {
@@ -510,7 +627,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 } else {
                     future::pending().await
                 }
-            }
+            })
             .or(async {
                 me.requests_rx.next().await.map_or(
                     WakeUpReason::ForegroundDead,
@@ -783,12 +900,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             bs58::encode(subscription_id).into_string()
                         };
 
-                        // TODO: check max subscriptions
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_subscribeAllHeads(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
 
                         let _was_inserted = me.all_heads_subscriptions.insert(subscription_id);
                         debug_assert!(_was_inserted);
-
-                        todo!() // TODO: send current finalized block
                     }
 
                     methods::MethodCall::chain_subscribeFinalizedHeads {} => {
@@ -800,11 +923,61 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // TODO: check max subscriptions
 
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_subscribeFinalizedHeads(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        if let RuntimeServiceSubscription::Active {
+                            current_finalized_block,
+                            pinned_blocks,
+                            ..
+                        } = &me.runtime_service_subscription
+                        {
+                            match methods::Header::from_scale_encoded_header(
+                                &pinned_blocks
+                                    .get(current_finalized_block)
+                                    .unwrap()
+                                    .scale_encoded_header,
+                                me.runtime_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(
+                                            methods::ServerToClient::chain_newHead {
+                                                subscription: Cow::Borrowed(&subscription_id),
+                                                result: h,
+                                            }
+                                            .to_json_request_object_parameters(None),
+                                        )
+                                        .await;
+                                }
+                                Err(error) => {
+                                    log!(
+                                        &me.platform,
+                                        Warn,
+                                        &me.log_target,
+                                        format!(
+                                            "`chain_subscribeFinalizedHeads` subscription has \
+                                                skipped block due to undecodable header. Hash: {}. \
+                                                Error: {}",
+                                            HashDisplay(current_finalized_block),
+                                            error
+                                        )
+                                    );
+                                }
+                            }
+                        }
+
                         let _was_inserted =
                             me.finalized_heads_subscriptions.insert(subscription_id);
                         debug_assert!(_was_inserted);
-
-                        todo!() // TODO: send current finalized block
                     }
 
                     methods::MethodCall::chain_subscribeNewHeads {} => {
@@ -815,13 +988,61 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
                         // TODO: check max subscriptions
 
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_subscribeNewHeads(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        if let RuntimeServiceSubscription::Active {
+                            current_best_block,
+                            pinned_blocks,
+                            ..
+                        } = &me.runtime_service_subscription
+                        {
+                            match methods::Header::from_scale_encoded_header(
+                                &pinned_blocks
+                                    .get(current_best_block)
+                                    .unwrap()
+                                    .scale_encoded_header,
+                                me.runtime_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(
+                                            methods::ServerToClient::chain_newHead {
+                                                subscription: Cow::Borrowed(&subscription_id),
+                                                result: h,
+                                            }
+                                            .to_json_request_object_parameters(None),
+                                        )
+                                        .await;
+                                }
+                                Err(error) => {
+                                    log!(
+                                        &me.platform,
+                                        Warn,
+                                        &me.log_target,
+                                        format!(
+                                            "`chain_subscribeNewHeads` subscription has \
+                                                skipped block due to undecodable header. Hash: {}. \
+                                                Error: {}",
+                                            HashDisplay(current_best_block),
+                                            error
+                                        )
+                                    );
+                                }
+                            }
+                        }
+
                         let _was_inserted = me.new_heads_subscriptions.insert(subscription_id);
                         debug_assert!(_was_inserted);
-
-                        todo!() // TODO: send current finalized block
                     }
-
-                    methods::MethodCall::state_subscribeStorage { .. } => todo!(),
 
                     methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
                         let exists = me.all_heads_subscriptions.remove(&subscription);
@@ -975,12 +1196,102 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         todo!() // TODO: send current runtime state
                     }
 
+                    methods::MethodCall::state_subscribeStorage { list } => {
+                        // TODO: limit the size of `list` to avoid DoS attacks
+                        if list.is_empty() {
+                            // When the list of keys is empty, that means we want to subscribe to *all*
+                            // storage changes. It is not possible to reasonably implement this in a
+                            // light client.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        "Subscribing to all storage changes isn't supported",
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
+
+                        let subscription_id = Arc::<str>::from({
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        });
+
+                        let _was_inserted = me
+                            .stale_storage_subscriptions
+                            .insert(subscription_id.clone());
+                        debug_assert!(_was_inserted);
+
+                        for key in list {
+                            let _was_inserted = me
+                                .storage_subscriptions_by_key
+                                .insert((key.0.clone(), subscription_id.clone()));
+                            debug_assert!(_was_inserted);
+                            let _was_inserted = me
+                                .storage_subscriptions
+                                .insert((subscription_id.clone(), key.0));
+                            debug_assert!(_was_inserted);
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::state_subscribeStorage(Cow::Borrowed(
+                                    &*subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
                     methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
                         let exists = me.runtime_version_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
                             .send(
                                 methods::Response::state_unsubscribeRuntimeVersion(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::state_unsubscribeStorage { subscription } => {
+                        let subscription = Arc::<str>::from(&*subscription);
+
+                        let subscribed_keys = {
+                            let mut after = me
+                                .storage_subscriptions
+                                .split_off(&(subscription.clone(), Vec::new()));
+                            if let Some(first_entry_after) =
+                                after.iter().find(|(s, _)| *s != subscription).cloned()
+                            // TODO: O(n) ^
+                            {
+                                me.storage_subscriptions
+                                    .append(&mut after.split_off(&first_entry_after));
+                            }
+                            after
+                        };
+
+                        let exists = !subscribed_keys.is_empty();
+
+                        for (_, key) in subscribed_keys {
+                            let _was_removed = me
+                                .storage_subscriptions_by_key
+                                .remove(&(key, subscription.clone()));
+                            debug_assert!(_was_removed);
+                        }
+
+                        me.stale_storage_subscriptions.remove(&subscription);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::state_unsubscribeStorage(exists)
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -3501,36 +3812,207 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Nothing to do.
             }
 
-            WakeUpReason::SubscriptionNotification(
-                runtime_service::Notification::BestBlockChanged { hash },
-            ) => {
-                // TODO: notify subscriptions
-                // TODO: start storage requests
+            WakeUpReason::RuntimeServiceSubscriptionReady(subscribe_all) => {
+                // Runtime service is now ready to give us blocks.
+
+                // We must transition to `RuntimeServiceSubscription::Active`.
+                let mut pinned_blocks =
+                    hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
+                let mut finalized_and_pruned_lru = lru::LruCache::with_hasher(
+                    NonZeroUsize::new(32).unwrap(),
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                let finalized_block_hash = header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                );
+                pinned_blocks.insert(
+                    finalized_block_hash,
+                    RecentBlock {
+                        scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
+                        runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
+                    },
+                );
+                finalized_and_pruned_lru.put(finalized_block_hash, ());
+
+                let mut current_best_block = finalized_block_hash;
+
+                for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                    pinned_blocks.insert(
+                        hash,
+                        RecentBlock {
+                            scale_encoded_header: block.scale_encoded_header,
+                            runtime_version: match block.new_runtime {
+                                Some(r) => Arc::new(r),
+                                None => pinned_blocks
+                                    .get(&block.parent_hash)
+                                    .unwrap()
+                                    .runtime_version
+                                    .clone(),
+                            },
+                        },
+                    );
+
+                    if block.is_new_best {
+                        current_best_block = hash;
+                    }
+                }
+
+                me.runtime_service_subscription = RuntimeServiceSubscription::Active {
+                    subscription: subscribe_all.new_blocks,
+                    pinned_blocks,
+                    finalized_and_pruned_lru,
+                    current_best_block,
+                    new_heads_and_runtime_subscriptions_stale: Some(None),
+                    current_finalized_block: finalized_block_hash,
+                    finalized_heads_subscriptions_stale: true,
+                };
             }
 
-            WakeUpReason::SubscriptionNotification(runtime_service::Notification::Block(
-                block_notification,
-            )) => {
-                // TODO: notify subscriptions
-                // TODO: start storage requests
+            WakeUpReason::RuntimeServiceSubscriptionDead => {
+                // The subscription towards the runtime service needs to be renewed.
+
+                // The buffer size should be large enough so that, if the CPU is busy, it
+                // doesn't become full before the execution of this task resumes.
+                // The maximum number of pinned block is ignored, as this maximum is a way to
+                // avoid malicious behaviors. This code is by definition not considered
+                // malicious.
+                let runtime_service = me.runtime_service.clone();
+                me.runtime_service_subscription =
+                    RuntimeServiceSubscription::Pending(Box::pin(async move {
+                        runtime_service
+                            .subscribe_all(
+                                32,
+                                NonZeroUsize::new(usize::max_value())
+                                    .unwrap_or_else(|| unreachable!()),
+                            )
+                            .await
+                    }));
             }
 
-            WakeUpReason::SubscriptionNotification(runtime_service::Notification::Finalized {
-                hash,
-                best_block_hash,
-                pruned_blocks,
-            }) => {
-                for subscription_id in &me.finalized_heads_subscriptions {
+            WakeUpReason::RuntimeServiceSubscriptionNotification {
+                notification:
+                    runtime_service::Notification::BestBlockChanged {
+                        hash: new_best_hash,
+                        ..
+                    },
+                current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
+                ..
+            } => {
+                *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
+                *current_best_block = new_best_hash;
+            }
+
+            WakeUpReason::RuntimeServiceSubscriptionNotification {
+                notification: runtime_service::Notification::Block(block),
+                pinned_blocks,
+                current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
+                ..
+            } => {
+                let json_rpc_header = match methods::Header::from_scale_encoded_header(
+                    &block.scale_encoded_header,
+                    me.runtime_service.block_number_bytes(),
+                ) {
+                    Ok(h) => h,
+                    Err(error) => {
+                        log!(
+                            &me.platform,
+                            Warn,
+                            &me.log_target,
+                            format!(
+                                "`chain_subscribeAllHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header
+                                )),
+                                error
+                            )
+                        );
+                        continue;
+                    }
+                };
+
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                let _was_in = pinned_blocks.insert(
+                    hash,
+                    RecentBlock {
+                        scale_encoded_header: block.scale_encoded_header,
+                        runtime_version: match block.new_runtime {
+                            Some(r) => Arc::new(r),
+                            None => pinned_blocks
+                                .get(&block.parent_hash)
+                                .unwrap()
+                                .runtime_version
+                                .clone(),
+                        },
+                    },
+                );
+                debug_assert!(_was_in.is_none());
+
+                for subscription_id in &me.all_heads_subscriptions {
                     let _ = me
                         .responses_tx
                         .send(
-                            methods::ServerToClient::chain_finalizedHead {
-                                subscription: Cow::Borrowed(subscription_id),
-                                result: todo!(),
+                            methods::ServerToClient::chain_allHead {
+                                subscription: subscription_id.as_str().into(),
+                                result: json_rpc_header.clone(),
                             }
                             .to_json_request_object_parameters(None),
                         )
                         .await;
+                }
+
+                if block.is_new_best {
+                    *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
+                    *current_best_block = hash;
+                }
+            }
+
+            WakeUpReason::RuntimeServiceSubscriptionNotification {
+                notification:
+                    runtime_service::Notification::Finalized {
+                        hash: finalized_hash,
+                        pruned_blocks,
+                        best_block_hash: new_best_block_hash,
+                    },
+                pinned_blocks,
+                finalized_and_pruned_lru,
+                subscription,
+                current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
+                current_finalized_block,
+                finalized_heads_subscriptions_stale,
+            } => {
+                *current_finalized_block = finalized_hash;
+                *finalized_heads_subscriptions_stale = true;
+
+                debug_assert!(pruned_blocks
+                    .iter()
+                    .all(|hash| pinned_blocks.contains_key(hash)));
+
+                // Add the pruned and finalized blocks to the LRU cache. The least-recently used
+                // entries in the cache are unpinned and no longer tracked.
+                //
+                // An important detail here is that the newly-finalized block is added to the list
+                // at the end, in order to guarantee that it doesn't get removed. This is
+                // necessary in order to guarantee that the current finalized (and current best,
+                // if the best block is also the finalized block) remains pinned until at least
+                // a different block gets finalized.
+                for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
+                    if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
+                        let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
+                        subscription.unpin_block(hash_to_unpin).await;
+                        pinned_blocks.remove(&hash_to_unpin).unwrap();
+                    }
+                    finalized_and_pruned_lru.put(block_hash, ());
+                }
+
+                if *current_best_block != new_best_block_hash {
+                    *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
+                    *current_best_block = new_best_block_hash;
                 }
             }
 

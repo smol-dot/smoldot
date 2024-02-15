@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- JSON-RPC functions that require access to the runtime (for example `state_call`) now cache older runtimes that had to be downloaded, rather than downloading the runtime from scratch every single time.
+
 ## 2.0.21 - 2024-02-06
 
 ### Changed
