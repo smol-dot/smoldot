@@ -24,11 +24,13 @@ use super::StartConfig;
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
-    vec::{self, Vec},
+    vec,
+    vec::Vec,
 };
 use core::{
     iter,
@@ -135,17 +137,20 @@ struct Background<TPlat: PlatformRef> {
     /// operations) that are ready to make progress.
     multistage_requests_to_advance: VecDeque<(String, MultiStageRequest)>,
 
-    /// Cache of known state trie root hashes and numbers of blocks.
+    /// Cache of known headers, state trie root hashes and numbers of blocks.
     ///
     /// Can also be an `Err` if the header is in an invalid format.
-    block_state_root_hashes_numbers_cache:
-        lru::LruCache<[u8; 32], Result<([u8; 32], u64), header::Error>, fnv::FnvBuildHasher>,
+    block_headers_cache: lru::LruCache<
+        [u8; 32],
+        Result<(Vec<u8>, [u8; 32], u64), header::Error>,
+        fnv::FnvBuildHasher,
+    >,
 
-    /// Requests for blocks state root hash and numbers that are still in progress.
+    /// Requests for blocks headers, state root hash and numbers that are still in progress.
     /// For each block hash, contains a list of requests that are interested in the response.
     /// Once the operation has been finished, the value is inserted in
-    /// [`Task::block_state_root_hashes_numbers_cache`].
-    block_state_root_hashes_numbers_pending:
+    /// [`Task::block_headers_cache`].
+    block_headers_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequest)>, fnv::FnvBuildHasher>,
 
     /// Cache of known runtimes of blocks.
@@ -211,6 +216,9 @@ struct Operation {
 }
 
 enum MultiStageRequest {
+    ChainGetHeader {
+        block_hash: [u8; 32],
+    },
     StateCallStage1 {
         block_hash: [u8; 32],
         name: String,
@@ -325,6 +333,7 @@ enum Event<TPlat: PlatformRef> {
     ChainGetBlockResult {
         request_id_json: String,
         result: Result<codec::BlockData, ()>,
+        expected_block_hash: [u8; 32],
     },
     ChainHeadSubscriptionWithRuntimeReady {
         subscription_id: String,
@@ -366,7 +375,7 @@ enum Event<TPlat: PlatformRef> {
     ChainHeadOperationCancelled,
     BlockInfoRetrieved {
         block_hash: [u8; 32],
-        result: Result<Result<([u8; 32], u64), header::Error>, ()>,
+        result: Result<Result<(Vec<u8>, [u8; 32], u64), header::Error>, ()>,
     },
     RuntimeDownloaded {
         block_hash: [u8; 32],
@@ -403,16 +412,16 @@ struct GetKeysPagedCacheKey {
 
 pub(super) async fn run<TPlat: PlatformRef>(
     log_target: String,
-    config: StartConfig<'_, TPlat>,
+    config: StartConfig<TPlat>,
     requests_rx: async_channel::Receiver<String>,
     responses_tx: async_channel::Sender<String>,
 ) {
-    let me = Background {
+    let mut me = Background {
         log_target,
-        chain_name: config.chain_spec.name().to_owned(),
-        chain_ty: config.chain_spec.chain_type().to_owned(),
-        chain_is_live: config.chain_spec.has_live_network(),
-        chain_properties_json: config.chain_spec.properties().to_owned(),
+        chain_name: config.chain_name,
+        chain_ty: config.chain_ty,
+        chain_is_live: config.chain_is_live,
+        chain_properties_json: config.chain_properties_json,
         system_name: config.system_name.clone(),
         system_version: config.system_version.clone(),
         randomness: ChaCha20Rng::from_seed({
@@ -426,6 +435,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
         transactions_service: config.transactions_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: None,
+        legacy_api_best_block: config.genesis_block_hash, // TODO: better block
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
             Default::default(),
@@ -449,6 +459,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
         chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         requests_rx: Box::pin(requests_rx),
         responses_tx,
+        multistage_requests_to_advance: VecDeque::new(),
+        block_headers_cache: lru::LruCache::with_hasher(
+            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            Default::default(),
+        ),
+        block_headers_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
+        block_runtimes_cache: lru::LruCache::with_hasher(
+            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            Default::default(),
+        ),
+        block_runtimes_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         state_get_keys_paged_cache: lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new({
@@ -591,6 +612,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                         debug_assert!(_prev_value.is_none());
 
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_submitAndWatchExtrinsic(Cow::Borrowed(
+                                    &subscription_id,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
                         me.background_tasks.push(Box::pin(async move {
                             let Some(status) = transaction_updates.as_mut().next().await else {
                                 unreachable!()
@@ -601,16 +632,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 watcher: transaction_updates,
                             }
                         }));
-
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::author_submitAndWatchExtrinsic(Cow::Borrowed(
-                                    &subscription_id,
-                                ))
-                                .to_json_response(request_id_json),
-                            )
-                            .await;
                     }
 
                     methods::MethodCall::author_unwatchExtrinsic { subscription } => {
@@ -635,29 +656,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let hash = hash.map_or(me.legacy_api_best_block, |b| b.0);
 
                         // Try to determine the block number by looking for the block in cache.
-                        // The request can be fulfilled no matter whether the block number is known or not, but
-                        // knowing it will lead to a better selection of peers, and thus increase the chances of
-                        // the requests succeeding.
-                        let block_number = {
-                            let (tx, rx) = oneshot::channel();
-                            self.to_legacy
-                                .lock()
-                                .await
-                                .send(legacy_state_sub::Message::BlockNumber {
-                                    block_hash: hash,
-                                    result_tx: tx,
-                                })
-                                .await
-                                .unwrap();
-                            rx.await.unwrap()
-                        };
+                        // The request can be fulfilled no matter whether the block number is
+                        // known or not, but knowing it will lead to a better selection of peers,
+                        // and thus increase the chances of the requests succeeding.
+                        let block_number = me
+                            .block_headers_cache
+                            .get(&hash)
+                            .and_then(|result| result.as_ref().ok().map(|(_, _, n)| *n));
 
                         // Block bodies and headers aren't stored locally. Ask the network.
                         me.background_tasks.push({
                             let sync_service = me.sync_service.clone();
                             let request_id_json = request_id_json.to_owned();
                             Box::pin(async move {
-                                let mut result = if let Some(block_number) = block_number {
+                                let result = if let Some(block_number) = block_number {
                                     sync_service
                                         .block_query(
                                             block_number,
@@ -690,6 +702,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 Event::ChainGetBlockResult {
                                     request_id_json,
                                     result,
+                                    expected_block_hash: hash,
                                 }
                             })
                         });
@@ -754,8 +767,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chain_getHeader { .. } => {
-                        self.chain_get_header(request).await;
+                    methods::MethodCall::chain_getHeader { hash } => {
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            MultiStageRequest::ChainGetHeader {
+                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            },
+                        ));
                     }
 
                     methods::MethodCall::chain_subscribeAllHeads {} => {
@@ -1192,7 +1210,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             bs58::encode(operation_id).into_string()
                         };
                         let interrupt = event_listener::Event::new();
-                        let mut on_interrupt = interrupt.listen();
+                        let on_interrupt = interrupt.listen();
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
@@ -1334,18 +1352,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         // Create a future that will perform the runtime call.
-                        let runtime_call_future = me.runtime_service.clone().runtime_call(
-                            pinned_runtime,
-                            hash.0,
-                            block_number,
-                            block_state_trie_root_hash,
-                            function.into_owned(),
-                            None,
-                            call_parameters,
-                            3,
-                            Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
-                        );
+                        let runtime_call_future = {
+                            let runtime_service = me.runtime_service.clone();
+                            let function = function.into_owned();
+                            async move {
+                                runtime_service
+                                    .clone()
+                                    .runtime_call(
+                                        pinned_runtime,
+                                        hash.0,
+                                        block_number,
+                                        block_state_trie_root_hash,
+                                        function,
+                                        None,
+                                        call_parameters,
+                                        3,
+                                        Duration::from_secs(20),
+                                        NonZeroU32::new(2).unwrap(),
+                                    )
+                                    .await
+                            }
+                        };
 
                         // Allocate a new operation ID, update the local state, and send the
                         // confirmation to the JSON-RPC client.
@@ -1356,7 +1383,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
                         let interrupt = event_listener::Event::new();
                         let on_interrupt = interrupt.listen();
-                        let runtime_service = me.runtime_service.clone();
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
                             Operation {
@@ -1538,7 +1564,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         let interrupt = event_listener::Event::new();
-                        let mut on_interrupt = interrupt.listen();
+                        let on_interrupt = interrupt.listen();
 
                         let _was_in = subscription.operations_in_progress.insert(
                             operation_id.clone(),
@@ -1628,7 +1654,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         };
 
                         let _prev_value = me.chain_head_follow_subscriptions.insert(
-                            subscription_id,
+                            subscription_id.clone(),
                             ChainHeadFollow {
                                 non_finalized_blocks: fork_tree::ForkTree::new(), // TODO: capacity?
                                 pinned_blocks_headers: hashbrown::HashMap::with_capacity_and_hasher(
@@ -1981,6 +2007,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         );
                         debug_assert!(_prev_value.is_none());
 
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::transactionWatch_unstable_submitAndWatch(
+                                    Cow::Borrowed(&subscription_id),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
                         me.background_tasks.push(Box::pin(async move {
                             let Some(status) = transaction_updates.as_mut().next().await else {
                                 unreachable!()
@@ -1991,16 +2027,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 watcher: transaction_updates,
                             }
                         }));
-
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::transactionWatch_unstable_submitAndWatch(
-                                    Cow::Borrowed(&subscription_id),
-                                )
-                                .to_json_response(request_id_json),
-                            )
-                            .await;
                     }
 
                     methods::MethodCall::transactionWatch_unstable_unwatch { subscription } => {
@@ -2073,7 +2099,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json: request_id,
                 request:
-                    request @ (MultiStageRequest::StateCallStage1 { .. }
+                    request @ (MultiStageRequest::ChainGetHeader { .. }
+                    | MultiStageRequest::StateCallStage1 { .. }
                     | MultiStageRequest::StateGetKeysStage1 { .. }
                     | MultiStageRequest::StateGetKeysPagedStage1 { .. }
                     | MultiStageRequest::StateQueryStorageAtStage1 { .. }
@@ -2084,7 +2111,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | MultiStageRequest::SystemAccountNextIndexStage1 { .. }),
             } => {
                 let block_hash = match &request {
-                    MultiStageRequest::StateCallStage1 { block_hash, .. }
+                    MultiStageRequest::ChainGetHeader { block_hash, .. }
+                    | MultiStageRequest::StateCallStage1 { block_hash, .. }
                     | MultiStageRequest::StateGetKeysStage1 { block_hash, .. }
                     | MultiStageRequest::StateGetKeysPagedStage1 { block_hash, .. }
                     | MultiStageRequest::StateQueryStorageAtStage1 { block_hash, .. }
@@ -2099,8 +2127,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 };
 
                 // If the value is available in cache, switch the request to the next stage.
-                if let Some(in_cache) = me.block_state_root_hashes_numbers_cache.get(&block_hash) {
-                    let Ok((state_trie_root_hash, block_number)) = in_cache else {
+                if let Some(in_cache) = me.block_headers_cache.get(&block_hash) {
+                    let Ok((_, state_trie_root_hash, block_number)) = in_cache else {
                         let _ = me
                             .responses_tx
                             .send(parse::build_error_response(
@@ -2113,12 +2141,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     };
 
                     // TODO: advance to stage 2
+                    todo!();
 
                     continue;
                 }
 
                 // Value is not available in cache.
-                match me.block_state_root_hashes_numbers_pending.entry(block_hash) {
+                match me.block_headers_pending.entry(block_hash) {
                     hashbrown::hash_map::Entry::Occupied(entry) => {
                         // We are already in the process of asking the networking service for
                         // the block information.
@@ -2145,7 +2174,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             Box::pin(async move {
                                 Event::BlockInfoRetrieved {
                                     block_hash,
-                                    result: block_info_retrieve_future.await,
+                                    result: todo!(), // block_info_retrieve_future.await,
                                 }
                             })
                         });
@@ -2515,6 +2544,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }));
             }
 
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json: request_id,
+                request:
+                    request @ (MultiStageRequest::StateGetKeysStage3 { .. }
+                    | MultiStageRequest::StateGetStorageStage3 { .. }
+                    | MultiStageRequest::StateGetKeysPagedStage3 { .. }
+                    | MultiStageRequest::StateQueryStorageAtStage3 { .. }),
+            } => {
+                unreachable!()
+            }
+
             WakeUpReason::Event(Event::StorageRequestInProgress {
                 request_id_json,
                 request,
@@ -2692,7 +2732,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Extract the event information.
                 let (
                     subscription_id,
-                    new_blocks,
+                    mut new_blocks,
                     finalized_block_scale_encoded_header,
                     finalized_block_runtime,
                     non_finalized_blocks_ancestry_order,
@@ -2753,16 +2793,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
-                                finalized_block_runtime: finalized_block_runtime.map(|runtime| {
-                                    match runtime {
+                                finalized_block_runtime: finalized_block_runtime.as_ref().map(
+                                    |runtime| match runtime {
                                         Ok(rt) => methods::MaybeRuntimeSpec::Valid {
                                             spec: convert_runtime_version(&rt),
                                         },
                                         Err(error) => methods::MaybeRuntimeSpec::Invalid {
                                             error: error.to_string(),
                                         },
-                                    }
-                                }),
+                                    },
+                                ),
                             },
                         }
                         .to_json_request_object_parameters(None),
@@ -2774,11 +2814,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // Send an event for each non-finalized block.
                 for block in non_finalized_blocks_ancestry_order {
-                    let parent_block_hash = header::hash_from_scale_encoded_header(match block {
+                    let parent_block_hash = header::hash_from_scale_encoded_header(match &block {
                         either::Left(b) => b.parent_hash,
                         either::Right(b) => b.parent_hash,
                     }); // TODO: indicate hash in subscription?
-                    let hash = header::hash_from_scale_encoded_header(match block {
+                    let hash = header::hash_from_scale_encoded_header(match &block {
                         either::Left(b) => &b.scale_encoded_header,
                         either::Right(b) => &b.scale_encoded_header,
                     }); // TODO: indicate hash in subscription?
@@ -2790,12 +2830,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     parent_block_hash: methods::HashHexString(parent_block_hash),
-                                    new_runtime: if let either::Left(block) = block {
-                                        if let Some(rt) = block.new_runtime {
+                                    new_runtime: if let either::Left(block) = &block {
+                                        if let Some(rt) = &block.new_runtime {
                                             match rt {
                                                 Ok(spec) => {
                                                     Some(methods::MaybeRuntimeSpec::Valid {
-                                                        spec: convert_runtime_version(&spec),
+                                                        spec: convert_runtime_version(spec),
                                                     })
                                                 }
                                                 Err(error) => {
@@ -2815,7 +2855,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .to_json_request_object_parameters(None),
                         )
                         .await;
-                    if match block {
+                    if match &block {
                         either::Left(b) => b.is_new_best,
                         either::Right(b) => b.is_new_best,
                     } {
@@ -2832,9 +2872,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    subscription_info
-                        .pinned_blocks_headers
-                        .insert(hash, finalized_block_scale_encoded_header);
+                    subscription_info.pinned_blocks_headers.insert(
+                        hash,
+                        match block {
+                            either::Left(b) => b.scale_encoded_header,
+                            either::Right(b) => b.scale_encoded_header,
+                        },
+                    );
 
                     subscription_info.non_finalized_blocks.insert(
                         if parent_block_hash == finalized_block_hash {
@@ -2855,7 +2899,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 me.background_tasks.push({
                     match new_blocks {
-                        either::Left(new_blocks) => Box::pin(async move {
+                        either::Left(mut new_blocks) => Box::pin(async move {
                             if let Some(notification) = new_blocks.next().await {
                                 Event::ChainHeadSubscriptionWithRuntimeNotification {
                                     subscription_id,
@@ -2884,7 +2928,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::ChainHeadSubscriptionWithRuntimeNotification {
                 subscription_id,
                 notification,
-                stream,
+                mut stream,
             }) => {
                 // It might be that the JSON-RPC client has unsubscribed.
                 let Some(subscription_info) =
@@ -2932,7 +2976,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::ChainHeadSubscriptionWithoutRuntimeNotification {
                 subscription_id,
                 notification,
-                stream,
+                mut stream,
             }) => {
                 // It might be that the JSON-RPC client has unsubscribed.
                 let Some(subscription_info) =
@@ -3033,9 +3077,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }
 
             WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
                 result: Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled),
+                ..
             }) => {
                 // We pass `None` for the API requirement, thus this error can never happen.
                 unreachable!()
@@ -3263,7 +3306,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     sync_service::StorageQueryProgress::Progress {
                         request_index,
                         item,
-                        query,
+                        mut query,
                     },
             }) => {
                 let mut items_chunk = Vec::with_capacity(16);
@@ -3495,11 +3538,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 block_hash,
                 result: Ok(result),
             }) => {
-                me.block_state_root_hashes_numbers_cache
-                    .put(block_hash, result);
+                me.block_headers_cache.put(block_hash, result);
 
                 for (request_id, request) in me
-                    .block_state_root_hashes_numbers_pending
+                    .block_headers_pending
                     .remove(&block_hash)
                     .into_iter()
                     .flat_map(|l| l)
@@ -3516,7 +3558,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 result: Err(()),
             }) => {
                 for (request_id, _) in me
-                    .block_state_root_hashes_numbers_pending
+                    .block_headers_pending
                     .remove(&block_hash)
                     .into_iter()
                     .flat_map(|l| l)
@@ -3535,10 +3577,53 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
             }
 
+            WakeUpReason::Event(Event::RuntimeDownloaded {
+                block_hash,
+                result: Ok(result),
+            }) => {
+                me.block_runtimes_cache.put(block_hash, result);
+
+                for (request_id, request) in me
+                    .block_runtimes_pending
+                    .remove(&block_hash)
+                    .into_iter()
+                    .flat_map(|l| l)
+                {
+                    // Note that we push_front in order to guarantee that the information is
+                    // not removed from cache before the request is processed.
+                    me.multistage_requests_to_advance
+                        .push_front((request_id, request));
+                }
+            }
+
+            WakeUpReason::Event(Event::RuntimeDownloaded {
+                block_hash,
+                result: Err(()),
+            }) => {
+                for (request_id, _) in me
+                    .block_runtimes_pending
+                    .remove(&block_hash)
+                    .into_iter()
+                    .flat_map(|l| l)
+                {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id,
+                            parse::ErrorResponse::ServerError(
+                                -32800,
+                                "failed to retrieve runtime from the network",
+                            ),
+                            None,
+                        ))
+                        .await;
+                }
+            }
+
             WakeUpReason::Event(Event::TransactionEvent {
                 subscription_id,
                 event: transactions_service::TransactionStatus::Dropped(drop_reason),
-                watcher,
+                ..
             }) => {
                 let Some(transaction_watch) =
                     me.transactions_subscriptions.remove(&subscription_id)
@@ -3696,7 +3781,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::TransactionEvent {
                 subscription_id,
                 event,
-                watcher,
+                mut watcher,
             }) => {
                 let Some(transaction_watch) =
                     me.transactions_subscriptions.get_mut(&subscription_id)
@@ -3706,7 +3791,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     continue;
                 };
 
-                match (event, transaction_watch.ty) {
+                match (event, &transaction_watch.ty) {
                     (
                         transactions_service::TransactionStatus::Broadcast(peers),
                         TransactionWatchTy::Legacy,
@@ -3874,12 +3959,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::ChainGetBlockResult {
                 request_id_json,
                 mut result,
+                expected_block_hash,
             }) => {
                 // Check whether the header and body are present and valid.
                 // TODO: try the request again with a different peerin case the response is invalid, instead of returning null
                 if let Ok(block) = &result {
                     if let (Some(header), Some(body)) = (&block.header, &block.body) {
-                        if header::hash_from_scale_encoded_header(header) == hash {
+                        if header::hash_from_scale_encoded_header(header) == expected_block_hash {
                             if let Ok(decoded) =
                                 header::decode(header, me.sync_service.block_number_bytes())
                             {
