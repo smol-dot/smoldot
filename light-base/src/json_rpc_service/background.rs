@@ -41,7 +41,7 @@ use core::{
     time::Duration,
 };
 use futures_lite::{FutureExt as _, StreamExt as _};
-use futures_util::{future, stream, FutureExt as _};
+use futures_util::{future, stream};
 use rand_chacha::{
     rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
@@ -102,6 +102,7 @@ struct Background<TPlat: PlatformRef> {
     /// subscriptions. `None` if not subscribed yet.
     runtime_service_subscription: RuntimeServiceSubscription<TPlat>,
     /// Best block used for legacy API functions that target the best block.
+    // TODO: remove
     legacy_api_best_block: [u8; 32],
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
@@ -1236,21 +1237,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ..
                         } = &me.runtime_service_subscription
                         {
-                            let _ = me
-                                .responses_tx
-                                .send(
-                                    methods::ServerToClient::state_runtimeVersion {
-                                        subscription: Cow::Borrowed(&subscription_id),
-                                        result: Some(convert_runtime_version_legacy(
-                                            &pinned_blocks
-                                                .get(current_best_block)
-                                                .unwrap()
-                                                .runtime_version,
-                                        )),
-                                    }
-                                    .to_json_request_object_parameters(None),
-                                )
-                                .await;
+                            // TODO: we don't send None in case of error; remove the Option altogether
+                            if let Ok(runtime_version) = &*pinned_blocks
+                                .get(current_best_block)
+                                .unwrap()
+                                .runtime_version
+                            {
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::ServerToClient::state_runtimeVersion {
+                                            subscription: Cow::Borrowed(&subscription_id),
+                                            result: Some(convert_runtime_version_legacy(
+                                                runtime_version,
+                                            )),
+                                        }
+                                        .to_json_request_object_parameters(None),
+                                    )
+                                    .await;
+                            }
                         }
 
                         let _was_inserted =
@@ -4753,6 +4758,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }
 
             WakeUpReason::NotifyFinalizedHeads => {
+                let RuntimeServiceSubscription::Active {
+                    pinned_blocks,
+                    current_finalized_block,
+                    finalized_heads_subscriptions_stale,
+                    ..
+                } = &mut me.runtime_service_subscription
+                else {
+                    unreachable!()
+                };
+
                 let finalized_block_header = &pinned_blocks
                     .get(current_finalized_block)
                     .unwrap()
@@ -4760,14 +4775,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let finalized_block_json_rpc_header =
                     match methods::Header::from_scale_encoded_header(
                         finalized_block_header,
-                        task.runtime_service.block_number_bytes(),
+                        me.runtime_service.block_number_bytes(),
                     ) {
                         Ok(h) => h,
                         Err(error) => {
                             log!(
-                                &task.platform,
+                                &me.platform,
                                 Warn,
-                                &task.log_target,
+                                &me.log_target,
                                 format!(
                                     "`chain_subscribeFinalizedHeads` subscription has skipped \
                                     block due to undecodable header. Hash: {}. Error: {}",
@@ -4779,12 +4794,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
                     };
 
-                for (subscription_id, subscription) in &mut task.finalized_heads_subscriptions {
-                    subscription
-                        .send_notification(methods::ServerToClient::chain_finalizedHead {
-                            subscription: subscription_id.as_str().into(),
-                            result: finalized_block_json_rpc_header.clone(),
-                        })
+                for subscription_id in &me.finalized_heads_subscriptions {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::ServerToClient::chain_finalizedHead {
+                                subscription: Cow::Borrowed(subscription_id),
+                                result: finalized_block_json_rpc_header.clone(),
+                            }
+                            .to_json_request_object_parameters(None),
+                        )
                         .await;
                 }
 
@@ -4849,17 +4868,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         &pinned_blocks.get(&prev_best_block).unwrap().runtime_version,
                     )
                 }) {
-                    for subscription_id in &me.runtime_version_subscriptions {
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::ServerToClient::state_runtimeVersion {
-                                    subscription: subscription_id.as_str().into(),
-                                    result: convert_runtime_version_legacy(new_best_runtime),
-                                }
-                                .to_json_request_object_parameters(None),
-                            )
-                            .await;
+                    if let Ok(new_best_runtime) = &**new_best_runtime {
+                        for subscription_id in &me.runtime_version_subscriptions {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::ServerToClient::state_runtimeVersion {
+                                        subscription: subscription_id.as_str().into(),
+                                        result: Some(convert_runtime_version_legacy(
+                                            new_best_runtime,
+                                        )),
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
                     }
                 }
 
