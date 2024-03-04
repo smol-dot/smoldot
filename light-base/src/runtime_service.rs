@@ -1799,7 +1799,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // If we aren't subscribed to the sync service yet, we notify that we are not
                 // near the head of the chain.
-                if !background.blocks_stream.is_none() {
+                if background.blocks_stream.is_none() {
                     let _ = result_tx.send(false);
                     continue;
                 }
