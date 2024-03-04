@@ -23,8 +23,6 @@ jobs:
         # request triggers other actions such as the CI checks. GitHub prevents actions that use
         # GITHUB_TOKEN from triggering further actions, to avoid recursive actions.
         token: ${{ secrets.GH_TOKEN }}
-        committer: Smoldot <pierre.krieger1708@gmail.com>
-        author: Smoldot <pierre.krieger1708@gmail.com>
         branch: cargo-update
         base: main
         title: Periodic `cargo update`
