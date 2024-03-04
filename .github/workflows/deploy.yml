@@ -28,15 +28,52 @@ on:
 permissions: read-all
 
 jobs:
-  build-push-docker-image:
+  build-docker-image:
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'macos-14' }}
+    permissions:
+      contents: read
+    steps:
+    - run: |
+        brew install docker
+        colima start
+      if: runner.os == 'macos'
+    - uses: docker/setup-buildx-action@v3
+    - uses: actions/checkout@v4
+      with:
+        path: repo
+    - uses: docker/build-push-action@v5.1.0
+      with:
+        context: ./repo
+        platforms: ${{ matrix.platform }}
+        build-args: |
+          TARGET=${{ matrix.platform == 'linux/amd64' && 'x86_64-unknown-linux-gnu' || 'aarch64-unknown-linux-gnu' }}
+        file: ./repo/full-node/Dockerfile
+        tags: ghcr.io/smol-dot/full-node:${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+        outputs: type=docker,dest=./image.tar
+    - uses: actions/upload-artifact@v4
+      with:
+        name: docker-image-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+        path: ./image.tar
+        if-no-files-found: error
+        retention-days: 1
+
+  push-docker-image:
     runs-on: ubuntu-latest
+    needs:
+      build-docker-image
     permissions:
       contents: read
       packages: write
     steps:
-    - uses: docker/setup-qemu-action@v3
+    - uses: actions/download-artifact@v4
+      with:
+        path: .
     - uses: docker/setup-buildx-action@v3
-    - uses: actions/checkout@v4
+    - run: |
+        ls -1 */*.tar | xargs --no-run-if-empty -L 1 docker load --input
     - uses: docker/login-action@v3 
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -44,13 +81,14 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v5.1.0
-      with:
-        context: .
-        file: ./full-node/Dockerfile
-        load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: ghcr.io/smol-dot/full-node:main
-    - run: docker push ghcr.io/smol-dot/full-node:main
+    - run: docker images   # TODO remove
+    - run: docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/ --amend &/' | tr -d '\n'   # TODO: remove
+    - run: |
+        docker manifest create \
+          ghcr.io/smol-dot/full-node:main \
+          $(docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/ --amend &/' | tr -d '\n')
+    - run: docker images   # TODO remove
+    - run: docker manifest push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
@@ -271,7 +309,7 @@ jobs:
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
+    needs: [push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
