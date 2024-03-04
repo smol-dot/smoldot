@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix crash when extracting the database of a chain when the current Babe epoch number doesn't immediately follow the previous Babe epoch number. ([#1695](https://github.com/smol-dot/smoldot/pull/1695))
+- Fix `isSyncing` is always being equal to `true` in the return value of the `system_health` JSON-RPC function. ([#1697](https://github.com/smol-dot/smoldot/pull/1697))
 
 ## 2.0.21 - 2024-02-06
 
