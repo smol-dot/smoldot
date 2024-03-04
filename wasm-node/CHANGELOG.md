@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix crash when extracting the database of a chain when the current Babe epoch number doesn't immediately follow the previous Babe epoch number. ([#1695](https://github.com/smol-dot/smoldot/pull/1695))
+
 ## 2.0.21 - 2024-02-06
 
 ### Changed
