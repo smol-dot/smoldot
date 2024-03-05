@@ -15,7 +15,7 @@ required-features = ["std"]
 [dependencies]
 async-channel = { version = "2.2.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
-base64 = { version = "0.21.7", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
 either = { version = "1.9.0", default-features = false }
