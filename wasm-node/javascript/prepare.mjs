@@ -36,25 +36,14 @@ if (buildProfile != 'debug' && buildProfile != 'min-size-release')
 
 // The important step in this script is running `cargo build --target wasm32-unknown-unknown` on
 // the Rust code. This generates a `wasm` file in `target/wasm32-unknown-unknown`.
-// Some optional Wasm features are enabled during the compilation in order to speed up the
-// execution of smoldot.
-// SIMD is intentionally not enabled, because WASM engines seem to allow only SIMD instructions
-// on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1625130#c11>
+// No optional Wasm features is enabled due to being an unstable part of the Rust compiler.
+// Additionally, SIMD should not be enabled, because WASM engines seem to allow only SIMD
+// instructions on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1625130#c11>
 // and <https://bugzilla.mozilla.org/show_bug.cgi?id=1840710>.
-//
-// Note that this doesn't enable these features in the Rust standard library (which comes
-// precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
-// standard library could be compiled with these features using the `-Z build-std` flag, but at
-// the time of the writing of this comment this would require an unstable version of Rust.
-// Use `rustc --print target-features --target wasm32-unknown-unknown` to see the list of target
-// features.
-// See <https://webassembly.org/roadmap/> to know which version of which engine supports which
-// feature.
-// See also the issue: <https://github.com/smol-dot/smoldot/issues/350>
 child_process.execSync(
     "cargo build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
-    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
+    { 'stdio': 'inherit' }
 );
 const rustOutput = "../../target/wasm32-unknown-unknown/" + buildProfile + "/smoldot_light_wasm.wasm";
 

@@ -172,9 +172,9 @@ dependencies = [
 
 [[package]]
 name = "async-io"
-version = "2.3.1"
+version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f97ab0c5b00a7cdbe5a371b9a782ee7be1316095885c8a4ea1daf490eb0ef65"
+checksum = "dcccb0f599cfa2f8ace422d3555572f47424da5648a4382a9dd0310ff8210884"
 dependencies = [
  "async-lock 3.3.0",
  "cfg-if",
@@ -427,6 +427,12 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "chacha20"
@@ -769,9 +775,9 @@ dependencies = [
 
 [[package]]
 name = "ctrlc"
-version = "3.4.2"
+version = "3.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b467862cc8610ca6fc9a1532d7777cee0804e678ab45410897b9396495994a0b"
+checksum = "672465ae37dc1bc6380a6547a8883d5dd397b0f1faaad4f265726cc7042a5345"
 dependencies = [
  "nix",
  "windows-sys 0.52.0",
@@ -1577,12 +1583,13 @@ checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
  "bitflags 2.4.2",
  "cfg-if",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -2271,7 +2278,7 @@ dependencies = [
  "derive_more",
  "ed25519-zebra",
  "either",
- "event-listener 4.0.3",
+ "event-listener 5.2.0",
  "fnv",
  "futures-executor",
  "futures-lite",
@@ -2325,7 +2332,7 @@ dependencies = [
  "derive_more",
  "directories",
  "either",
- "event-listener 4.0.3",
+ "event-listener 5.2.0",
  "fnv",
  "futures-channel",
  "futures-lite",
@@ -2358,7 +2365,7 @@ dependencies = [
  "derive_more",
  "either",
  "env_logger",
- "event-listener 4.0.3",
+ "event-listener 5.2.0",
  "fnv",
  "futures-channel",
  "futures-lite",
@@ -2391,7 +2398,7 @@ dependencies = [
  "crossbeam-queue",
  "derive_more",
  "dlmalloc",
- "event-listener 4.0.3",
+ "event-listener 5.2.0",
  "fnv",
  "futures-lite",
  "futures-util",
@@ -2741,13 +2748,15 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.6"
+version = "0.32.0-beta.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe300327c917a4542561357e52238745e9c82edc4621440e7995270b99467759"
+checksum = "20ae225a373bdfc7412ec39f3b409fe8a540a1907f698f21030a3bc010435ef0"
 dependencies = [
+ "arrayvec 0.7.4",
  "multi-stash",
  "num-derive",
  "num-traits",
+ "slice-group-by",
  "smallvec",
  "spin",
  "wasmi_arena",
@@ -2757,15 +2766,15 @@ dependencies = [
 
 [[package]]
 name = "wasmi_arena"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "104a7f73be44570cac297b3035d76b169d6599637631cf37a1703326a0727073"
+checksum = "0f686876d8f92a573a9a1e005b78ec1e893158bbdc3ac75a1270384ca86d6c6b"
 
 [[package]]
 name = "wasmi_core"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ac482df6761020b2b75c9aade41c105993c5b9f64156c349bb7ccad226a6ecd"
+checksum = "02377ef0c323a5e462f033ededb94ddce7ea78cc6312f5f89d936bfa789e90c9"
 dependencies = [
  "downcast-rs",
  "libm",
