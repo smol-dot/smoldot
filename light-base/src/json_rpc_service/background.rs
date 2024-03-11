@@ -2528,22 +2528,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json: request_id,
-                stage: MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
-                request_ty: MultiStageRequestTy::ChainGetHeader,
-            } => {
-                // We special-case `chain_getHeader` as we can answer it immediately.
-                // TODO: answer request
-                todo!()
-            }
-
-            WakeUpReason::AdvanceMultiStageRequest {
-                request_id_json: request_id,
                 stage: MultiStageRequestStage::BlockHashKnown { block_hash },
                 request_ty,
             } => {
                 // If the block's information are available in cache, switch it to the next stage.
                 if let Some(in_cache) = me.block_headers_cache.get(&block_hash) {
-                    let &Ok((_, block_state_trie_root_hash, block_number)) = in_cache else {
+                    let &Ok((ref scale_encoded_header, block_state_trie_root_hash, block_number)) =
+                        in_cache
+                    else {
                         let _ = me
                             .responses_tx
                             .send(parse::build_error_response(
@@ -2554,6 +2546,37 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                         continue;
                     };
+
+                    if matches!(request_ty, MultiStageRequestTy::ChainGetHeader) {
+                        match methods::Header::from_scale_encoded_header(
+                            scale_encoded_header,
+                            me.runtime_service.block_number_bytes(),
+                        ) {
+                            Ok(header) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::chain_getHeader(header)
+                                            .to_json_response(&request_id),
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_error_response(
+                                        &request_id,
+                                        json_rpc::parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            &format!("Failed to decode block header: {error}"),
+                                        ),
+                                        None,
+                                    ))
+                                    .await;
+                            }
+                        }
+                        continue;
+                    }
 
                     me.multistage_requests_to_advance.push_back((
                         request_id,
@@ -2628,6 +2651,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         entry.insert(list);
                     }
                 }
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                stage: MultiStageRequestStage::BlockInfoKnown { .. },
+                request_ty: MultiStageRequestTy::ChainGetHeader,
+                ..
+            } => {
+                // `chain_getHeader` should never reach this stage.
+                unreachable!()
             }
 
             WakeUpReason::AdvanceMultiStageRequest {
