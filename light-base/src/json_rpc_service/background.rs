@@ -2510,15 +2510,135 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(parse::build_error_response(
                                 &request_id,
-                                parse::ErrorResponse::ServerError(-32800, "invalid block header"),
+                                parse::ErrorResponse::ServerError(-32000, "invalid block header"),
                                 None,
                             ))
                             .await;
                         continue;
                     };
 
-                    // TODO: advance to stage 2
-                    todo!();
+                    // Advance to stage 2.
+                    match request {
+                        MultiStageRequest::ChainGetHeader { block_hash } => {
+                            todo!() // TODO: answer
+                        }
+                        MultiStageRequest::StateCallStage1 {
+                            block_hash,
+                            name,
+                            parameters,
+                        } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateCallStage2 {
+                                    block_hash,
+                                    name,
+                                    parameters,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateGetKeysStage1 { block_hash, prefix } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateGetKeysStage2 {
+                                    block_hash,
+                                    prefix,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateGetKeysPagedStage1 {
+                            block_hash,
+                            prefix,
+                            count,
+                            start_key,
+                        } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateGetKeysPagedStage2 {
+                                    block_hash,
+                                    prefix,
+                                    count,
+                                    start_key,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateQueryStorageAtStage1 { block_hash, keys } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateQueryStorageAtStage2 {
+                                    block_hash,
+                                    keys,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateGetMetadataStage1 { block_hash } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateGetMetadataStage2 {
+                                    block_hash,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateGetStorageStage1 { block_hash, key } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateGetStorageStage2 {
+                                    block_hash,
+                                    key,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::StateGetRuntimeVersionStage1 { block_hash } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::StateGetRuntimeVersionStage2 {
+                                    block_hash,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::PaymentQueryInfoStage1 {
+                            block_hash,
+                            extrinsic,
+                        } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::PaymentQueryInfoStage2 {
+                                    block_hash,
+                                    extrinsic,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        MultiStageRequest::SystemAccountNextIndexStage1 {
+                            block_hash,
+                            account_id,
+                        } => {
+                            me.multistage_requests_to_advance.push_back((
+                                request_id,
+                                MultiStageRequest::SystemAccountNextIndexStage2 {
+                                    block_hash,
+                                    account_id,
+                                    block_number: *block_number,
+                                    block_state_trie_root_hash: *state_trie_root_hash,
+                                },
+                            ));
+                        }
+                        _ => unreachable!(),
+                    };
 
                     continue;
                 }
@@ -2547,12 +2667,34 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     Duration::from_secs(5),
                                     NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
                                 );
-                            // TODO: must check accuracy of hash
+                            let block_number_bytes = me.runtime_service.block_number_bytes();
                             Box::pin(async move {
-                                Event::BlockInfoRetrieved {
-                                    block_hash,
-                                    result: todo!(), // block_info_retrieve_future.await,
-                                }
+                                let result = match block_info_retrieve_future.await {
+                                    Ok(result) => match result.header {
+                                        Some(scale_header) => {
+                                            if header::hash_from_scale_encoded_header(&scale_header)
+                                                == block_hash
+                                            {
+                                                Ok(header::decode(
+                                                    &scale_header,
+                                                    block_number_bytes,
+                                                )
+                                                .map(|header| {
+                                                    (
+                                                        scale_header.clone(),
+                                                        *header.state_root,
+                                                        header.number,
+                                                    )
+                                                }))
+                                            } else {
+                                                Err(())
+                                            }
+                                        }
+                                        None => Err(()),
+                                    },
+                                    Err(()) => Err(()),
+                                };
+                                Event::BlockInfoRetrieved { block_hash, result }
                             })
                         });
 
@@ -4115,7 +4257,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .responses_tx
                         .send(parse::build_error_response(
                             &request_id,
-                            parse::ErrorResponse::ServerError(
+                            parse::ErrorResponse::ApplicationDefined(
                                 -32800,
                                 "failed to retrieve block information from the network",
                             ),
@@ -4158,7 +4300,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .responses_tx
                         .send(parse::build_error_response(
                             &request_id,
-                            parse::ErrorResponse::ServerError(
+                            parse::ErrorResponse::ApplicationDefined(
                                 -32800,
                                 "failed to retrieve runtime from the network",
                             ),
