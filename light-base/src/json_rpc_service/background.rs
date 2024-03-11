@@ -4033,9 +4033,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
             WakeUpReason::Event(Event::ChainHeadCallOperationDone {
                 subscription_id,
                 operation_id,
-                result: Ok(success),
+                result,
             }) => {
-                // A `chainHead_call` operation has finished successfully.
+                // A `chainHead_call` operation has finished.
 
                 let Some(subscription_info) =
                     me.chain_head_follow_subscriptions.get_mut(&subscription_id)
@@ -4053,262 +4053,55 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 subscription_info.available_operation_slots += operation_info.occupied_slots;
 
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationCallDone {
-                                operation_id: operation_id.clone().into(),
-                                output: methods::HexString(success.output),
-                            },
+                let result = match result {
+                    Ok(success) => methods::FollowEvent::OperationCallDone {
+                        operation_id: operation_id.clone().into(),
+                        output: methods::HexString(success.output),
+                    },
+                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
+                        methods::FollowEvent::OperationError {
+                            operation_id: operation_id.clone().into(),
+                            error: error.to_string().into(),
                         }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result: Err(runtime_service::RuntimeCallError::InvalidRuntime(error)),
-            }) => {
-                // A `chainHead_call` operation has failed.
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
-                };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
-
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            },
-                        }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                result: Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled),
-                ..
-            }) => {
-                // We pass `None` for the API requirement, thus this error can never happen.
-                unreachable!()
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result: Err(runtime_service::RuntimeCallError::Crash),
-            }) => {
-                // A `chainHead_call` operation has failed.
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
-                };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
-
-                // TODO: is this the appropriate error?
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationInaccessible {
-                                operation_id: operation_id.clone().into(),
-                            },
-                        }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result: Err(runtime_service::RuntimeCallError::Inaccessible(_)),
-            }) => {
-                // A `chainHead_call` operation has failed.
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
-                };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
-
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationInaccessible {
-                                operation_id: operation_id.clone().into(),
-                            },
-                        }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result:
+                    }
+                    Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                        // We pass `None` for the API requirement, thus this error can never happen.
+                        unreachable!()
+                    }
+                    Err(
+                        runtime_service::RuntimeCallError::Crash
+                        | runtime_service::RuntimeCallError::Inaccessible(_),
+                    ) => methods::FollowEvent::OperationInaccessible {
+                        operation_id: operation_id.clone().into(),
+                    },
                     Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
-                    )),
-            }) => {
-                // A `chainHead_call` operation has failed.
-                // TODO: DRY everywhere around here
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
-                };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
-
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "Runtime has called an offchain host function"
-                                    .to_string()
-                                    .into(),
-                            },
-                        }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result:
+                    )) => methods::FollowEvent::OperationError {
+                        operation_id: operation_id.clone().into(),
+                        error: "Runtime has called an offchain host function"
+                            .to_string()
+                            .into(),
+                    },
                     Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::Start(error),
-                    )),
-            }) => {
-                // A `chainHead_call` operation has failed.
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
-                };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
-
-                let _ = me
-                    .responses_tx
-                    .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            },
-                        }
-                        .to_json_request_object_parameters(None),
-                    )
-                    .await;
-            }
-
-            WakeUpReason::Event(Event::ChainHeadCallOperationDone {
-                subscription_id,
-                operation_id,
-                result:
+                    )) => methods::FollowEvent::OperationError {
+                        operation_id: operation_id.clone().into(),
+                        error: error.to_string().into(),
+                    },
                     Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::Execution(error),
-                    )),
-            }) => {
-                // A `chainHead_call` operation has failed.
-
-                let Some(subscription_info) =
-                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
-                else {
-                    unreachable!()
+                    )) => methods::FollowEvent::OperationError {
+                        operation_id: operation_id.clone().into(),
+                        error: error.to_string().into(),
+                    },
                 };
-                let Some(operation_info) = subscription_info
-                    .operations_in_progress
-                    .remove(&operation_id)
-                else {
-                    // If the operation was cancelled, then a `ChainHeadOperationCancelled`
-                    // event should have been generated instead.
-                    unreachable!()
-                };
-
-                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
                     .send(
                         methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
-                            result: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            },
+                            result,
                         }
                         .to_json_request_object_parameters(None),
                     )
