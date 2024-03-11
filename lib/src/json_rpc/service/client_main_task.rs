@@ -29,7 +29,6 @@ use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
     num::NonZeroU32,
-    pin::Pin,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use futures_lite::FutureExt as _;
@@ -69,7 +68,7 @@ struct Inner {
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
 
     /// Event notified after the [`SerializedRequestsIo`] is destroyed.
-    on_serialized_requests_io_destroyed: Pin<Box<event_listener::EventListener>>,
+    on_serialized_requests_io_destroyed: event_listener::EventListener,
 }
 
 struct InnerSubscription {
