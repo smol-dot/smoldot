@@ -74,6 +74,10 @@ struct Background<TPlat: PlatformRef> {
     system_name: String,
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
+    /// Hash of the genesis block.
+    /// Keeping the genesis block is important, as the genesis block hash is included in
+    /// transaction signatures, and must therefore be queried by upper-level UIs.
+    genesis_block_hash: [u8; 32],
 
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
@@ -91,39 +95,37 @@ struct Background<TPlat: PlatformRef> {
     background_tasks:
         stream::FuturesUnordered<Pin<Box<dyn future::Future<Output = Event<TPlat>> + Send>>>,
 
-    /// Channel where requests are pulled from.
+    /// Channel where serialized JSON-RPC requests are pulled from.
     requests_rx: Pin<Box<async_channel::Receiver<String>>>,
-
-    /// Channel where to send responses and notifications to the foreground.
+    /// Channel to send serialized JSON-RPC responses and notifications to the foreground.
     responses_tx: async_channel::Sender<String>,
 
-    /// Stream of notifications coming from the runtime service. Used for legacy JSON-RPC API
-    /// subscriptions.
-    runtime_service_subscription: RuntimeServiceSubscription<TPlat>,
+    /// State of each `chainHead_follow` subscription indexed by its ID.
+    chain_head_follow_subscriptions:
+        hashbrown::HashMap<String, ChainHeadFollow, fnv::FnvBuildHasher>,
 
+    /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
+    /// flag prevents printing this message multiple times.
+    printed_legacy_json_rpc_warning: bool,
+
+    /// Next time to do some memory reclaims.
+    next_garbage_collection: Pin<Box<TPlat::Delay>>,
+
+    /// State of the runtime service subscription. Used for legacy JSON-RPC API subscriptions.
+    runtime_service_subscription: RuntimeServiceSubscription<TPlat>,
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
-    // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
     /// List of all active `chain_subscribeNewHeads` subscriptions, indexed by the subscription ID.
-    // TODO: shrink_to_fit?
     new_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
     /// List of all active `chain_subscribeFinalizedHeads` subscriptions, indexed by the
     /// subscription ID.
     finalized_heads_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
     /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
     /// subscription ID.
-    // TODO: shrink_to_fit?
     runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
     /// List of all active `author_submitAndWatchExtrinsic` and
     /// `transactionWatch_unstable_submitAndWatch` subscriptions, indexed by the subscription ID.
-    // TODO: shrink_to_fit?
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
-    /// State of each `chainHead_follow` subscription indexed by its ID.
-    // TODO: shrink_to_fit?
-    chain_head_follow_subscriptions:
-        hashbrown::HashMap<String, ChainHeadFollow, fnv::FnvBuildHasher>,
 
     /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
     /// Values are the list of keys requested by this subscription.
@@ -132,7 +134,6 @@ struct Background<TPlat: PlatformRef> {
     legacy_api_storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
     /// List of storage subscriptions whose latest sent notification isn't about the current
     /// best block.
-    // TODO: shrink_to_fit?
     legacy_api_stale_storage_subscriptions: hashbrown::HashSet<Arc<str>, fnv::FnvBuildHasher>,
     /// `true` if there exists a background task in [`Background::background_tasks`] currently
     /// fetching storage items for storage subscriptions.
@@ -141,36 +142,18 @@ struct Background<TPlat: PlatformRef> {
     /// List of multi-stage requests (i.e. JSON-RPC requests that require multiple asynchronous
     /// operations) that are ready to make progress.
     multistage_requests_to_advance: VecDeque<(String, MultiStageRequestStage, MultiStageRequestTy)>,
-
-    /// Cache of known headers, state trie root hashes and numbers of blocks.
-    ///
-    /// Can also be an `Err` if the header is in an invalid format.
-    block_headers_cache: lru::LruCache<
-        [u8; 32],
-        Result<(Vec<u8>, [u8; 32], u64), header::Error>,
-        fnv::FnvBuildHasher,
-    >,
-
-    /// Requests that are waiting for the best block hash to be known.
+    /// Multi-stage requests that are waiting for the best block hash to be known in order
+    /// to progress.
     best_block_hash_pending: Vec<(String, MultiStageRequestTy)>,
-
+    /// List of request IDs of `chain_getFinalizedHash` requests that are waiting for the
+    /// finalized block hash to be known.
+    pending_get_finalized_head: Vec<String>,
     /// Requests for blocks headers, state root hash and numbers that are still in progress.
-    /// For each block hash, contains a list of requests that are interested in the response.
-    /// Once the operation has been finished, the value is inserted in
+    /// For each block hash, contains a list of multi-stage requests that are interested in the
+    /// response. Once the operation has been finished, the value is inserted in
     /// [`Background::block_headers_cache`].
     block_headers_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
-
-    /// List of identifiers of `chain_getFinalizedHash` requests that are waiting for the
-    /// finalized block hash to be known.
-    pending_get_finalized_head: Vec<String>,
-
-    /// Cache of known runtimes of blocks.
-    ///
-    /// Note that runtimes that have failed to compile can be found here as well.
-    block_runtimes_cache:
-        lru::LruCache<[u8; 32], runtime_service::PinnedRuntime, fnv::FnvBuildHasher>,
-
     /// Requests for block runtimes that are still in progress.
     /// For each block hash, contains a list of requests that are interested in the response.
     /// Once the operation has been finished, the value is inserted in
@@ -178,21 +161,26 @@ struct Background<TPlat: PlatformRef> {
     block_runtimes_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
 
+    /// Cache of known headers, state trie root hashes and numbers of blocks. Used only for the
+    /// legacy JSON-RPC API.
+    ///
+    /// Can also be an `Err` if the header is in an invalid format.
+    block_headers_cache: lru::LruCache<
+        [u8; 32],
+        Result<(Vec<u8>, [u8; 32], u64), header::Error>,
+        fnv::FnvBuildHasher,
+    >,
+    /// Cache of known runtimes of blocks. Used only for the legacy JSON-RPC API.
+    ///
+    /// Note that runtimes that have failed to compile can be found here as well.
+    block_runtimes_cache:
+        lru::LruCache<[u8; 32], runtime_service::PinnedRuntime, fnv::FnvBuildHasher>,
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
-
-    /// Hash of the genesis block.
-    /// Keeping the genesis block is important, as the genesis block hash is included in
-    /// transaction signatures, and must therefore be queried by upper-level UIs.
-    genesis_block_hash: [u8; 32],
-
-    /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
-    /// flag prevents printing this message multiple times.
-    printed_legacy_json_rpc_warning: bool,
 }
 
 /// State of the subscription towards the runtime service.
@@ -458,6 +446,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             config.platform.fill_random_bytes(&mut seed);
             seed
         }),
+        next_garbage_collection: Box::pin(config.platform.sleep(Duration::new(0, 0))),
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
@@ -526,6 +515,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
         enum WakeUpReason<'a, TPlat: PlatformRef> {
             ForegroundDead,
+            GarbageCollection,
             IncomingJsonRpcRequest(String),
             AdvanceMultiStageRequest {
                 request_id_json: String,
@@ -552,7 +542,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
         }
 
         let wake_up_reason = {
-            // TODO: do storage subscriptions
             async {
                 match &mut me.runtime_service_subscription {
                     RuntimeServiceSubscription::NotCreated => {
@@ -632,13 +621,31 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     future::pending().await
                 }
             })
-            .await // TODO: subscription notification missing
+            .or(async {
+                (&mut me.next_garbage_collection).await;
+                me.next_garbage_collection = Box::pin(me.platform.sleep(Duration::from_secs(10)));
+                WakeUpReason::GarbageCollection
+            })
+            .await
         };
 
         match wake_up_reason {
             WakeUpReason::ForegroundDead => {
                 // Service foreground has been destroyed. Stop the background task.
                 return;
+            }
+
+            WakeUpReason::GarbageCollection => {
+                me.chain_head_follow_subscriptions.shrink_to_fit();
+                me.all_heads_subscriptions.shrink_to_fit();
+                me.new_heads_subscriptions.shrink_to_fit();
+                me.finalized_heads_subscriptions.shrink_to_fit();
+                me.runtime_version_subscriptions.shrink_to_fit();
+                me.transactions_subscriptions.shrink_to_fit();
+                me.legacy_api_stale_storage_subscriptions.shrink_to_fit();
+                me.multistage_requests_to_advance.shrink_to_fit();
+                me.block_headers_pending.shrink_to_fit();
+                me.block_runtimes_pending.shrink_to_fit();
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
