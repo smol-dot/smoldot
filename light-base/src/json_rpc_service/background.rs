@@ -35,7 +35,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    iter,
+    iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -161,6 +161,10 @@ struct Background<TPlat: PlatformRef> {
     /// [`Task::block_headers_cache`].
     block_headers_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
+
+    /// List of identifiers of `chain_getFinalizedHash` requests that are waiting for the
+    /// finalized block hash to be known.
+    pending_get_finalized_head: Vec<String>,
 
     /// Cache of known runtimes of blocks.
     ///
@@ -501,6 +505,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             Default::default(),
         ),
         best_block_hash_pending: Vec::new(),
+        pending_get_finalized_head: Vec::new(),
         block_headers_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         block_runtimes_cache: lru::LruCache::with_hasher(
             NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
@@ -812,23 +817,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_getFinalizedHead {} => {
-                        // TODO: do differently
-                        let finalized_hash = header::hash_from_scale_encoded_header(
-                            me.runtime_service
-                                .subscribe_all(16, NonZeroUsize::new(24).unwrap())
-                                .await
-                                .finalized_block_scale_encoded_header,
-                        );
-
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                                    finalized_hash,
-                                ))
-                                .to_json_response(request_id_json),
-                            )
-                            .await;
+                        if let RuntimeServiceSubscription::Active {
+                            current_finalized_block,
+                            ..
+                        } = &me.runtime_service_subscription
+                        {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chain_getFinalizedHead(
+                                        methods::HashHexString(*current_finalized_block),
+                                    )
+                                    .to_json_response(request_id_json),
+                                )
+                                .await;
+                        } else {
+                            me.pending_get_finalized_head
+                                .push(request_id_json.to_owned());
+                        }
                     }
 
                     methods::MethodCall::chain_getHeader { hash } => {
@@ -4116,7 +4122,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 };
 
                 // Advance all the requests that are waiting for the best block hash to be known.
-                for (request_id, request_ty) in me.best_block_hash_pending.drain(..) {
+                // We use `mem::take` as this de-allocates the memory of the `Vec`.
+                for (request_id, request_ty) in mem::take(&mut me.best_block_hash_pending) {
                     me.multistage_requests_to_advance.push_back((
                         request_id,
                         MultiStageRequestStage::BlockHashKnown {
@@ -4124,6 +4131,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         },
                         request_ty,
                     ));
+                }
+
+                // Answer all the pending `chain_getFinalizedHash` requests.
+                // We use `mem::take` as this de-allocates the memory of the `Vec`.
+                for request_id in mem::take(&mut me.pending_get_finalized_head) {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::chain_getFinalizedHead(methods::HashHexString(
+                                finalized_block_hash,
+                            ))
+                            .to_json_response(&request_id),
+                        )
+                        .await;
                 }
             }
 
