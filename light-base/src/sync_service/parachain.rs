@@ -366,7 +366,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         );
                         let finalized_index =
                             async_tree.input_insert_block(finalized_hash, None, false, true);
-                        async_tree.input_finalize(finalized_index, finalized_index);
+                        async_tree.input_finalize(finalized_index);
                         for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -416,6 +416,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             async_tree::OutputUpdate::Finalized {
                                 former_finalized_async_op_user_data: former_finalized_parahead,
                                 pruned_blocks,
+                                best_output_block_updated,
                                 ..
                             } if *runtime_subscription
                                 .async_tree
@@ -501,7 +502,11 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                         runtime_subscription.all_subscriptions.swap_remove(index);
                                     let notif = super::Notification::Finalized {
                                         hash,
-                                        best_block_hash,
+                                        best_block_hash_if_changed: if best_output_block_updated {
+                                            Some(best_block_hash)
+                                        } else {
+                                            None
+                                        },
                                         pruned_blocks: pruned_blocks_hashes.clone(),
                                     };
                                     if sender.try_send(notif).is_ok() {
@@ -781,7 +786,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (
                     WakeUpReason::Notification(runtime_service::Notification::Finalized {
                         hash,
-                        best_block_hash,
+                        best_block_hash_if_changed,
                         ..
                     }),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
@@ -795,21 +800,25 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         hash = HashDisplay(&hash)
                     );
 
+                    if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
+                        let best = runtime_subscription
+                            .async_tree
+                            .input_output_iter_unordered()
+                            .find(|b| *b.user_data == best_block_hash_if_changed)
+                            .unwrap()
+                            .id;
+                        runtime_subscription
+                            .async_tree
+                            .input_set_best_block(Some(best));
+                    }
+
                     let finalized = runtime_subscription
                         .async_tree
                         .input_output_iter_unordered()
                         .find(|b| *b.user_data == hash)
                         .unwrap()
                         .id;
-                    let best = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == best_block_hash)
-                        .unwrap()
-                        .id;
-                    runtime_subscription
-                        .async_tree
-                        .input_finalize(finalized, best);
+                    runtime_subscription.async_tree.input_finalize(finalized);
                     runtime_subscription.must_process_sync_tree = true;
                 }
 

@@ -514,7 +514,8 @@ pub enum Notification {
         /// finalized blocks, then the [`SubscribeAll::new_blocks`] channel is force-closed.
         hash: [u8; 32],
 
-        /// Hash of the header of the best block after the finalization.
+        /// If the current best block is pruned by the finalization, contains the updated hash
+        /// of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
@@ -523,8 +524,7 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        // TODO: consider reporting whether it has changed
-        best_block_hash: [u8; 32],
+        best_block_hash_if_changed: Option<[u8; 32]>,
 
         /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
         /// they're not descendants of the newly-finalized block.
@@ -807,7 +807,7 @@ async fn run_background<TPlat: PlatformRef>(
                 false,
                 true,
             );
-            tree.input_finalize(node_index, node_index);
+            tree.input_finalize(node_index);
 
             Tree::FinalizedBlockRuntimeUnknown { tree }
         };
@@ -1012,7 +1012,7 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
                 user_data: new_finalized,
-                best_block_index,
+                best_output_block_updated,
                 pruned_blocks,
                 former_finalized_async_op_user_data: former_finalized_runtime,
                 ..
@@ -1028,8 +1028,14 @@ async fn run_background<TPlat: PlatformRef>(
                 };
 
                 *finalized_block = new_finalized;
-                let best_block_hash =
-                    best_block_index.map_or(finalized_block.hash, |idx| tree[idx].hash);
+                let best_block_hash_if_changed = if best_output_block_updated {
+                    Some(
+                        tree.output_best_block_index()
+                            .map_or(finalized_block.hash, |(idx, _)| tree[idx].hash),
+                    )
+                } else {
+                    None
+                };
 
                 log!(
                     &background.platform,
@@ -1037,7 +1043,11 @@ async fn run_background<TPlat: PlatformRef>(
                     &background.log_target,
                     "output-chain-finalized",
                     block_hash = HashDisplay(&finalized_block.hash),
-                    best_block_hash = HashDisplay(&best_block_hash),
+                    best_block_hash = if let Some(best_block_hash) = best_block_hash_if_changed {
+                        Cow::Owned(HashDisplay(&best_block_hash).to_string())
+                    } else {
+                        Cow::Borrowed("<unchanged>")
+                    },
                     num_subscribers = all_blocks_subscriptions.len()
                 );
 
@@ -1049,7 +1059,7 @@ async fn run_background<TPlat: PlatformRef>(
                     .retain(|_, runtime| runtime.strong_count() > 0);
 
                 let all_blocks_notif = Notification::Finalized {
-                    best_block_hash,
+                    best_block_hash_if_changed,
                     hash: finalized_block.hash,
                     pruned_blocks: pruned_blocks.iter().map(|(_, b, _)| b.hash).collect(),
                 };
@@ -1241,7 +1251,7 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate::Finalized {
                 user_data: new_finalized,
                 former_finalized_async_op_user_data,
-                best_block_index,
+                best_output_block_updated,
                 ..
             }) => {
                 let Tree::FinalizedBlockRuntimeUnknown { tree, .. } = &mut background.tree else {
@@ -1252,15 +1262,25 @@ async fn run_background<TPlat: PlatformRef>(
                 // known, otherwise there's a pretty big bug somewhere.
                 debug_assert!(former_finalized_async_op_user_data.is_none());
 
-                let best_block_hash =
-                    best_block_index.map_or(new_finalized.hash, |idx| tree[idx].hash);
+                let best_block_hash_if_changed = if best_output_block_updated {
+                    Some(
+                        tree.output_best_block_index()
+                            .map_or(new_finalized.hash, |(idx, _)| tree[idx].hash),
+                    )
+                } else {
+                    None
+                };
                 log!(
                     &background.platform,
                     Trace,
                     &background.log_target,
                     "output-chain-initialized",
                     finalized_block_hash = HashDisplay(&new_finalized.hash),
-                    best_block_hash = HashDisplay(&best_block_hash)
+                    best_block_hash = if let Some(best_block_hash) = best_block_hash_if_changed {
+                        Cow::Owned(HashDisplay(&best_block_hash).to_string())
+                    } else {
+                        Cow::Borrowed("<unchanged>")
+                    },
                 );
 
                 // Substitute `tree` with a dummy empty tree just in order to extract
@@ -1469,7 +1489,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     false,
                                     true,
                                 );
-                                tree.input_finalize(node_index, node_index);
+                                tree.input_finalize(node_index);
 
                                 for block in subscription.non_finalized_blocks_ancestry_order {
                                     // TODO: O(n)
@@ -2367,7 +2387,7 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::Notification(sync_service::Notification::Finalized {
                 hash,
-                best_block_hash,
+                best_block_hash_if_changed,
                 ..
             }) => {
                 // Sync service has reported a finalized block.
@@ -2378,8 +2398,33 @@ async fn run_background<TPlat: PlatformRef>(
                     &background.log_target,
                     "input-chain-finalized",
                     block_hash = HashDisplay(&hash),
-                    best_block_hash = HashDisplay(&best_block_hash)
+                    best_block_hash = if let Some(best_block_hash) = best_block_hash_if_changed {
+                        Cow::Owned(HashDisplay(&best_block_hash).to_string())
+                    } else {
+                        Cow::Borrowed("<unchanged>")
+                    }
                 );
+
+                if let Some(best_block_hash) = best_block_hash_if_changed {
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            let new_best_block = tree
+                                .input_output_iter_unordered()
+                                .find(|block| block.user_data.hash == best_block_hash)
+                                .unwrap()
+                                .id;
+                            tree.input_set_best_block(Some(new_best_block));
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            let new_best_block = tree
+                                .input_output_iter_unordered()
+                                .find(|block| block.user_data.hash == best_block_hash)
+                                .unwrap()
+                                .id;
+                            tree.input_set_best_block(Some(new_best_block));
+                        }
+                    }
+                }
 
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
@@ -2393,12 +2438,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .find(|block| block.user_data.hash == hash)
                             .unwrap()
                             .id;
-                        let new_best_block = tree
-                            .input_output_iter_unordered()
-                            .find(|block| block.user_data.hash == best_block_hash)
-                            .unwrap()
-                            .id;
-                        tree.input_finalize(node_to_finalize, new_best_block);
+                        tree.input_finalize(node_to_finalize);
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                         let node_to_finalize = tree
@@ -2406,12 +2446,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .find(|block| block.user_data.hash == hash)
                             .unwrap()
                             .id;
-                        let new_best_block = tree
-                            .input_output_iter_unordered()
-                            .find(|block| block.user_data.hash == best_block_hash)
-                            .unwrap()
-                            .id;
-                        tree.input_finalize(node_to_finalize, new_best_block);
+                        tree.input_finalize(node_to_finalize);
                     }
                 }
             }

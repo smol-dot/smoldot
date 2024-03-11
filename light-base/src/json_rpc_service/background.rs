@@ -3651,9 +3651,26 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 match notification {
                     runtime_service::Notification::Finalized {
                         hash,
-                        best_block_hash,
+                        best_block_hash_if_changed,
                         pruned_blocks,
                     } => {
+                        if let Some(new_best_block_hash) = best_block_hash_if_changed {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: Cow::Borrowed(&subscription_id),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(
+                                                new_best_block_hash,
+                                            ),
+                                        },
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
+
                         let _ = me
                             .responses_tx
                             .send(
@@ -3767,9 +3784,26 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 match notification {
                     sync_service::Notification::Finalized {
                         hash,
-                        best_block_hash,
+                        best_block_hash_if_changed,
                         pruned_blocks,
                     } => {
+                        if let Some(new_best_block_hash) = best_block_hash_if_changed {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: Cow::Borrowed(&subscription_id),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(
+                                                new_best_block_hash,
+                                            ),
+                                        },
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
+
                         let _ = me
                             .responses_tx
                             .send(
@@ -4587,7 +4621,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     runtime_service::Notification::Finalized {
                         hash: finalized_hash,
                         pruned_blocks,
-                        best_block_hash: new_best_block_hash,
+                        best_block_hash_if_changed,
                     },
                 pinned_blocks,
                 finalized_and_pruned_lru,
@@ -4621,7 +4655,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     finalized_and_pruned_lru.put(block_hash, ());
                 }
 
-                if *current_best_block != new_best_block_hash {
+                if let Some(new_best_block_hash) = best_block_hash_if_changed {
                     *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
                     *current_best_block = new_best_block_hash;
                 }
