@@ -86,7 +86,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, pin, time::Duration};
+use core::{num::NonZeroU32, ops, time::Duration};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use platform::PlatformRef;
@@ -325,7 +325,7 @@ pub struct JsonRpcResponses<TPlat: PlatformRef> {
     inner: Option<json_rpc_service::Frontend<TPlat>>,
 
     /// Notified when the [`PublicApiChain`] is destroyed.
-    public_api_chain_destroyed: pin::Pin<Box<event_listener::EventListener>>,
+    public_api_chain_destroyed: event_listener::EventListener,
 }
 
 impl<TPlat: PlatformRef> JsonRpcResponses<TPlat> {
