@@ -301,6 +301,10 @@ enum StorageRequestInProgress {
         in_progress_results: Vec<methods::HexString>,
     },
     StateGetKeysPaged {
+        block_hash: [u8; 32],
+        prefix: Vec<u8>,
+        count: u32,
+        start_key: Vec<u8>,
         in_progress_results: Vec<Vec<u8>>,
     },
     StateQueryStorageAt {
@@ -2441,6 +2445,40 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 RuntimeServiceSubscription::Active {
                     current_best_block, ..
                 } => {
+                    // We special-case `state_getKeysPaged` as the results of previous similar
+                    // requests are put in a cache. Perform a cache lookup now.
+                    if let MultiStageRequestTy::StateGetKeysPaged {
+                        prefix,
+                        start_key,
+                        count,
+                    } = &request_ty
+                    {
+                        if let Some(cache_entry) =
+                            me.state_get_keys_paged_cache.get(&GetKeysPagedCacheKey {
+                                hash: current_best_block,
+                                prefix: prefix.clone(),
+                            })
+                        {
+                            // Cache hit!
+                            // Filter by start key and count.
+                            let results_to_client = cache_entry
+                                .iter()
+                                .cloned()
+                                .filter(|k| *k >= *start_key) // TODO: not sure if start should be in the set or not?
+                                .map(methods::HexString)
+                                .take(usize::try_from(*count).unwrap_or(usize::max_value()))
+                                .collect::<Vec<_>>();
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::state_getKeysPaged(results_to_client)
+                                        .to_json_response(&request_id_json),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
+
                     me.multistage_requests_to_advance.push_back((
                         request_id_json,
                         MultiStageRequestStage::BlockHashKnown {
@@ -3068,14 +3106,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     ),
                     MultiStageRequestTy::StateGetKeysPaged {
                         prefix,
-                        count,
                         start_key,
+                        count,
                     } => (
                         StorageRequestInProgress::StateGetKeysPaged {
                             in_progress_results: Vec::with_capacity(32),
+                            block_hash,
+                            prefix: prefix.clone(),
+                            start_key,
+                            count,
                         },
                         either::Left(iter::once(sync_service::StorageRequestItem {
-                            key: prefix.clone(),
+                            key: prefix,
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
@@ -3168,6 +3210,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     },
                     StorageRequestInProgress::StateGetKeysPaged {
                         mut in_progress_results,
+                        block_hash,
+                        prefix,
+                        start_key,
+                        count,
                     },
                 ) => {
                     in_progress_results.push(key);
@@ -3176,6 +3222,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             request_id_json,
                             request: StorageRequestInProgress::StateGetKeysPaged {
                                 in_progress_results,
+                                block_hash,
+                                prefix,
+                                start_key,
+                                count,
                             },
                             progress: next.advance().await,
                         }
@@ -3184,20 +3234,40 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 (
                     sync_service::StorageQueryProgress::Finished,
                     StorageRequestInProgress::StateGetKeysPaged {
-                        in_progress_results,
+                        block_hash,
+                        in_progress_results: final_results,
+                        prefix,
+                        start_key,
+                        count,
                     },
                 ) => {
-                    // TODO: no; filter by count and start key and add to cache and all
+                    // Filter by start key and count.
+                    let results_to_client = final_results
+                        .iter()
+                        .cloned()
+                        .filter(|k| *k >= start_key) // TODO: not sure if start should be in the set or not?
+                        .map(methods::HexString)
+                        .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                        .collect::<Vec<_>>();
+
+                    // If the returned response is somehow truncated, it is very likely that the
+                    // JSON-RPC client will call the function again with the exact same parameters.
+                    // Thus, store the results in a cache.
+                    if results_to_client.len() != final_results.len() {
+                        me.state_get_keys_paged_cache.push(
+                            GetKeysPagedCacheKey {
+                                hash: block_hash,
+                                prefix,
+                            },
+                            final_results,
+                        );
+                    }
+
                     let _ = me
                         .responses_tx
                         .send(
-                            methods::Response::state_getKeysPaged(
-                                in_progress_results
-                                    .into_iter()
-                                    .map(methods::HexString)
-                                    .collect(),
-                            )
-                            .to_json_response(&request_id_json),
+                            methods::Response::state_getKeysPaged(results_to_client)
+                                .to_json_response(&request_id_json),
                         )
                         .await;
                 }
