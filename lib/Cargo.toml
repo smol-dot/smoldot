@@ -38,7 +38,7 @@ wasmtime = [
 arrayvec = { version = "0.7.3", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
-base64 = { version = "0.21.7", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.5.0", default-features = false, features = ["alloc"] }
@@ -67,7 +67,7 @@ pbkdf2 = { version = "0.12.1", default-features = false }
 poly1305 = { version = "0.8.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.5.0", default-features = false }
+ruzstd = { version = "0.6.0", default-features = false }
 schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }
@@ -82,27 +82,27 @@ x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 
 # `database-sqlite` feature
-rusqlite = { version = "0.30.0", optional = true, default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.31.0", optional = true, default-features = false, features = ["bundled"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
 futures-util = { version = "0.3.27", optional = true, default-features = false, features = ["std",  "io", "async-await-macro", "sink"] }  # TODO: slim down these features
 parking_lot = { version = "0.12.1", optional = true }
-pin-project = { version = "1.1.4", optional = true }
-soketto = { version = "0.7.1", optional = true }
+pin-project = { version = "1.1.5", optional = true }
+soketto = { version = "0.8.0", optional = true }
 
 # This list of targets matches the tier 1 and tier 2 of platforms supported by wasmtime: <https://docs.wasmtime.dev/stability-tiers.html>
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", all(target_os = "linux", target_env = "gnu"), target_os = "macos")), all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"), all(target_arch = "s390x", target_os = "linux", target_env = "gnu")))'.dependencies]
 # `wasmtime` feature
-wasmtime = { version = "17.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "18.0.2", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 tempfile = "3.10.0"
-wat = "1.0.86"
+wat = "1.201.0"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

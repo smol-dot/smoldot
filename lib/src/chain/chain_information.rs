@@ -407,11 +407,6 @@ impl<'a> ChainInformationRef<'a> {
                 } else {
                     return Err(ValidityError::MissingBabeSlotStartNumber);
                 }
-                if finalized_block_epoch_information.epoch_index + 1
-                    != finalized_next_epoch_transition.epoch_index
-                {
-                    return Err(ValidityError::NonLinearBabeEpochs);
-                }
             }
 
             if finalized_block_epoch_information.is_none()
@@ -617,8 +612,6 @@ pub enum ValidityError {
     /// Finalized block is block number 0, and a Babe epoch information has been provided. This
     /// would imply the existence of a block -1 and below.
     UnexpectedBabeFinalizedEpoch,
-    /// Next Babe epoch number does not immediately follow current Babe epoch number.
-    NonLinearBabeEpochs,
     /// Finalized block is not number 0, but no Babe epoch information has been provided.
     NoBabeFinalizedEpoch,
     /// The slot of the finalized block is inferior to the start slot of the epoch it belongs to.
