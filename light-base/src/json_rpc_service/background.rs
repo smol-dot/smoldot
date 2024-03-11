@@ -306,6 +306,13 @@ enum StorageRequestInProgress {
     StateGetStorage,
 }
 
+enum RuntimeCallRequestInProgress {
+    StateCall,
+    StateGetMetadata,
+    PaymentQueryInfo,
+    SystemAccountNextIndex,
+}
+
 enum MultiStageRequestTy {
     ChainGetBestBlockHash,
     ChainGetBlock,
@@ -399,6 +406,11 @@ enum Event<TPlat: PlatformRef> {
         request_id_json: String,
         request: StorageRequestInProgress,
         progress: sync_service::StorageQueryProgress<TPlat>,
+    },
+    LegacyApiFunctionRuntimeCallResult {
+        request_id_json: String,
+        request: RuntimeCallRequestInProgress,
+        result: Result<runtime_service::RuntimeCallSuccess, runtime_service::RuntimeCallError>,
     },
     LegacyApiStorageSubscriptionsUpdate {
         block_hash: [u8; 32],
@@ -2619,7 +2631,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }
 
             WakeUpReason::AdvanceMultiStageRequest {
-                request_id_json: request_id,
+                request_id_json,
                 stage:
                     MultiStageRequestStage::BlockInfoKnown {
                         block_hash,
@@ -2648,7 +2660,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         methods::Response::state_getRuntimeVersion(
                                             convert_runtime_version_legacy(&spec),
                                         )
-                                        .to_json_response(&request_id),
+                                        .to_json_response(&request_id_json),
                                     )
                                     .await;
                             }
@@ -2656,7 +2668,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 let _ = me
                                     .responses_tx
                                     .send(parse::build_error_response(
-                                        &request_id,
+                                        &request_id_json,
                                         json_rpc::parse::ErrorResponse::ServerError(
                                             -32000,
                                             &error.to_string(),
@@ -2670,15 +2682,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         continue;
                     }
 
-                    let (function_name, required_api_version, parameters_vectored) =
+                    let (function_name, required_api_version, parameters_vectored, request_update) =
                         match request_ty {
-                            MultiStageRequestTy::StateCall { name, parameters } => {
-                                (name, None, parameters)
-                            }
+                            MultiStageRequestTy::StateCall { name, parameters } => (
+                                name,
+                                None,
+                                parameters,
+                                RuntimeCallRequestInProgress::StateCall,
+                            ),
                             MultiStageRequestTy::StateGetMetadata => (
                                 "Metadata_metadata".to_owned(),
                                 Some(("Metadata".to_owned(), 1..=2)),
                                 Vec::new(),
+                                RuntimeCallRequestInProgress::StateGetMetadata,
                             ),
                             MultiStageRequestTy::PaymentQueryInfo { extrinsic } => {
                                 (
@@ -2689,30 +2705,40 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             a.extend_from_slice(b.as_ref());
                                             a
                                         }),
+                                    RuntimeCallRequestInProgress::PaymentQueryInfo,
                                 )
                             }
                             MultiStageRequestTy::SystemAccountNextIndex { account_id } => (
                                 "AccountNonceApi_account_nonce".to_owned(),
                                 Some(("AccountNonceApi".to_owned(), 1..=1)),
                                 account_id,
+                                RuntimeCallRequestInProgress::SystemAccountNextIndex,
                             ),
                             _ => unreachable!(),
                         };
 
-                    let runtime_call_future = me.runtime_service.runtime_call(
-                        in_cache.clone(),
-                        block_hash,
-                        block_number,
-                        block_state_trie_root_hash,
-                        function_name,
-                        required_api_version,
-                        parameters_vectored,
-                        3,
-                        Duration::from_secs(5),
-                        NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
-                    );
-
-                    me.background_tasks.push(Box::pin(async move { todo!() }));
+                    let runtime_service = me.runtime_service.clone();
+                    let in_cache = in_cache.clone();
+                    me.background_tasks.push(Box::pin(async move {
+                        Event::LegacyApiFunctionRuntimeCallResult {
+                            request_id_json,
+                            request: request_update,
+                            result: runtime_service
+                                .runtime_call(
+                                    in_cache,
+                                    block_hash,
+                                    block_number,
+                                    block_state_trie_root_hash,
+                                    function_name,
+                                    required_api_version,
+                                    parameters_vectored,
+                                    3,
+                                    Duration::from_secs(5),
+                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                )
+                                .await,
+                        }
+                    }));
                     continue;
                 }
 
@@ -2723,7 +2749,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // the runtime.
                         // Keep track of the request.
                         debug_assert!(!entry.get().is_empty());
-                        entry.into_mut().push((request_id, request_ty));
+                        entry.into_mut().push((request_id_json, request_ty));
                     }
                     hashbrown::hash_map::Entry::Vacant(entry) => {
                         // No network request is in progress yet. Start one.
@@ -2842,11 +2868,141 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // Keep track of the request.
                         let mut list = Vec::with_capacity(4);
-                        list.push((request_id, request_ty));
+                        list.push((request_id_json, request_ty));
                         entry.insert(list);
                     }
                 }
             }
+
+            WakeUpReason::Event(Event::LegacyApiFunctionRuntimeCallResult {
+                request_id_json,
+                request,
+                result,
+            }) => match (result, request) {
+                (Ok(result), RuntimeCallRequestInProgress::StateCall) => {
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::Response::state_call(methods::HexString(result.output))
+                                .to_json_response(&request_id_json),
+                        )
+                        .await;
+                }
+                (Ok(result), RuntimeCallRequestInProgress::StateGetMetadata) => {
+                    match methods::remove_metadata_length_prefix(&result.output) {
+                        Ok(metadata) => {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::state_getMetadata(methods::HexString(
+                                        metadata.to_owned(),
+                                    ))
+                                    .to_json_response(&request_id_json),
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            log!(
+                                &me.platform,
+                                Warn,
+                                &me.log_target,
+                                format!("Failed to decode metadata. Error: {error}")
+                            );
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    &request_id_json,
+                                    parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                                    None,
+                                ))
+                                .await;
+                        }
+                    }
+                }
+                (Ok(result), RuntimeCallRequestInProgress::PaymentQueryInfo) => {
+                    match json_rpc::payment_info::decode_payment_info(
+                        &result.output,
+                        // `api_version` is guaranteed to be `Some` if we passed an API
+                        // requirement when calling `runtime_call`, which we always do.
+                        result.api_version.unwrap(),
+                    ) {
+                        Ok(info) => {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::payment_queryInfo(info)
+                                        .to_json_response(&request_id_json),
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    &request_id_json,
+                                    parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        &format!("Failed to decode runtime output: {error}"),
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                        }
+                    }
+                }
+                (Ok(result), RuntimeCallRequestInProgress::SystemAccountNextIndex) => {
+                    // TODO: we get a u32 when expecting a u64; figure out problem
+                    // TODO: don't unwrap
+                    match <[u8; 4]>::try_from(&result.output[..]) {
+                        Ok(index) => {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::system_accountNextIndex(u64::from(
+                                        u32::from_le_bytes(index),
+                                    ))
+                                    .to_json_response(&request_id_json),
+                                )
+                                .await;
+                        }
+                        Err(_) => {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    &request_id_json,
+                                    parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        &format!("Failed to decode runtime output"),
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                        }
+                    }
+                }
+                (Err(error), request) => {
+                    if matches!(request, RuntimeCallRequestInProgress::StateGetMetadata) {
+                        log!(
+                            &me.platform,
+                            Warn,
+                            &me.log_target,
+                            format!(
+                                "Returning error from `state_getMetadata`. API user might not \
+                                function properly. Error: {error}"
+                            )
+                        );
+                    }
+
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id_json,
+                            parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        ))
+                        .await;
+                }
+            },
 
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json,
