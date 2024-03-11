@@ -47,8 +47,6 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
-pub use network_service::EncodedMerkleProof;
-
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
