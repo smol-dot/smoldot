@@ -584,7 +584,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 finalized_heads_subscriptions_stale: &'a mut bool,
             },
             RuntimeServiceSubscriptionDead,
-            StartStorageSubscriptions,
+            StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
         }
@@ -608,7 +608,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if !me.legacy_api_storage_query_in_progress
                             && !me.legacy_api_stale_storage_subscriptions.is_empty()
                         {
-                            return WakeUpReason::StartStorageSubscriptions;
+                            return WakeUpReason::StartStorageSubscriptionsUpdates;
                         }
 
                         if *finalized_heads_subscriptions_stale {
@@ -4566,7 +4566,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::StartStorageSubscriptions => {
+            WakeUpReason::StartStorageSubscriptionsUpdates => {
                 let RuntimeServiceSubscription::Active {
                     pinned_blocks,
                     current_best_block,
@@ -4576,8 +4576,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     unreachable!()
                 };
 
-                // If the header of the current best block can't be decoded, we don't start
-                // the task.
+                // If the header of the current best block can't be decoded, we don't do anything.
                 let (block_number, state_trie_root) = match header::decode(
                     &pinned_blocks
                         .get(current_best_block)
@@ -4606,10 +4605,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 keys.extend(
                     me.legacy_api_stale_storage_subscriptions
                         .iter()
-                        .map(|s_id: &Arc<str>| {
-                            &me.legacy_api_storage_subscriptions.get(s_id).unwrap().1
+                        .map(|s_id| {
+                            me.legacy_api_storage_subscriptions
+                                .range((s_id.clone(), Vec::new())..)
+                                .take_while(move |(s, _)| s == s_id)
+                                .map(|(_, key)| key)
                         })
-                        .flat_map(|keys_list| keys_list.iter().cloned()),
+                        .flat_map(|keys_list| keys_list.cloned()),
                 );
 
                 // If the list of keys to query is empty, we mark all subscriptions as no longer
@@ -4621,7 +4623,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
 
                 // Start the task in the background.
-                // The task will send a `Message::StorageFetch` once it is done.
+                // The task will generate a
+                // `Event::LegacyApiStorageSubscriptionsUpdate` once it is done.
                 me.legacy_api_storage_query_in_progress = true;
                 me.background_tasks.push(Box::pin({
                     let block_hash = *current_best_block;
@@ -4697,11 +4700,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // While this solution is a bit CPU-heavy, it is a more elegant solution than
                 // keeping track of subscription in the background task.
                 let mut notifications_to_send = hashbrown::HashMap::<
-                    String,
+                    Arc<str>,
                     Vec<(methods::HexString, Option<methods::HexString>)>,
                     _,
                 >::with_capacity_and_hasher(
-                    me.storage_subscriptions.len(),
+                    me.legacy_api_storage_subscriptions.len(),
                     fnv::FnvBuildHasher::default(),
                 );
                 for item in result {
@@ -4709,13 +4712,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         unreachable!()
                     };
                     for subscription_id in me
-                        .storage_subscriptions_by_key
-                        .get(&key)
-                        .into_iter()
-                        .flat_map(|list| list.iter())
+                        .legacy_api_storage_subscriptions_by_key
+                        .range((key.clone(), Arc::from(String::new()))..)
+                        .take_while(|(k, _)| *k == key)
+                        .map(|(_, s_id)| s_id.clone())
                     {
                         notifications_to_send
-                            .entry_ref(subscription_id)
+                            .entry(subscription_id)
                             .or_insert_with(Vec::new)
                             .push((
                                 methods::HexString(key.clone()),
@@ -4731,17 +4734,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         me.legacy_api_stale_storage_subscriptions
                             .remove(&subscription_id);
                     }
-                    me.legacy_api_storage_subscriptions
-                        .get_mut(&subscription_id)
-                        .unwrap()
-                        .0
-                        .send_notification(methods::ServerToClient::state_storage {
-                            subscription: subscription_id.into(),
-                            result: methods::StorageChangeSet {
-                                block: methods::HashHexString(block_hash),
-                                changes,
-                            },
-                        })
+                    let _ = me
+                        .responses_tx
+                        .send(
+                            methods::ServerToClient::state_storage {
+                                subscription: Cow::Borrowed(&*subscription_id),
+                                result: methods::StorageChangeSet {
+                                    block: methods::HashHexString(block_hash),
+                                    changes,
+                                },
+                            }
+                            .to_json_request_object_parameters(None),
+                        )
                         .await;
                 }
             }
@@ -4851,7 +4855,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .send(
                             methods::ServerToClient::chain_newHead {
                                 subscription: Cow::Borrowed(subscription_id),
-                                result: best_block_json_rpc_header,
+                                result: best_block_json_rpc_header.clone(),
                             }
                             .to_json_request_object_parameters(None),
                         )
@@ -4886,8 +4890,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
                 }
 
-                me.legacy_api_stale_storage_subscriptions
-                    .extend(me.storage_subscriptions.keys().cloned());
+                me.legacy_api_stale_storage_subscriptions.extend(
+                    me.legacy_api_storage_subscriptions
+                        .iter()
+                        .map(|(s_id, _)| s_id.clone()),
+                );
             }
         }
     }
