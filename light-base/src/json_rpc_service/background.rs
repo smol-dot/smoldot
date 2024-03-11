@@ -128,7 +128,7 @@ struct Background<TPlat: PlatformRef> {
     /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
     /// Values are the list of keys requested by this subscription.
     legacy_api_storage_subscriptions: BTreeSet<(Arc<str>, Vec<u8>)>,
-    /// Identical to [`Task::storage_subscriptions`] by indexed by requested key.
+    /// Identical to [`Background::legacy_api_storage_subscriptions`] but indexed by requested key.
     legacy_api_storage_subscriptions_by_key: BTreeSet<(Vec<u8>, Arc<str>)>,
     /// List of storage subscriptions whose latest sent notification isn't about the current
     /// best block.
@@ -157,7 +157,7 @@ struct Background<TPlat: PlatformRef> {
     /// Requests for blocks headers, state root hash and numbers that are still in progress.
     /// For each block hash, contains a list of requests that are interested in the response.
     /// Once the operation has been finished, the value is inserted in
-    /// [`Task::block_headers_cache`].
+    /// [`Background::block_headers_cache`].
     block_headers_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
 
@@ -174,7 +174,7 @@ struct Background<TPlat: PlatformRef> {
     /// Requests for block runtimes that are still in progress.
     /// For each block hash, contains a list of requests that are interested in the response.
     /// Once the operation has been finished, the value is inserted in
-    /// [`Task::block_runtimes_cache`].
+    /// [`Background::block_runtimes_cache`].
     block_runtimes_pending:
         hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
 
@@ -195,7 +195,8 @@ struct Background<TPlat: PlatformRef> {
     printed_legacy_json_rpc_warning: bool,
 }
 
-/// State of the subscription towards the runtime service. See [`Task::subscription`].
+/// State of the subscription towards the runtime service.
+/// See [`Background::runtime_service_subscription`].
 enum RuntimeServiceSubscription<TPlat: PlatformRef> {
     /// Subscription is active.
     Active {
@@ -224,7 +225,7 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
         /// list.
         ///
         /// Blocks are removed from this container and unpinned when they leave
-        /// [`Subscription::Active::finalized_and_pruned_lru`].
+        /// [`RuntimeServiceSubscription::Active::finalized_and_pruned_lru`].
         ///
         /// JSON-RPC clients are more likely to ask for information about recent blocks and
         /// perform calls on them, hence a cache of recent blocks.
@@ -240,8 +241,8 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
     /// time.
     Pending(Pin<Box<dyn future::Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
 
-    /// Subscription not requested yet. Should transition to [`Subscription::Pending`] as soon
-    /// as possible.
+    /// Subscription not requested yet. Should transition to
+    /// [`RuntimeServiceSubscription::Pending`] as soon as possible.
     NotCreated,
 }
 

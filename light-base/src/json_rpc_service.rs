@@ -235,21 +235,9 @@ pub struct StartConfig<TPlat: PlatformRef> {
     pub system_version: String,
 
     /// Hash of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`ServicePrototype::start`] function could in theory use the
-    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_hash: [u8; 32],
 
     /// Hash of the storage trie root of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`ServicePrototype::start`] function could in theory use the
-    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_state_root: [u8; 32],
 }
 
