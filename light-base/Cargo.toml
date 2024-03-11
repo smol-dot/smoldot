@@ -17,6 +17,7 @@ async-channel = { version = "2.2.0", default-features = false }
 async-lock = { version = "3.0.0", default-features = false }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 blake2-rfc = { version = "0.2.18", default-features = false }
+bs58 = { version = "0.5.0", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 either = { version = "1.9.0", default-features = false }
 event-listener = { version = "5.0.0", default-features = false }

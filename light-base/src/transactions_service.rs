@@ -834,10 +834,12 @@ async fn background_task<TPlat: PlatformRef>(
                 }
                 WakeUpReason::Notification(Some(runtime_service::Notification::Finalized {
                     hash,
-                    best_block_hash,
+                    best_block_hash_if_changed,
                     ..
                 })) => {
-                    worker.set_best_block(&config.log_target, &best_block_hash);
+                    if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
+                        worker.set_best_block(&config.log_target, &best_block_hash_if_changed);
+                    }
                     for pruned in worker.pending_transactions.set_finalized_block(&hash) {
                         // All blocks in `pending_transactions` are pinned within the
                         // runtime service. Unpin them when they're removed.

@@ -2361,6 +2361,7 @@ dependencies = [
  "async-lock 3.3.0",
  "base64 0.22.0",
  "blake2-rfc",
+ "bs58",
  "derive_more",
  "either",
  "env_logger",
