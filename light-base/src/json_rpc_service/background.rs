@@ -221,7 +221,6 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
 
         /// When a block is finalized or pruned, it is inserted into this LRU cache. The least
         /// recently used blocks are removed and unpinned.
-        // TODO: duplicate with other caches?
         finalized_and_pruned_lru: lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
     },
 
@@ -4589,6 +4588,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                // The JSON-RPC client is likely to query things about the new block. We thus
+                // put it in cache.
+                me.block_headers_cache.put(
+                    hash,
+                    Ok((
+                        block.scale_encoded_header.clone(),
+                        json_rpc_header.state_root.0,
+                        json_rpc_header.number,
+                    )),
+                );
+
                 let _was_in = pinned_blocks.insert(
                     hash,
                     RecentBlock {
