@@ -292,7 +292,7 @@ enum MultiStageRequestStage {
     },
 }
 
-enum RenameMe {
+enum StorageRequestInProgress {
     StateGetKeys {
         in_progress_results: Vec<methods::HexString>,
     },
@@ -397,7 +397,7 @@ enum Event<TPlat: PlatformRef> {
     },
     LegacyApiFunctionStorageRequestProgress {
         request_id_json: String,
-        request: RenameMe,
+        request: StorageRequestInProgress,
         progress: sync_service::StorageQueryProgress<TPlat>,
     },
     LegacyApiStorageSubscriptionsUpdate {
@@ -2864,7 +2864,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             } => {
                 let (request, storage_request) = match request_ty {
                     MultiStageRequestTy::StateGetKeys { prefix } => (
-                        RenameMe::StateGetKeys {
+                        StorageRequestInProgress::StateGetKeys {
                             in_progress_results: Vec::with_capacity(32),
                         },
                         either::Left(iter::once(sync_service::StorageRequestItem {
@@ -2877,7 +2877,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         count,
                         start_key,
                     } => (
-                        RenameMe::StateGetKeysPaged {
+                        StorageRequestInProgress::StateGetKeysPaged {
                             in_progress_results: Vec::with_capacity(32),
                         },
                         either::Left(iter::once(sync_service::StorageRequestItem {
@@ -2886,7 +2886,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         })),
                     ),
                     MultiStageRequestTy::StateQueryStorageAt { keys } => (
-                        RenameMe::StateQueryStorageAt {
+                        StorageRequestInProgress::StateQueryStorageAt {
                             block_hash,
                             in_progress_results: Vec::with_capacity(keys.len()),
                         },
@@ -2898,7 +2898,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         })),
                     ),
                     MultiStageRequestTy::StateGetStorage { key } => (
-                        RenameMe::StateGetStorage {},
+                        StorageRequestInProgress::StateGetStorage {},
                         either::Left(iter::once(sync_service::StorageRequestItem {
                             key,
                             ty: sync_service::StorageRequestItemTy::Value,
@@ -2937,7 +2937,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    RenameMe::StateGetKeys {
+                    StorageRequestInProgress::StateGetKeys {
                         mut in_progress_results,
                     },
                 ) => {
@@ -2945,7 +2945,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: RenameMe::StateGetKeys {
+                            request: StorageRequestInProgress::StateGetKeys {
                                 in_progress_results,
                             },
                             progress: next.advance().await,
@@ -2954,7 +2954,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    RenameMe::StateGetKeys {
+                    StorageRequestInProgress::StateGetKeys {
                         in_progress_results,
                     },
                 ) => {
@@ -2972,7 +2972,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    RenameMe::StateGetKeysPaged {
+                    StorageRequestInProgress::StateGetKeysPaged {
                         mut in_progress_results,
                     },
                 ) => {
@@ -2980,7 +2980,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: RenameMe::StateGetKeysPaged {
+                            request: StorageRequestInProgress::StateGetKeysPaged {
                                 in_progress_results,
                             },
                             progress: next.advance().await,
@@ -2989,7 +2989,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    RenameMe::StateGetKeysPaged {
+                    StorageRequestInProgress::StateGetKeysPaged {
                         in_progress_results,
                     },
                 ) => {
@@ -3013,7 +3013,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    RenameMe::StateQueryStorageAt {
+                    StorageRequestInProgress::StateQueryStorageAt {
                         block_hash,
                         mut in_progress_results,
                     },
@@ -3023,7 +3023,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: RenameMe::StateQueryStorageAt {
+                            request: StorageRequestInProgress::StateQueryStorageAt {
                                 block_hash,
                                 in_progress_results,
                             },
@@ -3033,7 +3033,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    RenameMe::StateQueryStorageAt {
+                    StorageRequestInProgress::StateQueryStorageAt {
                         block_hash,
                         in_progress_results,
                     },
@@ -3057,10 +3057,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             sync_service::StorageResultItem::Value {
                                 value: Some(value), ..
                             },
-                        query: next,
                         ..
                     },
-                    RenameMe::StateGetStorage {},
+                    StorageRequestInProgress::StateGetStorage {},
                 ) => {
                     let _ = me
                         .responses_tx
@@ -3073,10 +3072,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 (
                     sync_service::StorageQueryProgress::Progress {
                         item: sync_service::StorageResultItem::Value { value: None, .. },
-                        query: next,
                         ..
                     },
-                    RenameMe::StateGetStorage {},
+                    StorageRequestInProgress::StateGetStorage {},
                 ) => {
                     let _ = me
                         .responses_tx
@@ -3103,7 +3101,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Extract the event information.
                 let (
                     subscription_id,
-                    mut new_blocks,
+                    new_blocks,
                     finalized_block_scale_encoded_header,
                     finalized_block_runtime,
                     non_finalized_blocks_ancestry_order,
