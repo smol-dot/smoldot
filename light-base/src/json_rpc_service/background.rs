@@ -47,7 +47,6 @@ use rand_chacha::{
     ChaCha20Rng,
 };
 use smoldot::{
-    chain::fork_tree,
     header,
     informant::HashDisplay,
     json_rpc::{self, methods, parse},
@@ -259,6 +258,7 @@ struct ChainHeadFollow {
     /// List of body/call/storage operations currently in progress. Keys are operation IDs.
     operations_in_progress: hashbrown::HashMap<String, Operation, fnv::FnvBuildHasher>,
 
+    /// Remaining number of operation slots that the JSON-RPC client can occupy.
     available_operation_slots: u32,
 
     /// If the subscription was created with `withRuntime: true`, contains the subscription ID
@@ -398,7 +398,7 @@ enum Event<TPlat: PlatformRef> {
     },
     RuntimeDownloaded {
         block_hash: [u8; 32],
-        result: Result<runtime_service::PinnedRuntime, ()>,
+        result: Result<runtime_service::PinnedRuntime, String>,
     },
     LegacyApiFunctionStorageRequestProgress {
         request_id_json: String,
@@ -650,6 +650,111 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         .await;
                     continue;
                 };
+
+                match request_parsed {
+                    // Legacy API functions.
+                    methods::MethodCall::account_nextIndex { .. }
+                    | methods::MethodCall::author_hasKey { .. }
+                    | methods::MethodCall::author_hasSessionKeys { .. }
+                    | methods::MethodCall::author_insertKey { .. }
+                    | methods::MethodCall::author_pendingExtrinsics { .. }
+                    | methods::MethodCall::author_removeExtrinsic { .. }
+                    | methods::MethodCall::author_rotateKeys { .. }
+                    | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+                    | methods::MethodCall::author_submitExtrinsic { .. }
+                    | methods::MethodCall::author_unwatchExtrinsic { .. }
+                    | methods::MethodCall::babe_epochAuthorship { .. }
+                    | methods::MethodCall::chain_getBlock { .. }
+                    | methods::MethodCall::chain_getBlockHash { .. }
+                    | methods::MethodCall::chain_getFinalizedHead { .. }
+                    | methods::MethodCall::chain_getHeader { .. }
+                    | methods::MethodCall::chain_subscribeAllHeads { .. }
+                    | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
+                    | methods::MethodCall::chain_subscribeNewHeads { .. }
+                    | methods::MethodCall::chain_unsubscribeAllHeads { .. }
+                    | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
+                    | methods::MethodCall::chain_unsubscribeNewHeads { .. }
+                    | methods::MethodCall::childstate_getKeys { .. }
+                    | methods::MethodCall::childstate_getStorage { .. }
+                    | methods::MethodCall::childstate_getStorageHash { .. }
+                    | methods::MethodCall::childstate_getStorageSize { .. }
+                    | methods::MethodCall::grandpa_roundState { .. }
+                    | methods::MethodCall::offchain_localStorageGet { .. }
+                    | methods::MethodCall::offchain_localStorageSet { .. }
+                    | methods::MethodCall::payment_queryInfo { .. }
+                    | methods::MethodCall::state_call { .. }
+                    | methods::MethodCall::state_getKeys { .. }
+                    | methods::MethodCall::state_getKeysPaged { .. }
+                    | methods::MethodCall::state_getMetadata { .. }
+                    | methods::MethodCall::state_getPairs { .. }
+                    | methods::MethodCall::state_getReadProof { .. }
+                    | methods::MethodCall::state_getRuntimeVersion { .. }
+                    | methods::MethodCall::state_getStorage { .. }
+                    | methods::MethodCall::state_getStorageHash { .. }
+                    | methods::MethodCall::state_getStorageSize { .. }
+                    | methods::MethodCall::state_queryStorage { .. }
+                    | methods::MethodCall::state_queryStorageAt { .. }
+                    | methods::MethodCall::state_subscribeRuntimeVersion { .. }
+                    | methods::MethodCall::state_subscribeStorage { .. }
+                    | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
+                    | methods::MethodCall::state_unsubscribeStorage { .. }
+                    | methods::MethodCall::system_accountNextIndex { .. }
+                    | methods::MethodCall::system_addReservedPeer { .. }
+                    | methods::MethodCall::system_chain { .. }
+                    | methods::MethodCall::system_chainType { .. }
+                    | methods::MethodCall::system_dryRun { .. }
+                    | methods::MethodCall::system_health { .. }
+                    | methods::MethodCall::system_localListenAddresses { .. }
+                    | methods::MethodCall::system_localPeerId { .. }
+                    | methods::MethodCall::system_name { .. }
+                    | methods::MethodCall::system_networkState { .. }
+                    | methods::MethodCall::system_nodeRoles { .. }
+                    | methods::MethodCall::system_peers { .. }
+                    | methods::MethodCall::system_properties { .. }
+                    | methods::MethodCall::system_removeReservedPeer { .. }
+                    | methods::MethodCall::system_version { .. } => {
+                        if !me.printed_legacy_json_rpc_warning {
+                            me.printed_legacy_json_rpc_warning = true;
+                            log!(
+                                &me.platform,
+                                Warn,
+                                &me.log_target,
+                                format!(
+                                    "The JSON-RPC client has just called a JSON-RPC function from \
+                                    the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
+                                    loose semantics and cannot be properly implemented on a light \
+                                    client. You are encouraged to use the new JSON-RPC API \
+                                    <https://github.com/paritytech/json-rpc-interface-spec/> \
+                                    instead. The legacy JSON-RPC API functions will be deprecated \
+                                    and removed in the distant future.",
+                                    request_parsed.name()
+                                )
+                            )
+                        }
+                    }
+
+                    // Non-legacy-API functions.
+                    methods::MethodCall::chainHead_unstable_body { .. }
+                    | methods::MethodCall::chainHead_unstable_call { .. }
+                    | methods::MethodCall::chainHead_unstable_continue { .. }
+                    | methods::MethodCall::chainHead_unstable_follow { .. }
+                    | methods::MethodCall::chainHead_unstable_header { .. }
+                    | methods::MethodCall::chainHead_unstable_stopOperation { .. }
+                    | methods::MethodCall::chainHead_unstable_storage { .. }
+                    | methods::MethodCall::chainHead_unstable_unfollow { .. }
+                    | methods::MethodCall::chainHead_unstable_unpin { .. }
+                    | methods::MethodCall::chainSpec_v1_chainName { .. }
+                    | methods::MethodCall::chainSpec_v1_genesisHash { .. }
+                    | methods::MethodCall::chainSpec_v1_properties { .. }
+                    | methods::MethodCall::rpc_methods { .. }
+                    | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+                    | methods::MethodCall::sudo_unstable_version { .. }
+                    | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+                    | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
+                    | methods::MethodCall::sudo_network_unstable_watch { .. }
+                    | methods::MethodCall::sudo_network_unstable_unwatch { .. }
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                }
 
                 match request_parsed {
                     methods::MethodCall::author_pendingExtrinsics {} => {
@@ -2906,7 +3011,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             sync_service::StorageQueryProgress::Error(error) => {
                                                 return Event::RuntimeDownloaded {
                                                     block_hash,
-                                                    result: Err(()),
+                                                    result: Err(error.to_string()),
                                                 }
                                             }
                                         }
@@ -2926,7 +3031,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                                 Event::RuntimeDownloaded {
                                     block_hash,
-                                    result: pinned_runtime.map_err(|_| ()),
+                                    result: pinned_runtime.map_err(|error| error.to_string()),
                                 }
                             }
                         }));
@@ -4592,7 +4697,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::Event(Event::RuntimeDownloaded {
                 block_hash,
-                result: Err(()),
+                result: Err(error_message),
             }) => {
                 for (request_id, _) in me
                     .block_runtimes_pending
@@ -4606,7 +4711,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             &request_id,
                             parse::ErrorResponse::ApplicationDefined(
                                 -32800,
-                                "failed to retrieve runtime from the network",
+                                &format!(
+                                    "Failed to retrieve runtime from the \
+                                    network: {error_message}"
+                                ),
                             ),
                             None,
                         ))
