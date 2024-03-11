@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Smoldot is no longer compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled due to the Rust compiler considering target features as unstable.
+- Smoldot is no longer compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled due to the Rust compiler considering target features as unstable. ([#1716](https://github.com/smol-dot/smoldot/pull/1716))
 
 ## 2.0.22 - 2024-03-04
 
