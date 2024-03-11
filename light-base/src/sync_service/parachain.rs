@@ -461,6 +461,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 }
 
                                 // Must unpin the pruned blocks if they haven't already been unpinned.
+                                let mut pruned_blocks_hashes =
+                                    Vec::with_capacity(pruned_blocks.len());
                                 for (_, hash, pruned_block_parahead) in pruned_blocks {
                                     if pruned_block_parahead.is_none() {
                                         runtime_subscription
@@ -468,6 +470,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             .unpin_block(hash)
                                             .await;
                                     }
+                                    pruned_blocks_hashes.push(hash);
                                 }
 
                                 log!(
@@ -499,6 +502,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     let notif = super::Notification::Finalized {
                                         hash,
                                         best_block_hash,
+                                        pruned_blocks: pruned_blocks_hashes.clone(),
                                     };
                                     if sender.try_send(notif).is_ok() {
                                         runtime_subscription.all_subscriptions.push(sender);

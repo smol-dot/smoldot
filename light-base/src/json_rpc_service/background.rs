@@ -253,10 +253,6 @@ struct RecentBlock {
 }
 
 struct ChainHeadFollow {
-    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
-    // TODO: remove and instead determine the pruned blocks in the sync service
-    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
-
     /// For each pinned block hash, the SCALE-encoded header of the block.
     pinned_blocks_headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
@@ -271,12 +267,6 @@ struct ChainHeadFollow {
     /// Contains `None` if `withRuntime` was `false`, or if the subscription hasn't been
     /// initialized yet.
     runtime_service_subscription_id: Option<runtime_service::SubscriptionId>,
-}
-
-struct OperationEvent {
-    operation_id: String,
-    notification: methods::FollowEvent<'static>,
-    is_done: bool,
 }
 
 struct Operation {
@@ -1999,7 +1989,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _prev_value = me.chain_head_follow_subscriptions.insert(
                             subscription_id.clone(),
                             ChainHeadFollow {
-                                non_finalized_blocks: fork_tree::ForkTree::new(), // TODO: capacity?
                                 pinned_blocks_headers: hashbrown::HashMap::with_capacity_and_hasher(
                                     0,
                                     Default::default(),
@@ -3512,22 +3501,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             either::Right(b) => b.scale_encoded_header,
                         },
                     );
-
-                    subscription_info.non_finalized_blocks.insert(
-                        if parent_block_hash == finalized_block_hash {
-                            None
-                        } else {
-                            Some(
-                                subscription_info
-                                    .non_finalized_blocks
-                                    .iter_unordered()
-                                    .find(|(_, b)| **b == parent_block_hash)
-                                    .map(|(idx, _)| idx)
-                                    .unwrap_or_else(|| unreachable!()),
-                            )
-                        },
-                        hash,
-                    );
                 }
 
                 me.background_tasks.push({
@@ -3575,7 +3548,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         hash,
                         best_block_hash,
                         pruned_blocks,
-                    } => todo!(),
+                    } => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::Finalized {
+                                        finalized_blocks_hashes: vec![methods::HashHexString(hash)],
+                                        pruned_blocks_hashes: pruned_blocks
+                                            .into_iter()
+                                            .map(methods::HashHexString)
+                                            .collect(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
                     runtime_service::Notification::BestBlockChanged { hash } => {
                         let _ = me
                             .responses_tx
@@ -3590,7 +3580,58 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    runtime_service::Notification::Block(block) => todo!(),
+                    runtime_service::Notification::Block(block) => {
+                        // TODO: pass hash through notification
+                        let block_hash =
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                        subscription_info
+                            .pinned_blocks_headers
+                            .insert(block_hash, block.scale_encoded_header);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(block_hash),
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
+                                        new_runtime: match &block.new_runtime {
+                                            Some(Ok(rt)) => {
+                                                Some(methods::MaybeRuntimeSpec::Valid {
+                                                    spec: convert_runtime_version(&rt),
+                                                })
+                                            }
+                                            Some(Err(error)) => {
+                                                Some(methods::MaybeRuntimeSpec::Invalid {
+                                                    error: error.to_string(),
+                                                })
+                                            }
+                                            None => None,
+                                        },
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+
+                        if block.is_new_best {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: Cow::Borrowed(&subscription_id),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(block_hash),
+                                        },
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
+                    }
                 }
 
                 me.background_tasks.push(Box::pin(async move {
@@ -3622,7 +3663,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     sync_service::Notification::Finalized {
                         hash,
                         best_block_hash,
-                    } => todo!(),
+                        pruned_blocks,
+                    } => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::Finalized {
+                                        finalized_blocks_hashes: vec![methods::HashHexString(hash)],
+                                        pruned_blocks_hashes: pruned_blocks
+                                            .into_iter()
+                                            .map(methods::HashHexString)
+                                            .collect(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
                     sync_service::Notification::BestBlockChanged { hash } => {
                         let _ = me
                             .responses_tx
@@ -3637,7 +3696,46 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    sync_service::Notification::Block(block) => todo!(),
+                    sync_service::Notification::Block(block) => {
+                        // TODO: pass hash through notification
+                        let block_hash =
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                        subscription_info
+                            .pinned_blocks_headers
+                            .insert(block_hash, block.scale_encoded_header);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: Cow::Borrowed(&subscription_id),
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(block_hash),
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
+                                        new_runtime: None,
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+
+                        if block.is_new_best {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: Cow::Borrowed(&subscription_id),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(block_hash),
+                                        },
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
+                    }
                 }
 
                 me.background_tasks.push(Box::pin(async move {
@@ -3658,13 +3756,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 result: Ok(success),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3686,13 +3790,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 result: Err(runtime_service::RuntimeCallError::InvalidRuntime(error)),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3722,13 +3832,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 result: Err(runtime_service::RuntimeCallError::Crash),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 // TODO: is this the appropriate error?
                 let _ = me
@@ -3750,13 +3866,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 result: Err(runtime_service::RuntimeCallError::Inaccessible(_)),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3780,13 +3902,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
                     )),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3813,13 +3941,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service::RuntimeCallExecutionError::Start(error),
                     )),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3844,13 +3978,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service::RuntimeCallExecutionError::Execution(error),
                     )),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -3873,13 +4013,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 expected_extrinsics_root,
                 result,
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 // We must check whether the body is present in the response and valid.
                 // TODO: should try the request again with a different peer instead of failing immediately
@@ -4055,13 +4201,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 progress: sync_service::StorageQueryProgress::Finished,
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx
@@ -4082,13 +4234,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 operation_id,
                 progress: sync_service::StorageQueryProgress::Error(_),
             }) => {
-                let _prev_value = me
-                    .chain_head_follow_subscriptions
-                    .get_mut(&subscription_id)
-                    .unwrap_or_else(|| unreachable!())
+                let Some(subscription_info) =
+                    me.chain_head_follow_subscriptions.get_mut(&subscription_id)
+                else {
+                    unreachable!()
+                };
+                let Some(operation_info) = subscription_info
                     .operations_in_progress
-                    .remove(&operation_id);
-                debug_assert!(_prev_value.is_some());
+                    .remove(&operation_id)
+                else {
+                    unreachable!()
+                };
+
+                subscription_info.available_operation_slots += operation_info.occupied_slots;
 
                 let _ = me
                     .responses_tx

@@ -523,6 +523,7 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
+        // TODO: consider reporting whether it has changed
         best_block_hash: [u8; 32],
 
         /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
@@ -2367,6 +2368,7 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::Notification(sync_service::Notification::Finalized {
                 hash,
                 best_block_hash,
+                ..
             }) => {
                 // Sync service has reported a finalized block.
 
