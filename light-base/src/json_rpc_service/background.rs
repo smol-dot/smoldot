@@ -99,11 +99,8 @@ struct Background<TPlat: PlatformRef> {
     responses_tx: async_channel::Sender<String>,
 
     /// Stream of notifications coming from the runtime service. Used for legacy JSON-RPC API
-    /// subscriptions. `None` if not subscribed yet.
+    /// subscriptions.
     runtime_service_subscription: RuntimeServiceSubscription<TPlat>,
-    /// Best block used for legacy API functions that target the best block.
-    // TODO: remove
-    legacy_api_best_block: [u8; 32],
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?
@@ -144,7 +141,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// List of multi-stage requests (i.e. JSON-RPC requests that require multiple asynchronous
     /// operations) that are ready to make progress.
-    multistage_requests_to_advance: VecDeque<(String, MultiStageRequest)>,
+    multistage_requests_to_advance: VecDeque<(String, MultiStageRequestStage, MultiStageRequestTy)>,
 
     /// Cache of known headers, state trie root hashes and numbers of blocks.
     ///
@@ -155,12 +152,15 @@ struct Background<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
+    /// Requests that are waiting for the best block hash to be known.
+    best_block_hash_pending: Vec<(String, MultiStageRequestTy)>,
+
     /// Requests for blocks headers, state root hash and numbers that are still in progress.
     /// For each block hash, contains a list of requests that are interested in the response.
     /// Once the operation has been finished, the value is inserted in
     /// [`Task::block_headers_cache`].
     block_headers_pending:
-        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequest)>, fnv::FnvBuildHasher>,
+        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
 
     /// Cache of known runtimes of blocks.
     ///
@@ -173,7 +173,7 @@ struct Background<TPlat: PlatformRef> {
     /// Once the operation has been finished, the value is inserted in
     /// [`Task::block_runtimes_cache`].
     block_runtimes_pending:
-        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequest)>, fnv::FnvBuildHasher>,
+        hashbrown::HashMap<[u8; 32], Vec<(String, MultiStageRequestTy)>, fnv::FnvBuildHasher>,
 
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
@@ -233,7 +233,7 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
         finalized_and_pruned_lru: lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
     },
 
-    /// Wiating for the runtime service to start the subscription. Can potentially take a long
+    /// Waiting for the runtime service to start the subscription. Can potentially take a long
     /// time.
     Pending(Pin<Box<dyn future::Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
 
@@ -280,111 +280,60 @@ struct Operation {
     interrupt: event_listener::Event,
 }
 
-enum MultiStageRequest {
-    ChainGetHeader {
+enum MultiStageRequestStage {
+    BlockHashNotKnown,
+    BlockHashKnown {
         block_hash: [u8; 32],
     },
-    StateCallStage1 {
-        block_hash: [u8; 32],
-        name: String,
-        parameters: Vec<u8>,
-    },
-    StateCallStage2 {
+    BlockInfoKnown {
         block_hash: [u8; 32],
         block_state_trie_root_hash: [u8; 32],
         block_number: u64,
-        name: String,
-        parameters: Vec<u8>,
     },
-    StateGetKeysStage1 {
-        block_hash: [u8; 32],
-        prefix: Vec<u8>,
-    },
-    StateGetKeysStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-        prefix: Vec<u8>,
-    },
-    StateGetKeysStage3 {
+}
+
+enum RenameMe {
+    StateGetKeys {
         in_progress_results: Vec<methods::HexString>,
     },
-    StateGetKeysPagedStage1 {
-        block_hash: [u8; 32],
-        prefix: Vec<u8>,
-        count: u32,
-        start_key: Vec<u8>,
-    },
-    StateGetKeysPagedStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-        prefix: Vec<u8>,
-        count: u32,
-        start_key: Vec<u8>,
-    },
-    StateGetKeysPagedStage3 {
+    StateGetKeysPaged {
         in_progress_results: Vec<Vec<u8>>,
     },
-    StateQueryStorageAtStage1 {
-        block_hash: [u8; 32],
-        keys: Vec<methods::HexString>,
-    },
-    StateQueryStorageAtStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-        keys: Vec<methods::HexString>,
-    },
-    StateQueryStorageAtStage3 {
+    StateQueryStorageAt {
         block_hash: [u8; 32],
         in_progress_results: Vec<(methods::HexString, Option<methods::HexString>)>,
     },
-    StateGetMetadataStage1 {
-        block_hash: [u8; 32],
+    StateGetStorage,
+}
+
+enum MultiStageRequestTy {
+    ChainGetBestBlockHash,
+    ChainGetBlock,
+    ChainGetHeader,
+    StateCall {
+        name: String,
+        parameters: Vec<u8>,
     },
-    StateGetMetadataStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
+    StateGetKeys {
+        prefix: Vec<u8>,
     },
-    StateGetStorageStage1 {
-        block_hash: [u8; 32],
+    StateGetKeysPaged {
+        prefix: Vec<u8>,
+        count: u32,
+        start_key: Vec<u8>,
+    },
+    StateQueryStorageAt {
+        keys: Vec<methods::HexString>,
+    },
+    StateGetMetadata,
+    StateGetStorage {
         key: Vec<u8>,
     },
-    StateGetStorageStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-        key: Vec<u8>,
-    },
-    StateGetStorageStage3 {},
-    StateGetRuntimeVersionStage1 {
-        block_hash: [u8; 32],
-    },
-    StateGetRuntimeVersionStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-    },
-    PaymentQueryInfoStage1 {
-        block_hash: [u8; 32],
+    StateGetRuntimeVersion,
+    PaymentQueryInfo {
         extrinsic: Vec<u8>,
     },
-    PaymentQueryInfoStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
-        extrinsic: Vec<u8>,
-    },
-    SystemAccountNextIndexStage1 {
-        block_hash: [u8; 32],
-        account_id: Vec<u8>,
-    },
-    SystemAccountNextIndexStage2 {
-        block_hash: [u8; 32],
-        block_state_trie_root_hash: [u8; 32],
-        block_number: u64,
+    SystemAccountNextIndex {
         account_id: Vec<u8>,
     },
 }
@@ -448,7 +397,7 @@ enum Event<TPlat: PlatformRef> {
     },
     LegacyApiFunctionStorageRequestProgress {
         request_id_json: String,
-        request: MultiStageRequest,
+        request: RenameMe,
         progress: sync_service::StorageQueryProgress<TPlat>,
     },
     LegacyApiStorageSubscriptionsUpdate {
@@ -504,7 +453,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
         transactions_service: config.transactions_service.clone(),
         background_tasks: stream::FuturesUnordered::new(),
         runtime_service_subscription: RuntimeServiceSubscription::NotCreated,
-        legacy_api_best_block: config.genesis_block_hash, // TODO: better block
         all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
             Default::default(),
@@ -540,6 +488,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
             Default::default(),
         ),
+        best_block_hash_pending: Vec::new(),
         block_headers_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         block_runtimes_cache: lru::LruCache::with_hasher(
             NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
@@ -568,7 +517,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
             IncomingJsonRpcRequest(String),
             AdvanceMultiStageRequest {
                 request_id_json: String,
-                request: MultiStageRequest,
+                stage: MultiStageRequestStage,
+                request_ty: MultiStageRequestTy,
             },
             Event(Event<TPlat>),
             RuntimeServiceSubscriptionReady(runtime_service::SubscribeAll<TPlat>),
@@ -645,12 +595,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
             }
             .or(async {
-                if let Some((request_id_json, request)) =
+                if let Some((request_id_json, stage, request_ty)) =
                     me.multistage_requests_to_advance.pop_front()
                 {
                     WakeUpReason::AdvanceMultiStageRequest {
                         request_id_json,
-                        request,
+                        stage,
+                        request_ty,
                     }
                 } else {
                     future::pending().await
@@ -801,60 +752,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_getBlock { hash } => {
-                        // `hash` equal to `None` means "the current best block".
-                        let hash = hash.map_or(me.legacy_api_best_block, |b| b.0);
-
-                        // Try to determine the block number by looking for the block in cache.
-                        // The request can be fulfilled no matter whether the block number is
-                        // known or not, but knowing it will lead to a better selection of peers,
-                        // and thus increase the chances of the requests succeeding.
-                        let block_number = me
-                            .block_headers_cache
-                            .get(&hash)
-                            .and_then(|result| result.as_ref().ok().map(|(_, _, n)| *n));
-
-                        // Block bodies and headers aren't stored locally. Ask the network.
-                        me.background_tasks.push({
-                            let sync_service = me.sync_service.clone();
-                            let request_id_json = request_id_json.to_owned();
-                            Box::pin(async move {
-                                let result = if let Some(block_number) = block_number {
-                                    sync_service
-                                        .block_query(
-                                            block_number,
-                                            hash,
-                                            codec::BlocksRequestFields {
-                                                header: true,
-                                                body: true,
-                                                justifications: false,
-                                            },
-                                            3,
-                                            Duration::from_secs(8),
-                                            NonZeroU32::new(1).unwrap(),
-                                        )
-                                        .await
-                                } else {
-                                    sync_service
-                                        .block_query_unknown_number(
-                                            hash,
-                                            codec::BlocksRequestFields {
-                                                header: true,
-                                                body: true,
-                                                justifications: false,
-                                            },
-                                            3,
-                                            Duration::from_secs(8),
-                                            NonZeroU32::new(1).unwrap(),
-                                        )
-                                        .await
-                                };
-                                Event::ChainGetBlockResult {
-                                    request_id_json,
-                                    result,
-                                    expected_block_hash: hash,
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
                                 }
-                            })
-                        });
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::ChainGetBlock,
+                        ));
                     }
 
                     methods::MethodCall::chain_getBlockHash { height } => {
@@ -872,15 +779,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .await;
                             }
                             None => {
-                                let _ = me
-                                    .responses_tx
-                                    .send(
-                                        methods::Response::chain_getBlockHash(
-                                            methods::HashHexString(me.legacy_api_best_block),
-                                        )
-                                        .to_json_response(request_id_json),
-                                    )
-                                    .await;
+                                me.multistage_requests_to_advance.push_back((
+                                    request_id_json.to_owned(),
+                                    MultiStageRequestStage::BlockHashNotKnown,
+                                    MultiStageRequestTy::ChainGetBestBlockHash,
+                                ));
                             }
                             Some(_) => {
                                 // TODO: look into some list of known blocks
@@ -919,9 +822,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::chain_getHeader { hash } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::ChainGetHeader {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::ChainGetHeader,
                         ));
                     }
 
@@ -1112,8 +1019,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::PaymentQueryInfoStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::PaymentQueryInfo {
                                 extrinsic: extrinsic.0,
                             },
                         ));
@@ -1140,21 +1052,32 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateCallStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::StateCall {
                                 name: name.into_owned(),
                                 parameters: parameters.0,
                             },
                         ));
                     }
 
-                    methods::MethodCall::state_getKeys { prefix, hash } => {
+                    methods::MethodCall::state_getKeys {
+                        prefix: methods::HexString(prefix),
+                        hash,
+                    } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateGetKeysStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
-                                prefix: prefix.0,
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::StateGetKeys { prefix },
                         ));
                     }
 
@@ -1166,8 +1089,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateGetKeysPagedStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::StateGetKeysPaged {
                                 prefix: prefix.map_or(Vec::new(), |p| p.0),
                                 count,
                                 start_key: start_key.map_or(Vec::new(), |p| p.0),
@@ -1178,38 +1106,52 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::state_queryStorageAt { keys, at } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateQueryStorageAtStage1 {
-                                block_hash: at.map_or(me.legacy_api_best_block, |h| h.0),
-                                keys,
+                            match at {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::StateQueryStorageAt { keys },
                         ));
                     }
 
                     methods::MethodCall::state_getMetadata { hash } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateGetMetadataStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::StateGetMetadata,
                         ));
                     }
 
                     methods::MethodCall::state_getStorage { key, hash } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateGetStorageStage1 {
-                                block_hash: hash.map_or(me.legacy_api_best_block, |h| h.0),
-                                key: key.0,
+                            match hash {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::StateGetStorage { key: key.0 },
                         ));
                     }
 
                     methods::MethodCall::state_getRuntimeVersion { at } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::StateGetRuntimeVersionStage1 {
-                                block_hash: at.map_or(me.legacy_api_best_block, |h| h.0),
+                            match at {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
                             },
+                            MultiStageRequestTy::StateGetRuntimeVersion,
                         ));
                     }
 
@@ -1368,8 +1310,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::system_accountNextIndex { account } => {
                         me.multistage_requests_to_advance.push_back((
                             request_id_json.to_owned(),
-                            MultiStageRequest::SystemAccountNextIndexStage1 {
-                                block_hash: me.legacy_api_best_block,
+                            MultiStageRequestStage::BlockHashNotKnown,
+                            MultiStageRequestTy::SystemAccountNextIndex {
                                 account_id: account.0,
                             },
                         ));
@@ -2474,38 +2416,122 @@ pub(super) async fn run<TPlat: PlatformRef>(
             }
 
             WakeUpReason::AdvanceMultiStageRequest {
-                request_id_json: request_id,
-                request:
-                    request @ (MultiStageRequest::ChainGetHeader { .. }
-                    | MultiStageRequest::StateCallStage1 { .. }
-                    | MultiStageRequest::StateGetKeysStage1 { .. }
-                    | MultiStageRequest::StateGetKeysPagedStage1 { .. }
-                    | MultiStageRequest::StateQueryStorageAtStage1 { .. }
-                    | MultiStageRequest::StateGetMetadataStage1 { .. }
-                    | MultiStageRequest::StateGetStorageStage1 { .. }
-                    | MultiStageRequest::StateGetRuntimeVersionStage1 { .. }
-                    | MultiStageRequest::PaymentQueryInfoStage1 { .. }
-                    | MultiStageRequest::SystemAccountNextIndexStage1 { .. }),
-            } => {
-                let block_hash = match &request {
-                    MultiStageRequest::ChainGetHeader { block_hash, .. }
-                    | MultiStageRequest::StateCallStage1 { block_hash, .. }
-                    | MultiStageRequest::StateGetKeysStage1 { block_hash, .. }
-                    | MultiStageRequest::StateGetKeysPagedStage1 { block_hash, .. }
-                    | MultiStageRequest::StateQueryStorageAtStage1 { block_hash, .. }
-                    | MultiStageRequest::StateGetMetadataStage1 { block_hash }
-                    | MultiStageRequest::StateGetStorageStage1 { block_hash, .. }
-                    | MultiStageRequest::StateGetRuntimeVersionStage1 { block_hash }
-                    | MultiStageRequest::PaymentQueryInfoStage1 { block_hash, .. }
-                    | MultiStageRequest::SystemAccountNextIndexStage1 { block_hash, .. } => {
-                        *block_hash
-                    }
-                    _ => unreachable!(),
-                };
+                request_id_json,
+                stage: MultiStageRequestStage::BlockHashNotKnown,
+                request_ty,
+            } => match me.runtime_service_subscription {
+                RuntimeServiceSubscription::Active {
+                    current_best_block, ..
+                } => {
+                    me.multistage_requests_to_advance.push_back((
+                        request_id_json,
+                        MultiStageRequestStage::BlockHashKnown {
+                            block_hash: current_best_block,
+                        },
+                        request_ty,
+                    ));
+                }
+                RuntimeServiceSubscription::Pending { .. }
+                | RuntimeServiceSubscription::NotCreated => {
+                    me.best_block_hash_pending
+                        .push((request_id_json, request_ty));
+                }
+            },
 
-                // If the value is available in cache, switch the request to the next stage.
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json,
+                stage:
+                    MultiStageRequestStage::BlockHashKnown { block_hash, .. }
+                    | MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
+                request_ty: MultiStageRequestTy::ChainGetBestBlockHash,
+            } => {
+                let _ = me
+                    .responses_tx
+                    .send(
+                        methods::Response::chain_getBlockHash(methods::HashHexString(block_hash))
+                            .to_json_response(&request_id_json),
+                    )
+                    .await;
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json,
+                stage:
+                    MultiStageRequestStage::BlockHashKnown { block_hash, .. }
+                    | MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
+                request_ty: MultiStageRequestTy::ChainGetBlock,
+            } => {
+                // Try to determine the block number by looking for the block in cache.
+                // The request can be fulfilled no matter whether the block number is
+                // known or not, but knowing it will lead to a better selection of peers,
+                // and thus increase the chances of the requests succeeding.
+                let block_number = me
+                    .block_headers_cache
+                    .get(&block_hash)
+                    .and_then(|result| result.as_ref().ok().map(|(_, _, n)| *n));
+
+                // Block bodies and headers aren't stored locally. Ask the network.
+                me.background_tasks.push({
+                    let sync_service = me.sync_service.clone();
+                    let request_id_json = request_id_json.to_owned();
+                    Box::pin(async move {
+                        let result = if let Some(block_number) = block_number {
+                            sync_service
+                                .block_query(
+                                    block_number,
+                                    block_hash,
+                                    codec::BlocksRequestFields {
+                                        header: true,
+                                        body: true,
+                                        justifications: false,
+                                    },
+                                    3,
+                                    Duration::from_secs(8),
+                                    NonZeroU32::new(1).unwrap(),
+                                )
+                                .await
+                        } else {
+                            sync_service
+                                .block_query_unknown_number(
+                                    block_hash,
+                                    codec::BlocksRequestFields {
+                                        header: true,
+                                        body: true,
+                                        justifications: false,
+                                    },
+                                    3,
+                                    Duration::from_secs(8),
+                                    NonZeroU32::new(1).unwrap(),
+                                )
+                                .await
+                        };
+                        Event::ChainGetBlockResult {
+                            request_id_json,
+                            result,
+                            expected_block_hash: block_hash,
+                        }
+                    })
+                });
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json: request_id,
+                stage: MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
+                request_ty: MultiStageRequestTy::ChainGetHeader,
+            } => {
+                // We special-case `chain_getHeader` as we can answer it immediately.
+                // TODO: answer request
+                todo!()
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json: request_id,
+                stage: MultiStageRequestStage::BlockHashKnown { block_hash },
+                request_ty,
+            } => {
+                // If the block's information are available in cache, switch it to the next stage.
                 if let Some(in_cache) = me.block_headers_cache.get(&block_hash) {
-                    let Ok((_, state_trie_root_hash, block_number)) = in_cache else {
+                    let &Ok((_, block_state_trie_root_hash, block_number)) = in_cache else {
                         let _ = me
                             .responses_tx
                             .send(parse::build_error_response(
@@ -2517,129 +2543,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         continue;
                     };
 
-                    // Advance to stage 2.
-                    match request {
-                        MultiStageRequest::ChainGetHeader { block_hash } => {
-                            todo!() // TODO: answer
-                        }
-                        MultiStageRequest::StateCallStage1 {
+                    me.multistage_requests_to_advance.push_back((
+                        request_id,
+                        MultiStageRequestStage::BlockInfoKnown {
                             block_hash,
-                            name,
-                            parameters,
-                        } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateCallStage2 {
-                                    block_hash,
-                                    name,
-                                    parameters,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateGetKeysStage1 { block_hash, prefix } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateGetKeysStage2 {
-                                    block_hash,
-                                    prefix,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateGetKeysPagedStage1 {
-                            block_hash,
-                            prefix,
-                            count,
-                            start_key,
-                        } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateGetKeysPagedStage2 {
-                                    block_hash,
-                                    prefix,
-                                    count,
-                                    start_key,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateQueryStorageAtStage1 { block_hash, keys } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateQueryStorageAtStage2 {
-                                    block_hash,
-                                    keys,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateGetMetadataStage1 { block_hash } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateGetMetadataStage2 {
-                                    block_hash,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateGetStorageStage1 { block_hash, key } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateGetStorageStage2 {
-                                    block_hash,
-                                    key,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::StateGetRuntimeVersionStage1 { block_hash } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::StateGetRuntimeVersionStage2 {
-                                    block_hash,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::PaymentQueryInfoStage1 {
-                            block_hash,
-                            extrinsic,
-                        } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::PaymentQueryInfoStage2 {
-                                    block_hash,
-                                    extrinsic,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        MultiStageRequest::SystemAccountNextIndexStage1 {
-                            block_hash,
-                            account_id,
-                        } => {
-                            me.multistage_requests_to_advance.push_back((
-                                request_id,
-                                MultiStageRequest::SystemAccountNextIndexStage2 {
-                                    block_hash,
-                                    account_id,
-                                    block_number: *block_number,
-                                    block_state_trie_root_hash: *state_trie_root_hash,
-                                },
-                            ));
-                        }
-                        _ => unreachable!(),
-                    };
-
+                            block_state_trie_root_hash,
+                            block_number,
+                        },
+                        request_ty,
+                    ));
                     continue;
                 }
 
@@ -2650,7 +2562,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // the block information.
                         // Keep track of the request.
                         debug_assert!(!entry.get().is_empty());
-                        entry.into_mut().push((request_id, request));
+                        entry.into_mut().push((request_id, request_ty));
                     }
                     hashbrown::hash_map::Entry::Vacant(entry) => {
                         // No network request is in progress yet. Start one.
@@ -2700,7 +2612,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // Keep track of the request.
                         let mut list = Vec::with_capacity(4);
-                        list.push((request_id, request));
+                        list.push((request_id, request_ty));
                         entry.insert(list);
                     }
                 }
@@ -2708,42 +2620,22 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json: request_id,
-                request:
-                    request @ (MultiStageRequest::StateCallStage2 { .. }
-                    | MultiStageRequest::StateGetMetadataStage2 { .. }
-                    | MultiStageRequest::StateGetRuntimeVersionStage2 { .. }
-                    | MultiStageRequest::PaymentQueryInfoStage2 { .. }
-                    | MultiStageRequest::SystemAccountNextIndexStage2 { .. }),
+                stage:
+                    MultiStageRequestStage::BlockInfoKnown {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                    },
+                request_ty:
+                    request_ty @ (MultiStageRequestTy::StateGetRuntimeVersion
+                    | MultiStageRequestTy::StateCall { .. }
+                    | MultiStageRequestTy::StateGetMetadata
+                    | MultiStageRequestTy::PaymentQueryInfo { .. }
+                    | MultiStageRequestTy::SystemAccountNextIndex { .. }),
             } => {
-                let (block_hash, block_state_trie_root_hash, block_number) = match &request {
-                    MultiStageRequest::StateGetMetadataStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                    }
-                    | MultiStageRequest::StateGetRuntimeVersionStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                    }
-                    | MultiStageRequest::PaymentQueryInfoStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        ..
-                    }
-                    | MultiStageRequest::SystemAccountNextIndexStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        ..
-                    } => (*block_hash, *block_state_trie_root_hash, *block_number),
-                    _ => unreachable!(),
-                };
-
                 // If the value is available in cache, do the runtime call.
                 if let Some(in_cache) = me.block_runtimes_cache.get(&block_hash) {
-                    if let MultiStageRequest::StateGetRuntimeVersionStage2 { .. } = &request {
+                    if let MultiStageRequestTy::StateGetRuntimeVersion = &request_ty {
                         match me
                             .runtime_service
                             .pinned_runtime_specification(in_cache.clone())
@@ -2778,33 +2670,34 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         continue;
                     }
 
-                    let (function_name, required_api_version, parameters_vectored) = match request {
-                        MultiStageRequest::StateCallStage2 {
-                            name, parameters, ..
-                        } => (name, None, Vec::new()),
-                        MultiStageRequest::StateGetMetadataStage2 { .. } => (
-                            "Metadata_metadata".to_owned(),
-                            Some(("Metadata".to_owned(), 1..=2)),
-                            Vec::new(),
-                        ),
-                        MultiStageRequest::PaymentQueryInfoStage2 { extrinsic, .. } => (
-                            json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
-                            Some(("TransactionPaymentApi".to_owned(), 1..=2)),
-                            json_rpc::payment_info::payment_info_parameters(&extrinsic).fold(
+                    let (function_name, required_api_version, parameters_vectored) =
+                        match request_ty {
+                            MultiStageRequestTy::StateCall { name, parameters } => {
+                                (name, None, parameters)
+                            }
+                            MultiStageRequestTy::StateGetMetadata => (
+                                "Metadata_metadata".to_owned(),
+                                Some(("Metadata".to_owned(), 1..=2)),
                                 Vec::new(),
-                                |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                },
                             ),
-                        ),
-                        MultiStageRequest::SystemAccountNextIndexStage2 { account_id, .. } => (
-                            "AccountNonceApi_account_nonce".to_owned(),
-                            Some(("AccountNonceApi".to_owned(), 1..=1)),
-                            account_id,
-                        ),
-                        _ => unreachable!(),
-                    };
+                            MultiStageRequestTy::PaymentQueryInfo { extrinsic } => {
+                                (
+                                    json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
+                                    Some(("TransactionPaymentApi".to_owned(), 1..=2)),
+                                    json_rpc::payment_info::payment_info_parameters(&extrinsic)
+                                        .fold(Vec::new(), |mut a, b| {
+                                            a.extend_from_slice(b.as_ref());
+                                            a
+                                        }),
+                                )
+                            }
+                            MultiStageRequestTy::SystemAccountNextIndex { account_id } => (
+                                "AccountNonceApi_account_nonce".to_owned(),
+                                Some(("AccountNonceApi".to_owned(), 1..=1)),
+                                account_id,
+                            ),
+                            _ => unreachable!(),
+                        };
 
                     let runtime_call_future = me.runtime_service.runtime_call(
                         in_cache.clone(),
@@ -2830,7 +2723,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // the runtime.
                         // Keep track of the request.
                         debug_assert!(!entry.get().is_empty());
-                        entry.into_mut().push((request_id, request));
+                        entry.into_mut().push((request_id, request_ty));
                     }
                     hashbrown::hash_map::Entry::Vacant(entry) => {
                         // No network request is in progress yet. Start one.
@@ -2949,7 +2842,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         // Keep track of the request.
                         let mut list = Vec::with_capacity(4);
-                        list.push((request_id, request));
+                        list.push((request_id, request_ty));
                         entry.insert(list);
                     }
                 }
@@ -2957,29 +2850,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json,
-                request:
-                    request @ (MultiStageRequest::StateGetKeysStage2 { .. }
-                    | MultiStageRequest::StateGetKeysPagedStage2 { .. }
-                    | MultiStageRequest::StateQueryStorageAtStage2 { .. }
-                    | MultiStageRequest::StateGetStorageStage2 { .. }),
+                stage:
+                    MultiStageRequestStage::BlockInfoKnown {
+                        block_hash,
+                        block_state_trie_root_hash,
+                        block_number,
+                    },
+                request_ty:
+                    request_ty @ (MultiStageRequestTy::StateGetKeys { .. }
+                    | MultiStageRequestTy::StateGetKeysPaged { .. }
+                    | MultiStageRequestTy::StateQueryStorageAt { .. }
+                    | MultiStageRequestTy::StateGetStorage { .. }),
             } => {
-                let (
-                    block_hash,
-                    block_state_trie_root_hash,
-                    block_number,
-                    request,
-                    storage_request,
-                ) = match request {
-                    MultiStageRequest::StateGetKeysStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        prefix,
-                    } => (
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        MultiStageRequest::StateGetKeysStage3 {
+                let (request, storage_request) = match request_ty {
+                    MultiStageRequestTy::StateGetKeys { prefix } => (
+                        RenameMe::StateGetKeys {
                             in_progress_results: Vec::with_capacity(32),
                         },
                         either::Left(iter::once(sync_service::StorageRequestItem {
@@ -2987,18 +2872,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
-                    MultiStageRequest::StateGetKeysPagedStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
+                    MultiStageRequestTy::StateGetKeysPaged {
                         prefix,
                         count,
                         start_key,
                     } => (
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        MultiStageRequest::StateGetKeysPagedStage3 {
+                        RenameMe::StateGetKeysPaged {
                             in_progress_results: Vec::with_capacity(32),
                         },
                         either::Left(iter::once(sync_service::StorageRequestItem {
@@ -3006,16 +2885,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
-                    MultiStageRequest::StateQueryStorageAtStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        keys,
-                    } => (
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        MultiStageRequest::StateQueryStorageAtStage3 {
+                    MultiStageRequestTy::StateQueryStorageAt { keys } => (
+                        RenameMe::StateQueryStorageAt {
                             block_hash,
                             in_progress_results: Vec::with_capacity(keys.len()),
                         },
@@ -3026,16 +2897,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         })),
                     ),
-                    MultiStageRequest::StateGetStorageStage2 {
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        key,
-                    } => (
-                        block_hash,
-                        block_state_trie_root_hash,
-                        block_number,
-                        MultiStageRequest::StateGetStorageStage3 {},
+                    MultiStageRequestTy::StateGetStorage { key } => (
+                        RenameMe::StateGetStorage {},
                         either::Left(iter::once(sync_service::StorageRequestItem {
                             key,
                             ty: sync_service::StorageRequestItemTy::Value,
@@ -3063,17 +2926,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }));
             }
 
-            WakeUpReason::AdvanceMultiStageRequest {
-                request_id_json: request_id,
-                request:
-                    request @ (MultiStageRequest::StateGetKeysStage3 { .. }
-                    | MultiStageRequest::StateGetStorageStage3 { .. }
-                    | MultiStageRequest::StateGetKeysPagedStage3 { .. }
-                    | MultiStageRequest::StateQueryStorageAtStage3 { .. }),
-            } => {
-                unreachable!()
-            }
-
             WakeUpReason::Event(Event::LegacyApiFunctionStorageRequestProgress {
                 request_id_json,
                 request,
@@ -3085,7 +2937,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    MultiStageRequest::StateGetKeysStage3 {
+                    RenameMe::StateGetKeys {
                         mut in_progress_results,
                     },
                 ) => {
@@ -3093,7 +2945,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: MultiStageRequest::StateGetKeysStage3 {
+                            request: RenameMe::StateGetKeys {
                                 in_progress_results,
                             },
                             progress: next.advance().await,
@@ -3102,7 +2954,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    MultiStageRequest::StateGetKeysStage3 {
+                    RenameMe::StateGetKeys {
                         in_progress_results,
                     },
                 ) => {
@@ -3120,7 +2972,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    MultiStageRequest::StateGetKeysPagedStage3 {
+                    RenameMe::StateGetKeysPaged {
                         mut in_progress_results,
                     },
                 ) => {
@@ -3128,7 +2980,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: MultiStageRequest::StateGetKeysPagedStage3 {
+                            request: RenameMe::StateGetKeysPaged {
                                 in_progress_results,
                             },
                             progress: next.advance().await,
@@ -3137,7 +2989,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    MultiStageRequest::StateGetKeysPagedStage3 {
+                    RenameMe::StateGetKeysPaged {
                         in_progress_results,
                     },
                 ) => {
@@ -3161,7 +3013,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    MultiStageRequest::StateQueryStorageAtStage3 {
+                    RenameMe::StateQueryStorageAt {
                         block_hash,
                         mut in_progress_results,
                     },
@@ -3171,7 +3023,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     me.background_tasks.push(Box::pin(async move {
                         Event::LegacyApiFunctionStorageRequestProgress {
                             request_id_json,
-                            request: MultiStageRequest::StateQueryStorageAtStage3 {
+                            request: RenameMe::StateQueryStorageAt {
                                 block_hash,
                                 in_progress_results,
                             },
@@ -3181,7 +3033,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 }
                 (
                     sync_service::StorageQueryProgress::Finished,
-                    MultiStageRequest::StateQueryStorageAtStage3 {
+                    RenameMe::StateQueryStorageAt {
                         block_hash,
                         in_progress_results,
                     },
@@ -3208,7 +3060,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    MultiStageRequest::StateGetStorageStage3 {},
+                    RenameMe::StateGetStorage {},
                 ) => {
                     let _ = me
                         .responses_tx
@@ -3224,7 +3076,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         query: next,
                         ..
                     },
-                    MultiStageRequest::StateGetStorageStage3 {},
+                    RenameMe::StateGetStorage {},
                 ) => {
                     let _ = me
                         .responses_tx
@@ -4076,6 +3928,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     current_finalized_block: finalized_block_hash,
                     finalized_heads_subscriptions_stale: true,
                 };
+
+                // Advance all the requests that are waiting for the best block hash to be known.
+                for (request_id, request_ty) in me.best_block_hash_pending.drain(..) {
+                    me.multistage_requests_to_advance.push_back((
+                        request_id,
+                        MultiStageRequestStage::BlockHashKnown {
+                            block_hash: current_best_block,
+                        },
+                        request_ty,
+                    ));
+                }
             }
 
             WakeUpReason::RuntimeServiceSubscriptionDead => {
@@ -4238,8 +4101,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 {
                     // Note that we push_front in order to guarantee that the information is
                     // not removed from cache before the request is processed.
-                    me.multistage_requests_to_advance
-                        .push_front((request_id, request));
+                    me.multistage_requests_to_advance.push_front((
+                        request_id,
+                        MultiStageRequestStage::BlockHashKnown { block_hash },
+                        request,
+                    ));
                 }
             }
 
@@ -4281,8 +4147,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 {
                     // Note that we push_front in order to guarantee that the information is
                     // not removed from cache before the request is processed.
-                    me.multistage_requests_to_advance
-                        .push_front((request_id, request));
+                    me.multistage_requests_to_advance.push_front((
+                        request_id,
+                        MultiStageRequestStage::BlockHashKnown { block_hash },
+                        request,
+                    ));
                 }
             }
 
