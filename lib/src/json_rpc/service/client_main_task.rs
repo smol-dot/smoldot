@@ -469,6 +469,7 @@ impl ClientMainTask {
                 | methods::MethodCall::chain_subscribeNewHeads { .. }
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
+                | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
                 | methods::MethodCall::chainHead_unstable_follow { .. } => {
@@ -539,6 +540,9 @@ impl ClientMainTask {
                 methods::MethodCall::author_unwatchExtrinsic { subscription, .. }
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription, .. }
                 | methods::MethodCall::state_unsubscribeStorage { subscription, .. }
+                | methods::MethodCall::transaction_v1_stop {
+                    operation_id: subscription,
+                }
                 | methods::MethodCall::transactionWatch_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::chainHead_unstable_unfollow {
@@ -561,6 +565,9 @@ impl ClientMainTask {
                                     } => methods::Response::state_unsubscribeRuntimeVersion(true),
                                     methods::MethodCall::state_unsubscribeStorage { .. } => {
                                         methods::Response::state_unsubscribeStorage(true)
+                                    }
+                                    methods::MethodCall::transaction_v1_stop { .. } => {
+                                        methods::Response::transaction_v1_stop(())
                                     }
                                     methods::MethodCall::transactionWatch_unstable_unwatch {
                                         ..
