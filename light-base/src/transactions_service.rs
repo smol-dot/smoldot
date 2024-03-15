@@ -188,7 +188,8 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// The return value of this method is an object receives updates on the state of the
     /// transaction.
     ///
-    /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
+    /// If `detached` is `true`, then dropping the value returned does not cancel sending out
+    /// the transaction. If `detached` is `false`, then it does.
     ///
     /// If this exact same transaction has already been submitted before, the transaction isn't
     /// added a second time. Instead, a second channel is created pointing to the already-existing
@@ -197,12 +198,13 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
+        detached: bool,
     ) -> TransactionWatcher {
         let (updates_report, rx) = async_channel::bounded(channel_size);
 
         self.send_to_background(ToBackground::SubmitTransaction {
             transaction_bytes,
-            updates_report: Some(updates_report),
+            updates_report: Some((updates_report, detached)),
         })
         .await;
 
@@ -397,7 +399,7 @@ enum ValidationError {
 enum ToBackground {
     SubmitTransaction {
         transaction_bytes: Vec<u8>,
-        updates_report: Option<async_channel::Sender<TransactionStatus>>,
+        updates_report: Option<(async_channel::Sender<TransactionStatus>, bool)>,
     },
 }
 
@@ -473,6 +475,7 @@ async fn background_task<TPlat: PlatformRef>(
                             ..
                         }) => {
                             let _ = updates_report
+                                .0
                                 .send(TransactionStatus::Dropped(DropReason::GapInChain))
                                 .await;
                         }
@@ -549,6 +552,18 @@ async fn background_task<TPlat: PlatformRef>(
             // unreasonable memory consumption.
             if worker.pending_transactions.oldest_block_finality_lag() >= 32 {
                 continue 'channels_rebuild;
+            }
+
+            // Try to find transactions whose status update channels have all been closed.
+            while let Some(tx_id) = {
+                let id = worker
+                    .pending_transactions
+                    .transactions_iter()
+                    .find(|(_, tx)| tx.status_update.is_empty() && !tx.detached)
+                    .map(|(id, _)| id);
+                id
+            } {
+                worker.pending_transactions.remove_transaction(tx_id);
             }
 
             // Start the validation process of transactions that need to be validated.
@@ -1190,8 +1205,11 @@ async fn background_task<TPlat: PlatformRef>(
                             .pending_transactions
                             .transaction_user_data_mut(existing_tx_id)
                             .unwrap();
-                        if let Some(updates_report) = updates_report {
-                            existing_tx.add_status_update(updates_report);
+                        if let Some((channel, detached)) = updates_report {
+                            existing_tx.add_status_update(channel);
+                            if detached {
+                                existing_tx.detached = true;
+                            }
                         }
                         continue;
                     }
@@ -1201,7 +1219,7 @@ async fn background_task<TPlat: PlatformRef>(
                     if worker.pending_transactions.num_transactions()
                         >= worker.max_pending_transactions
                     {
-                        if let Some(updates_report) = updates_report {
+                        if let Some((updates_report, _)) = updates_report {
                             let _ = updates_report.try_send(TransactionStatus::Dropped(
                                 DropReason::MaxPendingTransactionsReached,
                             ));
@@ -1214,10 +1232,14 @@ async fn background_task<TPlat: PlatformRef>(
                         transaction_bytes,
                         PendingTransaction {
                             when_reannounce: worker.platform.now(),
+                            detached: match &updates_report {
+                                Some((_, true)) | None => true,
+                                Some((_, false)) => false,
+                            },
                             status_update: {
                                 let mut vec = Vec::with_capacity(1);
-                                if let Some(updates_report) = updates_report {
-                                    vec.push(updates_report);
+                                if let Some((channel, _)) = updates_report {
+                                    vec.push(channel);
                                 }
                                 vec
                             },
@@ -1251,9 +1273,9 @@ struct Worker<TPlat: PlatformRef> {
     /// [`TransactionsService::submit_transaction`] and their channel to send back their status.
     ///
     /// All the entries in this map represent transactions that we're trying to include on the
-    /// network. It is normal to find entries where the status report channel is close, as they
+    /// network. It is normal to find entries where the status report channels are closed, as they
     /// still represent transactions that we're trying to include but whose status isn't
-    /// interesting us.
+    /// interesting the frontend.
     ///
     /// All the blocks within this data structure are also pinned within the runtime service. They
     /// must be unpinned when they leave the data structure.
@@ -1268,7 +1290,7 @@ struct Worker<TPlat: PlatformRef> {
         FuturesUnordered<future::BoxFuture<'static, ([u8; 32], Result<Vec<Vec<u8>>, ()>)>>,
 
     /// List of transactions currently being validated.
-    /// Returns the [`light_pool::TransactionId]` of the transaction that has finished being
+    /// Returns the [`light_pool::TransactionId`] of the transaction that has finished being
     /// validated. The result can then be read from [`PendingTransaction::validation_in_progress`].
     /// Since transaction IDs can be reused, the returned ID might not correspond to a transaction
     /// or might correspond to the wrong transaction. This ID being returned is just a hint as to
@@ -1372,6 +1394,10 @@ struct PendingTransaction<TPlat: PlatformRef> {
 
     /// List of channels that should receive changes to the transaction status.
     status_update: Vec<async_channel::Sender<TransactionStatus>>,
+
+    /// If `false`, then dropping all the [`PendingTransaction::status_update`] channels will
+    /// remove the transaction from the pool.
+    detached: bool,
 
     /// Latest known status of the transaction. Used when a new sender is added to
     /// [`PendingTransaction::status_update`].
