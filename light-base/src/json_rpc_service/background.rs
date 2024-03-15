@@ -427,7 +427,7 @@ enum TransactionWatchTy {
     /// `transaction_v1_broadcast`.
     NewApi {
         /// A copy of the body of the transaction is kept, as it might be necessary to re-insert
-        /// it in the transactions service.
+        /// it in the transactions service later, for example if it reports having crashed.
         transaction_bytes: Vec<u8>,
     },
     /// `transactionWatch_unstable_submitAndWatch`.
@@ -2572,7 +2572,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // generates a notification.
                         // Note that we do that even for `transaction_v1_broadcast`, as it is
                         // important to pull notifications from the channel in order to not
-                        // clog it, which would cause the transaction to be dropped.
+                        // clog it.
                         me.background_tasks.push(Box::pin(async move {
                             let Some(status) = transaction_updates.as_mut().next().await else {
                                 unreachable!()
@@ -4890,7 +4890,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         TransactionWatchTy::NewApi { .. },
                     ) => {
                         // In case of `transaction_v1_broadcast`, the transaction is re-inserted
-                        // in the list, but no new notification-generating task is pushed.
+                        // in the list, but no new notification-generating task is pushed, making
+                        // the transaction effectively dead and waiting for `transaction_v1_stop`
+                        // to be called to remove it.
                         let _prev_value = me
                             .transactions_subscriptions
                             .insert(subscription_id.clone(), transaction_watch);

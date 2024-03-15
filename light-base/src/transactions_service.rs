@@ -559,7 +559,9 @@ async fn background_task<TPlat: PlatformRef>(
                 let id = worker
                     .pending_transactions
                     .transactions_iter()
-                    .find(|(_, tx)| tx.status_update.is_empty() && !tx.detached)
+                    .find(|(_, tx)| {
+                        !tx.status_update.iter().any(|s| !s.is_closed()) && !tx.detached
+                    })
                     .map(|(id, _)| id);
                 id
             } {
