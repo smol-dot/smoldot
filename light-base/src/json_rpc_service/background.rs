@@ -2606,10 +2606,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    json_rpc::parse::ErrorResponse::ApplicationDefined(
-                                        -32800,
-                                        "Invalid operationId",
-                                    ),
+                                    json_rpc::parse::ErrorResponse::InvalidParams,
                                     None,
                                 ))
                                 .await;
