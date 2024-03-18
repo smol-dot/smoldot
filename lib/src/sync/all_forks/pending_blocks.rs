@@ -238,11 +238,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             source_occupations: Default::default(),
             requests: slab::Slab::with_capacity(
                 config.blocks_capacity
-                    * usize::try_from(config.max_requests_per_block.get())
-                        .unwrap_or(usize::max_value()),
+                    * usize::try_from(config.max_requests_per_block.get()).unwrap_or(usize::MAX),
             ),
             max_requests_per_block: usize::try_from(config.max_requests_per_block.get())
-                .unwrap_or(usize::max_value()),
+                .unwrap_or(usize::MAX),
         }
     }
 
@@ -285,10 +284,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
         let source_occupations_entries = self
             .source_occupations
-            .range(
-                (source_id, RequestId(usize::min_value()))
-                    ..=(source_id, RequestId(usize::max_value())),
-            )
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
             .copied()
             .collect::<Vec<_>>();
 
@@ -417,10 +413,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         self.source_occupations
-            .range(
-                (source_id, RequestId(usize::min_value()))
-                    ..=(source_id, RequestId(usize::max_value())),
-            )
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
             .count()
     }
 
@@ -836,10 +829,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // Update `requested_blocks`.
         let blocks_to_remove = self
             .requested_blocks
-            .range(
-                (request_id, u64::min_value(), [0; 32])
-                    ..=(request_id, u64::max_value(), [0xff; 32]),
-            )
+            .range((request_id, u64::MIN, [0; 32])..=(request_id, u64::MAX, [0xff; 32]))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1013,12 +1003,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                         (
                             *unknown_block_height,
                             **unknown_block_hash,
-                            RequestId(usize::min_value()),
+                            RequestId(usize::MIN),
                         )
                             ..=(
                                 *unknown_block_height,
                                 **unknown_block_hash,
-                                RequestId(usize::max_value()),
+                                RequestId(usize::MAX),
                             ),
                     )
                     .count();
@@ -1055,12 +1045,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                                     (
                                         unknown_block_height,
                                         *unknown_block_hash,
-                                        RequestId(usize::min_value()),
+                                        RequestId(usize::MIN),
                                     )
                                         ..=(
                                             unknown_block_height,
                                             *unknown_block_hash,
-                                            RequestId(usize::max_value()),
+                                            RequestId(usize::MAX),
                                         ),
                                 )
                                 .any(|(_, _, request_id)| {

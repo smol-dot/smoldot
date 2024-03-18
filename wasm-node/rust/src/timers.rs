@@ -214,8 +214,8 @@ fn process_timers() {
             // Note that `split_off` returns values greater or equal, meaning that if a timer had
             // a `timer_id` equal to `max_value()` it would erroneously be returned instead of being
             // left in the collection as expected. For obvious reasons, a `timer_id` of
-            // `usize::max_value()` is impossible, so this isn't a problem.
-            timer_id: usize::max_value(),
+            // `usize::MAX` is impossible, so this isn't a problem.
+            timer_id: usize::MAX,
         });
 
         mem::replace(&mut lock.timers_queue, timers_remaining)

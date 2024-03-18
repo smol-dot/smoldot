@@ -320,13 +320,8 @@ enum SubstreamDirection {
 }
 
 impl SubstreamDirection {
-    fn min_value() -> Self {
-        SubstreamDirection::In
-    }
-
-    fn max_value() -> Self {
-        SubstreamDirection::Out
-    }
+    const MIN: Self = SubstreamDirection::In;
+    const MAX: Self = SubstreamDirection::Out;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -336,27 +331,16 @@ enum NotificationsSubstreamState {
 }
 
 impl NotificationsSubstreamState {
-    fn min_value() -> Self {
-        NotificationsSubstreamState::Pending
-    }
-
-    fn max_value() -> Self {
-        NotificationsSubstreamState::Open {
-            asked_to_leave: true,
-        }
-    }
-
-    fn open_min_value() -> Self {
-        NotificationsSubstreamState::Open {
-            asked_to_leave: false,
-        }
-    }
-
-    fn open_max_value() -> Self {
-        NotificationsSubstreamState::Open {
-            asked_to_leave: true,
-        }
-    }
+    const MIN: Self = NotificationsSubstreamState::Pending;
+    const MAX: Self = NotificationsSubstreamState::Open {
+        asked_to_leave: true,
+    };
+    const OPEN_MIN_VALUE: Self = NotificationsSubstreamState::Open {
+        asked_to_leave: false,
+    };
+    const OPEN_MAX_VALUE: Self = NotificationsSubstreamState::Open {
+        asked_to_leave: true,
+    };
 }
 
 impl<TChain, TConn, TNow> ChainNetwork<TChain, TConn, TNow>
@@ -485,17 +469,17 @@ where
                 .range(
                     (
                         protocol,
-                        PeerIndex(usize::min_value()),
+                        PeerIndex(usize::MIN),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::open_min_value(),
-                        SubstreamId::min_value(),
+                        NotificationsSubstreamState::OPEN_MIN_VALUE,
+                        SubstreamId::MIN,
                     )
                         ..=(
                             protocol,
-                            PeerIndex(usize::max_value()),
+                            PeerIndex(usize::MAX),
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::open_max_value(),
-                            SubstreamId::max_value(),
+                            NotificationsSubstreamState::OPEN_MAX_VALUE,
+                            SubstreamId::MAX,
                         ),
                 )
                 .find(|(_, _, direction, state, _)| {
@@ -515,12 +499,12 @@ where
                 (
                     chain_id.0,
                     GossipKind::ConsensusTransactions,
-                    PeerIndex(usize::min_value()),
+                    PeerIndex(usize::MIN),
                 )
                     ..=(
                         chain_id.0,
                         GossipKind::ConsensusTransactions,
-                        PeerIndex(usize::max_value()),
+                        PeerIndex(usize::MAX),
                     ),
             )
             .map(|(_, _, peer_index)| *peer_index)
@@ -546,17 +530,17 @@ where
                 .range(
                     (
                         protocol,
-                        PeerIndex(usize::min_value()),
-                        SubstreamDirection::min_value(),
-                        NotificationsSubstreamState::min_value(),
-                        SubstreamId::min_value(),
+                        PeerIndex(usize::MIN),
+                        SubstreamDirection::MIN,
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
                     )
                         ..=(
                             protocol,
-                            PeerIndex(usize::max_value()),
-                            SubstreamDirection::max_value(),
-                            NotificationsSubstreamState::max_value(),
-                            SubstreamId::max_value(),
+                            PeerIndex(usize::MAX),
+                            SubstreamDirection::MAX,
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
                         ),
                 )
                 .cloned()
@@ -723,9 +707,7 @@ where
         // depending on the situation.
         if self
             .connections_by_peer_id
-            .range(
-                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
-            )
+            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
             .any(|(_, connection_id)| {
                 let state = self.inner.connection_state(*connection_id);
                 state.established && !state.shutting_down
@@ -740,8 +722,8 @@ where
                         },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::min_value(),
-                        SubstreamId::min_value(),
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
                     )
                         ..=(
                             NotificationsProtocol::BlockAnnounces {
@@ -749,8 +731,8 @@ where
                             },
                             peer_index,
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::max_value(),
-                            SubstreamId::max_value(),
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
                         ),
                 )
                 .next()
@@ -765,9 +747,7 @@ where
 
         if !self
             .connections_by_peer_id
-            .range(
-                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
-            )
+            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
             .any(|(_, connection_id)| {
                 let state = self.inner.connection_state(*connection_id);
                 !state.shutting_down
@@ -829,7 +809,7 @@ where
 
         if self
             .gossip_desired_peers
-            .range((peer_index, kind, usize::min_value())..=(peer_index, kind, usize::max_value()))
+            .range((peer_index, kind, usize::MIN)..=(peer_index, kind, usize::MAX))
             .next()
             .is_none()
         {
@@ -845,8 +825,8 @@ where
                     },
                     peer_index,
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::min_value(),
-                    SubstreamId::min_value(),
+                    NotificationsSubstreamState::MIN,
+                    SubstreamId::MIN,
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces {
@@ -854,8 +834,8 @@ where
                         },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::max_value(),
-                        SubstreamId::max_value(),
+                        NotificationsSubstreamState::MAX,
+                        SubstreamId::MAX,
                     ),
             )
             .next()
@@ -885,12 +865,9 @@ where
             // TODO: this works only because there's only one GossipKind
             let mut chains_and_after =
                 self.gossip_desired_peers
-                    .split_off(&(peer_index, kind, usize::min_value()));
-            let mut chains_after = chains_and_after.split_off(&(
-                PeerIndex(peer_index.0 + 1),
-                kind,
-                usize::min_value(),
-            ));
+                    .split_off(&(peer_index, kind, usize::MIN));
+            let mut chains_after =
+                chains_and_after.split_off(&(PeerIndex(peer_index.0 + 1), kind, usize::MIN));
             self.gossip_desired_peers.append(&mut chains_after);
             chains_and_after
         };
@@ -925,8 +902,8 @@ where
     ) -> impl Iterator<Item = &'_ PeerId> + '_ {
         self.gossip_desired_peers_by_chain
             .range(
-                (chain_id.0, kind, PeerIndex(usize::min_value()))
-                    ..=(chain_id.0, kind, PeerIndex(usize::max_value())),
+                (chain_id.0, kind, PeerIndex(usize::MIN))
+                    ..=(chain_id.0, kind, PeerIndex(usize::MAX)),
             )
             .map(|(_, _, peer_index)| &self.peers[peer_index.0])
     }
@@ -1127,9 +1104,7 @@ where
         };
 
         self.connections_by_peer_id
-            .range(
-                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
-            )
+            .range((peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX))
             .count()
     }
 
@@ -1204,12 +1179,12 @@ where
                                     (
                                         expected_peer_index,
                                         GossipKind::ConsensusTransactions,
-                                        usize::min_value(),
+                                        usize::MIN,
                                     )
                                         ..=(
                                             expected_peer_index,
                                             GossipKind::ConsensusTransactions,
-                                            usize::max_value(),
+                                            usize::MAX,
                                         ),
                                 )
                                 .next()
@@ -1217,8 +1192,8 @@ where
                                 && !self
                                     .connections_by_peer_id
                                     .range(
-                                        (expected_peer_index, ConnectionId::min_value())
-                                            ..=(expected_peer_index, ConnectionId::max_value()),
+                                        (expected_peer_index, ConnectionId::MIN)
+                                            ..=(expected_peer_index, ConnectionId::MAX),
                                     )
                                     .any(|(_, connection_id)| {
                                         let state = self.inner.connection_state(*connection_id);
@@ -1244,12 +1219,12 @@ where
                         (
                             actual_peer_index,
                             GossipKind::ConsensusTransactions,
-                            usize::min_value(),
+                            usize::MIN,
                         )
                             ..=(
                                 actual_peer_index,
                                 GossipKind::ConsensusTransactions,
-                                usize::max_value(),
+                                usize::MAX,
                             ),
                     ) {
                         if self
@@ -1261,8 +1236,8 @@ where
                                     },
                                     actual_peer_index,
                                     SubstreamDirection::Out,
-                                    NotificationsSubstreamState::min_value(),
-                                    SubstreamId::min_value(),
+                                    NotificationsSubstreamState::MIN,
+                                    SubstreamId::MIN,
                                 )
                                     ..=(
                                         NotificationsProtocol::BlockAnnounces {
@@ -1270,8 +1245,8 @@ where
                                         },
                                         actual_peer_index,
                                         SubstreamDirection::Out,
-                                        NotificationsSubstreamState::max_value(),
-                                        SubstreamId::max_value(),
+                                        NotificationsSubstreamState::MAX,
+                                        SubstreamId::MAX,
                                     ),
                             )
                             .next()
@@ -1329,16 +1304,8 @@ where
                     if self
                         .gossip_desired_peers
                         .range(
-                            (
-                                peer_index,
-                                GossipKind::ConsensusTransactions,
-                                usize::min_value(),
-                            )
-                                ..=(
-                                    peer_index,
-                                    GossipKind::ConsensusTransactions,
-                                    usize::max_value(),
-                                ),
+                            (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
+                                ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
                         )
                         .count()
                         != 0
@@ -1346,8 +1313,7 @@ where
                         if !self
                             .connections_by_peer_id
                             .range(
-                                (peer_index, ConnectionId::min_value())
-                                    ..=(peer_index, ConnectionId::max_value()),
+                                (peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX),
                             )
                             .any(|(_, connection_id)| {
                                 let state = self.inner.connection_state(*connection_id);
@@ -1359,8 +1325,7 @@ where
                         if !self
                             .connections_by_peer_id
                             .range(
-                                (peer_index, ConnectionId::min_value())
-                                    ..=(peer_index, ConnectionId::max_value()),
+                                (peer_index, ConnectionId::MIN)..=(peer_index, ConnectionId::MAX),
                             )
                             .any(|(_, connection_id)| {
                                 let state = self.inner.connection_state(*connection_id);
@@ -1368,16 +1333,8 @@ where
                             })
                         {
                             for (_, _, chain_index) in self.gossip_desired_peers.range(
-                                (
-                                    peer_index,
-                                    GossipKind::ConsensusTransactions,
-                                    usize::min_value(),
-                                )
-                                    ..=(
-                                        peer_index,
-                                        GossipKind::ConsensusTransactions,
-                                        usize::max_value(),
-                                    ),
+                                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
+                                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
                             ) {
                                 self.connected_unopened_gossip_desired.remove(&(
                                     peer_index,
@@ -1820,15 +1777,15 @@ where
                                                     other_protocol,
                                                     peer_index,
                                                     SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::min_value(),
-                                                    SubstreamId::min_value(),
+                                                    NotificationsSubstreamState::MIN,
+                                                    SubstreamId::MIN,
                                                 )
                                                     ..=(
                                                         other_protocol,
                                                         peer_index,
                                                         SubstreamDirection::Out,
-                                                        NotificationsSubstreamState::max_value(),
-                                                        SubstreamId::max_value(),
+                                                        NotificationsSubstreamState::MAX,
+                                                        SubstreamId::MAX,
                                                     ),
                                             )
                                             .next()
@@ -1903,8 +1860,8 @@ where
                                     if self
                                         .connections_by_peer_id
                                         .range(
-                                            (peer_index, ConnectionId::min_value())
-                                                ..=(peer_index, ConnectionId::min_value()),
+                                            (peer_index, ConnectionId::MIN)
+                                                ..=(peer_index, ConnectionId::MIN),
                                         )
                                         .any(|(_, c)| {
                                             let state = self.inner.connection_state(*c);
@@ -1925,8 +1882,8 @@ where
                                                     },
                                                     peer_index,
                                                     SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::open_min_value(),
-                                                    SubstreamId::min_value(),
+                                                    NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                                    SubstreamId::MIN,
                                                 )
                                                     ..=(
                                                         NotificationsProtocol::BlockAnnounces {
@@ -1934,9 +1891,8 @@ where
                                                         },
                                                         peer_index,
                                                         SubstreamDirection::Out,
-                                                        NotificationsSubstreamState::open_max_value(
-                                                        ),
-                                                        SubstreamId::max_value(),
+                                                        NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                                        SubstreamId::MAX,
                                                     ),
                                             )
                                             .next()
@@ -1975,16 +1931,16 @@ where
                                                 (
                                                     other_protocol,
                                                     peer_index,
-                                                    SubstreamDirection::min_value(),
-                                                    NotificationsSubstreamState::min_value(),
-                                                    SubstreamId::min_value(),
+                                                    SubstreamDirection::MIN,
+                                                    NotificationsSubstreamState::MIN,
+                                                    SubstreamId::MIN,
                                                 )
                                                     ..=(
                                                         other_protocol,
                                                         peer_index,
-                                                        SubstreamDirection::max_value(),
-                                                        NotificationsSubstreamState::max_value(),
-                                                        SubstreamId::max_value(),
+                                                        SubstreamDirection::MAX,
+                                                        NotificationsSubstreamState::MAX,
+                                                        SubstreamId::MAX,
                                                     ),
                                             )
                                             .map(|(_, _, dir, state, s)| (*s, *dir, *state))
@@ -2102,15 +2058,15 @@ where
                                         NotificationsProtocol::BlockAnnounces { chain_index },
                                         peer_index,
                                         SubstreamDirection::Out,
-                                        NotificationsSubstreamState::open_min_value(),
-                                        SubstreamId::min_value()
+                                        NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                        SubstreamId::MIN
                                     )
                                         ..=(
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::open_max_value(),
-                                            SubstreamId::max_value()
+                                            NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                            SubstreamId::MAX
                                         )
                                 )
                                 .next()
@@ -2281,8 +2237,8 @@ where
                             )) && self
                                 .connections_by_peer_id
                                 .range(
-                                    (peer_index, ConnectionId::min_value())
-                                        ..=(peer_index, ConnectionId::max_value()),
+                                    (peer_index, ConnectionId::MIN)
+                                        ..=(peer_index, ConnectionId::MAX),
                                 )
                                 .any(|(_, connection_id)| {
                                     let state = self.inner.connection_state(*connection_id);
@@ -2296,8 +2252,8 @@ where
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::min_value(),
-                                            SubstreamId::min_value(),
+                                            NotificationsSubstreamState::MIN,
+                                            SubstreamId::MIN,
                                         )
                                             ..=(
                                                 NotificationsProtocol::BlockAnnounces {
@@ -2305,8 +2261,8 @@ where
                                                 },
                                                 peer_index,
                                                 SubstreamDirection::Out,
-                                                NotificationsSubstreamState::max_value(),
-                                                SubstreamId::max_value(),
+                                                NotificationsSubstreamState::MAX,
+                                                SubstreamId::MAX,
                                             ),
                                     )
                                     .next()
@@ -2334,16 +2290,16 @@ where
                                         (
                                             proto,
                                             peer_index,
-                                            SubstreamDirection::min_value(),
-                                            NotificationsSubstreamState::min_value(),
-                                            SubstreamId::min_value(),
+                                            SubstreamDirection::MIN,
+                                            NotificationsSubstreamState::MIN,
+                                            SubstreamId::MIN,
                                         )
                                             ..=(
                                                 proto,
                                                 peer_index,
-                                                SubstreamDirection::max_value(),
-                                                NotificationsSubstreamState::max_value(),
-                                                SubstreamId::max_value(),
+                                                SubstreamDirection::MAX,
+                                                NotificationsSubstreamState::MAX,
+                                                SubstreamId::MAX,
                                             ),
                                     )
                                     .map(|(_, _, direction, state, substream_id)| {
@@ -2527,8 +2483,8 @@ where
                                 substream_protocol,
                                 peer_index,
                                 SubstreamDirection::In,
-                                NotificationsSubstreamState::min_value(),
-                                SubstreamId::min_value(),
+                                NotificationsSubstreamState::MIN,
+                                SubstreamId::MIN,
                             )
                                 ..(
                                     substream_protocol,
@@ -2537,7 +2493,7 @@ where
                                     NotificationsSubstreamState::Open {
                                         asked_to_leave: true,
                                     },
-                                    SubstreamId::min_value(),
+                                    SubstreamId::MIN,
                                 ),
                         )
                         .next()
@@ -2558,15 +2514,15 @@ where
                                 NotificationsProtocol::BlockAnnounces { chain_index },
                                 peer_index,
                                 SubstreamDirection::Out,
-                                NotificationsSubstreamState::min_value(),
-                                SubstreamId::min_value(),
+                                NotificationsSubstreamState::MIN,
+                                SubstreamId::MIN,
                             )
                                 ..=(
                                     NotificationsProtocol::BlockAnnounces { chain_index },
                                     peer_index,
                                     SubstreamDirection::Out,
-                                    NotificationsSubstreamState::max_value(),
-                                    SubstreamId::max_value(),
+                                    NotificationsSubstreamState::MAX,
+                                    SubstreamId::MAX,
                                 ),
                         )
                         .next()
@@ -2698,15 +2654,15 @@ where
                                 NotificationsProtocol::BlockAnnounces { chain_index },
                                 peer_index,
                                 SubstreamDirection::Out,
-                                NotificationsSubstreamState::open_min_value(),
-                                collection::SubstreamId::min_value(),
+                                NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                collection::SubstreamId::MIN,
                             )
                                 ..=(
                                     NotificationsProtocol::BlockAnnounces { chain_index },
                                     peer_index,
                                     SubstreamDirection::Out,
-                                    NotificationsSubstreamState::open_max_value(),
-                                    collection::SubstreamId::max_value(),
+                                    NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                    collection::SubstreamId::MAX,
                                 ),
                         )
                         .next()
@@ -3084,8 +3040,8 @@ where
         let connection_id = self
             .connections_by_peer_id
             .range(
-                (peer_index, collection::ConnectionId::min_value())
-                    ..=(peer_index, collection::ConnectionId::max_value()),
+                (peer_index, collection::ConnectionId::MIN)
+                    ..=(peer_index, collection::ConnectionId::MAX),
             )
             .map(|(_, connection_id)| *connection_id)
             .find(|connection_id| {
@@ -3335,19 +3291,19 @@ where
                     NotificationsProtocol::BlockAnnounces {
                         chain_index: chain_id.0,
                     },
-                    PeerIndex(usize::min_value()),
+                    PeerIndex(usize::MIN),
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::min_value(),
-                    SubstreamId::min_value(),
+                    NotificationsSubstreamState::MIN,
+                    SubstreamId::MIN,
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces {
                             chain_index: chain_id.0,
                         },
-                        PeerIndex(usize::max_value()),
+                        PeerIndex(usize::MAX),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::max_value(),
-                        SubstreamId::max_value(),
+                        NotificationsSubstreamState::MAX,
+                        SubstreamId::MAX,
                     ),
             )
             .filter(move |(_, _, d, s, _)| {
@@ -3387,8 +3343,8 @@ where
                     },
                     peer_index,
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::open_min_value(),
-                    SubstreamId::min_value(),
+                    NotificationsSubstreamState::OPEN_MIN_VALUE,
+                    SubstreamId::MIN,
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces {
@@ -3396,8 +3352,8 @@ where
                         },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::open_max_value(),
-                        SubstreamId::max_value(),
+                        NotificationsSubstreamState::OPEN_MAX_VALUE,
+                        SubstreamId::MAX,
                     ),
             )
             .next()
@@ -3439,8 +3395,8 @@ where
                     },
                     peer_index,
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::min_value(),
-                    SubstreamId::min_value(),
+                    NotificationsSubstreamState::MIN,
+                    SubstreamId::MIN,
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces {
@@ -3448,8 +3404,8 @@ where
                         },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::max_value(),
-                        SubstreamId::max_value(),
+                        NotificationsSubstreamState::MAX,
+                        SubstreamId::MAX,
                     ),
             )
             .next()
@@ -3465,8 +3421,8 @@ where
         let connection_id = self
             .connections_by_peer_id
             .range(
-                (peer_index, collection::ConnectionId::min_value())
-                    ..=(peer_index, collection::ConnectionId::max_value()),
+                (peer_index, collection::ConnectionId::MIN)
+                    ..=(peer_index, collection::ConnectionId::MAX),
             )
             .map(|(_, connection_id)| *connection_id)
             .find(|connection_id| {
@@ -3496,14 +3452,14 @@ where
                         peer_index,
                         SubstreamDirection::In,
                         NotificationsSubstreamState::Pending,
-                        SubstreamId::min_value(),
+                        SubstreamId::MIN,
                     )
                         ..=(
                             protocol,
                             peer_index,
                             SubstreamDirection::In,
                             NotificationsSubstreamState::Pending,
-                            SubstreamId::max_value(),
+                            SubstreamId::MAX,
                         ),
                 )
                 .map(move |&(_, _, _, _, substream_id)| (protocol, substream_id))
@@ -3649,15 +3605,15 @@ where
                         protocol,
                         peer_index,
                         SubstreamDirection::In,
-                        NotificationsSubstreamState::min_value(),
-                        SubstreamId::min_value(),
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
                     )
                         ..=(
                             protocol,
                             peer_index,
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::max_value(),
-                            SubstreamId::max_value(),
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
                         ),
                 )
                 .map(|(_, _, dir, state, sub_id)| (*sub_id, *dir, *state))
@@ -3918,15 +3874,15 @@ where
                     NotificationsProtocol::BlockAnnounces { chain_index },
                     peer_index,
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::open_min_value(),
-                    SubstreamId::min_value(),
+                    NotificationsSubstreamState::OPEN_MIN_VALUE,
+                    SubstreamId::MIN,
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces { chain_index },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::open_max_value(),
-                        SubstreamId::max_value(),
+                        NotificationsSubstreamState::OPEN_MAX_VALUE,
+                        SubstreamId::MAX,
                     ),
             )
             .next()
@@ -3944,15 +3900,15 @@ where
                         protocol,
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::open_min_value(),
-                        SubstreamId::min_value(),
+                        NotificationsSubstreamState::OPEN_MIN_VALUE,
+                        SubstreamId::MIN,
                     )
                         ..=(
                             protocol,
                             peer_index,
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::open_max_value(),
-                            SubstreamId::max_value(),
+                            NotificationsSubstreamState::OPEN_MAX_VALUE,
+                            SubstreamId::MAX,
                         ),
                 )
                 .next()
@@ -4070,8 +4026,8 @@ where
         if self
             .connections_by_peer_id
             .range(
-                (peer_index, collection::ConnectionId::min_value())
-                    ..=(peer_index, collection::ConnectionId::max_value()),
+                (peer_index, collection::ConnectionId::MIN)
+                    ..=(peer_index, collection::ConnectionId::MAX),
             )
             .next()
             .is_some()
@@ -4082,16 +4038,8 @@ where
         if self
             .gossip_desired_peers
             .range(
-                (
-                    peer_index,
-                    GossipKind::ConsensusTransactions,
-                    usize::min_value(),
-                )
-                    ..=(
-                        peer_index,
-                        GossipKind::ConsensusTransactions,
-                        usize::max_value(),
-                    ),
+                (peer_index, GossipKind::ConsensusTransactions, usize::MIN)
+                    ..=(peer_index, GossipKind::ConsensusTransactions, usize::MAX),
             )
             .next()
             .is_some()

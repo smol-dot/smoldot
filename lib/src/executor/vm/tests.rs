@@ -561,7 +561,7 @@ fn global_negative_value_works() {
             symbols: &mut |_, _, _| Ok(0),
         })
         .unwrap();
-        assert_eq!(prototype.global_value("test").unwrap(), u32::max_value());
+        assert_eq!(prototype.global_value("test").unwrap(), u32::MAX);
     }
 }
 

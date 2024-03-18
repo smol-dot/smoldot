@@ -237,6 +237,6 @@ impl JaegerService {
 
 impl Drop for JaegerService {
     fn drop(&mut self) {
-        self.shutdown_notify.notify(usize::max_value());
+        self.shutdown_notify.notify(usize::MAX);
     }
 }

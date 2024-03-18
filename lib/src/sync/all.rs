@@ -1641,7 +1641,7 @@ pub enum DesiredRequest {
         /// Note that this is only an indication, and the source is free to give fewer blocks
         /// than requested.
         ///
-        /// This might be equal to `u64::max_value()` in case no upper bound is required. The API
+        /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
         num_blocks: NonZeroU64,
         /// `True` if headers should be included in the response.
@@ -1694,7 +1694,7 @@ pub enum RequestDetail {
         /// Note that this is only an indication, and the source is free to give fewer blocks
         /// than requested.
         ///
-        /// This might be equal to `u64::max_value()` in case no upper bound is required. The API
+        /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
         num_blocks: NonZeroU64,
         /// `True` if headers should be included in the response.

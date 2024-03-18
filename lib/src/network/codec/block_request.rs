@@ -190,8 +190,8 @@ pub fn decode_block_request(
         },
         desired_count: {
             // A missing field or a `0` field are both interpreted as "no limit".
-            NonZeroU32::new(decoded.max_blocks.unwrap_or(u32::max_value()))
-                .unwrap_or(NonZeroU32::new(u32::max_value()).unwrap())
+            NonZeroU32::new(decoded.max_blocks.unwrap_or(u32::MAX))
+                .unwrap_or(NonZeroU32::new(u32::MAX).unwrap())
         },
         direction: match decoded.direction {
             None | Some(0) => BlocksRequestDirection::Ascending,
@@ -280,7 +280,7 @@ pub fn decode_block_response(
             #[repeated(max = 32768)] blocks = 1 => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[required] hash = 1 => protobuf::bytes_tag_decode,
                 #[optional] header = 2 => protobuf::bytes_tag_decode,
-                #[repeated(max = usize::max_value())] body = 3 => protobuf::bytes_tag_decode,
+                #[repeated(max = usize::MAX)] body = 3 => protobuf::bytes_tag_decode,
                 #[optional] justifications = 8 => protobuf::bytes_tag_decode,
             }),
         }),

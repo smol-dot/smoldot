@@ -90,8 +90,8 @@ impl<T> Drop for DeliverSender<T> {
             .common
             .num_senders_alive
             .fetch_sub(1, Ordering::Release);
-        debug_assert!(_num_remain != usize::max_value()); // Check for underflow.
-        self.common.sender_did_something.notify(usize::max_value());
+        debug_assert!(_num_remain != usize::MAX); // Check for underflow.
+        self.common.sender_did_something.notify(usize::MAX);
     }
 }
 
@@ -124,9 +124,7 @@ impl<T> DeliverReceiver<T> {
         };
 
         let payload = message.take().unwrap();
-        self.common
-            .receiver_did_something
-            .notify(usize::max_value());
+        self.common.receiver_did_something.notify(usize::MAX);
         Some(payload)
     }
 }
@@ -134,9 +132,7 @@ impl<T> DeliverReceiver<T> {
 impl<T> Drop for DeliverReceiver<T> {
     fn drop(&mut self) {
         self.common.receiver_is_dead.store(true, Ordering::Release);
-        self.common
-            .receiver_did_something
-            .notify(usize::max_value());
+        self.common.receiver_did_something.notify(usize::MAX);
     }
 }
 

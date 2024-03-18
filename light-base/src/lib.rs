@@ -158,7 +158,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// A typical value is 128.
@@ -171,7 +171,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// While a typical reasonable value would be for example 64, existing UIs tend to start
@@ -1002,7 +1002,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         removed_chain
             .public_api_chain_destroyed_event
-            .notify(usize::max_value());
+            .notify(usize::MAX);
 
         // `chains_by_key` is created lazily when `add_chain` is called.
         // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
@@ -1042,7 +1042,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// API user is encouraged to stop sending requests and start pulling answers with
     /// [`JsonRpcResponses::next`].
     ///
-    /// Passing `u32::max_value()` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
+    /// Passing `u32::MAX` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
     /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
     /// trusted.
     ///

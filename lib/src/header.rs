@@ -639,7 +639,7 @@ impl<'a> DigestRef<'a> {
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         // Given that `self.logs().len()` counts a number of items present in memory, and that
         // these items have a non-zero size, it is not possible for this value to be equal to
-        // `usize::max_value()`, as that would mean that the entire memory is completely full
+        // `usize::MAX`, as that would mean that the entire memory is completely full
         // of digest log items. Therefore, doing `+ 1` is also guaranteed to never overflow.
         let new_len = self.logs().len() + 1;
 
