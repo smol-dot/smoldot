@@ -1682,7 +1682,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                         None,
                                     ))
                                     .await;
@@ -1802,7 +1802,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                     None,
                                 ))
                                 .await;
@@ -1995,7 +1995,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                         None,
                                     ))
                                     .await;
