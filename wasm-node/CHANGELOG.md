@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- The `chainHead_unstable_unpin` JSON-RPC function no longer panics if multiple identical block hashes are passed.
+- The `chainHead_unstable_unpin` JSON-RPC function no longer panics if multiple identical block hashes are passed. ([#1728](https://github.com/smol-dot/smoldot/pull/1728))
 
 ## 2.0.22 - 2024-03-04
 
