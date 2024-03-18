@@ -2333,22 +2333,55 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        // TODO: what if duplicate hashes
-                        if !all_hashes
-                            .clone()
-                            .all(|hash| subscription.pinned_blocks_headers.contains_key(hash))
-                        {
-                            let _ = me
-                                .responses_tx
-                                .send(parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
-                                    None,
-                                ))
-                                .await;
+                        let checks_passed = {
+                            let mut dedup_check = hashbrown::HashSet::with_capacity_and_hasher(
+                                0,
+                                SipHasherBuild::new({
+                                    let mut seed = [0; 16];
+                                    me.randomness.fill_bytes(&mut seed);
+                                    seed
+                                })
+                            );
+                            let mut all_hashes = all_hashes.clone();
+
+                            loop {
+                                let Some(hash) = all_hashes.next()
+                                else {
+                                    break true;
+                                };
+
+                                if !dedup_check.insert(hash) {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(parse::build_error_response(
+                                            request_id_json,
+                                            parse::ErrorResponse::ApplicationDefined(-32804, "duplicate block hash"),
+                                            None,
+                                        ))
+                                        .await;
+                                    break false;
+                                }
+
+                                if !subscription.pinned_blocks_headers.contains_key(hash) {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(parse::build_error_response(
+                                            request_id_json,
+                                            parse::ErrorResponse::InvalidParams,
+                                            None,
+                                        ))
+                                        .await;
+                                    break false;
+                                }
+                            }
+                        };
+
+                        if !checks_passed {
                             continue;
                         }
 
+                        // The logic below assumes that all hashes are unique, which is ensured
+                        // above.
                         for hash in all_hashes {
                             subscription.pinned_blocks_headers.remove(hash);
                             if let Some(subscription_id) =
