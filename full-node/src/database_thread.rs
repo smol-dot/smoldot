@@ -23,7 +23,7 @@ use smol::{channel, lock::Mutex, stream::StreamExt as _};
 use smoldot::database::full_sqlite::SqliteFullDatabase;
 use std::{pin::pin, thread};
 
-pub use smoldot::database::full_sqlite::{CorruptedError, StorageAccessError};
+pub use smoldot::database::full_sqlite::StorageAccessError;
 
 /// Handle to the thread were the database accesses are performed.
 ///

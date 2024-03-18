@@ -47,7 +47,7 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
-pub use network_service::EncodedMerkleProof;
+pub use network_service::Role;
 
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -1142,7 +1142,8 @@ pub enum Notification {
         /// [`Notification::Finalized`] is generated and contains the highest finalized block.
         hash: [u8; 32],
 
-        /// Hash of the best block after the finalization.
+        /// If the current best block is pruned by the finalization, contains the updated hash
+        /// of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
@@ -1151,7 +1152,14 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        best_block_hash: [u8; 32],
+        best_block_hash_if_changed: Option<[u8; 32]>,
+
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
+        /// they're not descendants of the newly-finalized block.
+        ///
+        /// This list contains all the siblings of the newly-finalized block and all their
+        /// descendants.
+        pruned_blocks: Vec<[u8; 32]>,
     },
 
     /// A new block has been added to the list of unfinalized blocks.

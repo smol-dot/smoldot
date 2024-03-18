@@ -852,40 +852,21 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if `node_to_finalize` or `new_best_block` aren't valid nodes.
-    /// Panics if `new_best_block` is not a descendant of `node_to_finalize`.
+    /// Panics if `node_to_finalize` isn't a valid node.
+    /// Panics if the current input best block is not a descendant of `node_to_finalize`.
     ///
-    pub fn input_finalize(&mut self, node_to_finalize: NodeIndex, new_best_block: NodeIndex) {
+    pub fn input_finalize(&mut self, node_to_finalize: NodeIndex) {
         // Make sure that `new_best_block` is a descendant of `node_to_finalize`,
         // otherwise the state of the tree will be corrupted.
         // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
         // is part of the public API of this method.
         assert!(self
-            .non_finalized_blocks
-            .is_ancestor(node_to_finalize, new_best_block));
+            .input_best_block_index
+            .map_or(false, |current_input_best| self
+                .non_finalized_blocks
+                .is_ancestor(node_to_finalize, current_input_best)));
 
         self.input_finalized_index = Some(node_to_finalize);
-        self.input_best_block_index = Some(new_best_block);
-
-        // If necessary, update the weight of the block.
-        match &mut self
-            .non_finalized_blocks
-            .get_mut(new_best_block)
-            .unwrap()
-            .input_best_block_weight
-        {
-            w if *w == self.input_best_block_next_weight - 1 => {}
-            w => {
-                *w = self.input_best_block_next_weight;
-                self.input_best_block_next_weight += 1;
-            }
-        }
-
-        // Minor sanity checks.
-        debug_assert!(self
-            .non_finalized_blocks
-            .iter_unordered()
-            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
     }
 
     /// Tries to update the output blocks to follow the input.
@@ -924,6 +905,7 @@ where
 
                 let mut pruned_blocks = Vec::new();
                 let mut pruned_finalized = None;
+                let mut best_output_block_updated = false;
 
                 for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
                     debug_assert_ne!(Some(pruned.index), self.input_finalized_index);
@@ -935,6 +917,7 @@ where
                         .map_or(false, |b| b == pruned.index)
                     {
                         self.output_best_block_index = None;
+                        best_output_block_updated = true;
                     }
 
                     // Update `self.finalized_block_weight`.
@@ -1005,6 +988,7 @@ where
                     // Input best can be updated to the block being iterated.
                     current_runtime_service_best_block_weight = block.input_best_block_weight;
                     self.output_best_block_index = Some(node_index);
+                    best_output_block_updated = true;
 
                     // Continue looping, as there might be another block with an even
                     // higher weight.
@@ -1024,7 +1008,7 @@ where
                     user_data: pruned_finalized.user_data.user_data,
                     former_finalized_async_op_user_data,
                     pruned_blocks,
-                    best_block_index: self.output_best_block_index,
+                    best_output_block_updated,
                 });
             }
         }
@@ -1202,9 +1186,8 @@ pub enum OutputUpdate<TBl, TAsync> {
         /// User data associated to the `async` operation of the previous finalized block.
         former_finalized_async_op_user_data: TAsync,
 
-        /// Index of the best block after the finalization. `None` if the best block is the block
-        /// that has just been finalized.
-        best_block_index: Option<NodeIndex>,
+        /// `true` if the finalization has updated the best output block.
+        best_output_block_updated: bool,
 
         /// Blocks that were a descendant of the former finalized block but not of the new
         /// finalized block. These blocks are no longer part of the data structure.

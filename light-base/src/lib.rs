@@ -86,7 +86,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, pin, time::Duration};
+use core::{num::NonZeroU32, ops, time::Duration};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use platform::PlatformRef;
@@ -325,7 +325,7 @@ pub struct JsonRpcResponses<TPlat: PlatformRef> {
     inner: Option<json_rpc_service::Frontend<TPlat>>,
 
     /// Notified when the [`PublicApiChain`] is destroyed.
-    public_api_chain_destroyed: pin::Pin<Box<event_listener::EventListener>>,
+    public_api_chain_destroyed: event_listener::EventListener,
 }
 
 impl<TPlat: PlatformRef> JsonRpcResponses<TPlat> {
@@ -950,7 +950,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
-                chain_spec: &chain_spec,
+                chain_name: chain_spec.name().to_owned(),
+                chain_ty: chain_spec.chain_type().to_owned(),
+                chain_is_live: chain_spec.has_live_network(),
+                chain_properties_json: chain_spec.properties().to_owned(),
                 system_name: self.platform.client_name().into_owned(),
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,

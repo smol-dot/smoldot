@@ -4,6 +4,23 @@
 
 ### Changed
 
+- Add support for the `transaction_v1_broadcast` and `transaction_v1_stop` JSON-RPC functions. ([#1724](https://github.com/smol-dot/smoldot/pull/1724))
+- The JSON-RPC server has been rewritten in order to simplify the code flow. It is unfortunately possible for new bugs to have appeared. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- JSON-RPC functions that require access to the runtime (for example `state_call`) now cache older runtimes that had to be downloaded, rather than downloading the runtime from scratch every single time. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- Smoldot is no longer compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled due to the Rust compiler considering target features as unstable. ([#1716](https://github.com/smol-dot/smoldot/pull/1716))
+
+## 2.0.22 - 2024-03-04
+
+### Fixed
+
+- Fix crash when extracting the database of a chain when the current Babe epoch number doesn't immediately follow the previous Babe epoch number. ([#1695](https://github.com/smol-dot/smoldot/pull/1695))
+- Fix `isSyncing` is always being equal to `true` in the return value of the `system_health` JSON-RPC function. ([#1697](https://github.com/smol-dot/smoldot/pull/1697))
+
+## 2.0.21 - 2024-02-06
+
+### Changed
+
+- Update back to wasmi v0.32. The wasmi version was downgraded to v0.31 in smoldot v2.0.20 due to performance issues. These performance issues turned out to be simply caused by `debug-assertions = true`. ([#1667](https://github.com/smol-dot/smoldot/pull/1667))
 - Clarify the value of `isSyncing` returned by `system_health`. The value will be equal to `false` if no peer that smoldot is connected to is more than 10 blocks ahead, and that the highest block would runtime code has been downloaded is no more than 12 blocks ahead of the highest block of the local chain. ([#1658](https://github.com/smol-dot/smoldot/pull/1658))
 
 ### Fixed

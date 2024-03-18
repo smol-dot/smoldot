@@ -527,6 +527,9 @@ define_methods! {
     sudo_unstable_p2pDiscover(multiaddr: Cow<'a, str>) -> (),
     sudo_unstable_version() -> Cow<'a, str>,
 
+    transaction_v1_broadcast(transaction: HexString) -> Cow<'a, str>,
+    transaction_v1_stop(#[rename = "operationId"] operation_id: Cow<'a, str>) -> (),
+
     transactionWatch_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transactionWatch_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 

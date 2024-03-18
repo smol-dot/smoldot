@@ -29,7 +29,6 @@ use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
     num::NonZeroU32,
-    pin::Pin,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use futures_lite::FutureExt as _;
@@ -69,7 +68,7 @@ struct Inner {
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
 
     /// Event notified after the [`SerializedRequestsIo`] is destroyed.
-    on_serialized_requests_io_destroyed: Pin<Box<event_listener::EventListener>>,
+    on_serialized_requests_io_destroyed: event_listener::EventListener,
 }
 
 struct InnerSubscription {
@@ -470,6 +469,7 @@ impl ClientMainTask {
                 | methods::MethodCall::chain_subscribeNewHeads { .. }
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
+                | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
                 | methods::MethodCall::chainHead_unstable_follow { .. } => {
@@ -540,6 +540,9 @@ impl ClientMainTask {
                 methods::MethodCall::author_unwatchExtrinsic { subscription, .. }
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription, .. }
                 | methods::MethodCall::state_unsubscribeStorage { subscription, .. }
+                | methods::MethodCall::transaction_v1_stop {
+                    operation_id: subscription,
+                }
                 | methods::MethodCall::transactionWatch_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::chainHead_unstable_unfollow {
@@ -562,6 +565,9 @@ impl ClientMainTask {
                                     } => methods::Response::state_unsubscribeRuntimeVersion(true),
                                     methods::MethodCall::state_unsubscribeStorage { .. } => {
                                         methods::Response::state_unsubscribeStorage(true)
+                                    }
+                                    methods::MethodCall::transaction_v1_stop { .. } => {
+                                        methods::Response::transaction_v1_stop(())
                                     }
                                     methods::MethodCall::transactionWatch_unstable_unwatch {
                                         ..
