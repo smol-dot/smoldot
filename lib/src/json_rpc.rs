@@ -61,7 +61,10 @@
 
 // TODO: write docs about usage ^
 
+pub mod clients_multiplexer;
 pub mod methods;
 pub mod parse;
 pub mod payment_info;
+// TODO: uncomment or remove module altogether pub mod reverse_proxy;
+pub mod servers_multiplexer;
 pub mod service;
