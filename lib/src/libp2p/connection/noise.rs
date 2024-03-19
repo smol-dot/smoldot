@@ -576,7 +576,7 @@ impl HandshakeInProgress {
             remote_static_public_key: x25519_dalek::PublicKey::from([0; 32]),
             remote_public_key: None,
             is_initiator: config.is_initiator,
-            pending_out_data: VecDeque::with_capacity(usize::from(u16::max_value()) + 2),
+            pending_out_data: VecDeque::with_capacity(usize::from(u16::MAX) + 2),
             next_in_message_size: None,
             num_buffered_or_transmitted_messages: 0,
             libp2p_handshake_message: config.key.handshake_message.clone(),

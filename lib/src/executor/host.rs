@@ -986,7 +986,7 @@ impl ReadyToRun {
                     calling: id,
                     value_out_ptr: None,
                     offset: 0,
-                    max_size: u32::max_value(),
+                    max_size: u32::MAX,
                     inner: self.inner,
                 })
             }
@@ -1191,7 +1191,7 @@ impl ReadyToRun {
                     calling: id,
                     value_out_ptr: None,
                     offset: 0,
-                    max_size: u32::max_value(),
+                    max_size: u32::MAX,
                     inner: self.inner,
                 })
             }
@@ -3723,8 +3723,8 @@ impl Inner {
     ) -> HostVm {
         let mut data_len = 0u32;
         for chunk in data.clone() {
-            data_len = data_len
-                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+            data_len =
+                data_len.saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::MAX));
         }
 
         let dest_ptr = match self.alloc(function_name, data_len) {
@@ -3743,7 +3743,7 @@ impl Inner {
             self.vm
                 .write_memory(ptr_iter, chunk)
                 .unwrap_or_else(|_| unreachable!());
-            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::MAX);
         }
 
         let ret_val = (u64::from(data_len) << 32) | u64::from(dest_ptr);
@@ -3774,8 +3774,8 @@ impl Inner {
     ) -> HostVm {
         let mut data_len = 0u32;
         for chunk in data.clone() {
-            data_len = data_len
-                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+            data_len =
+                data_len.saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::MAX));
         }
 
         let dest_ptr = match self.alloc(function_name, data_len) {
@@ -3794,7 +3794,7 @@ impl Inner {
             self.vm
                 .write_memory(ptr_iter, chunk)
                 .unwrap_or_else(|_| unreachable!());
-            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::MAX);
         }
 
         let ret_val = i32::from_ne_bytes(dest_ptr.to_ne_bytes());

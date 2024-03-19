@@ -42,27 +42,10 @@ enum SubstreamIdInner {
 }
 
 impl SubstreamId {
-    /// Returns the value that compares inferior or equal to all possible values.
-    pub fn min_value() -> Self {
-        debug_assert!(
-            SubstreamIdInner::SingleStream(yamux::SubstreamId::max_value())
-                < SubstreamIdInner::MultiStream(0)
-        );
-
-        Self(SubstreamIdInner::SingleStream(
-            yamux::SubstreamId::min_value(),
-        ))
-    }
-
-    /// Returns the value that compares superior or equal to all possible values.
-    pub fn max_value() -> Self {
-        debug_assert!(
-            SubstreamIdInner::MultiStream(0)
-                > SubstreamIdInner::SingleStream(yamux::SubstreamId::max_value())
-        );
-
-        Self(SubstreamIdInner::MultiStream(u32::max_value()))
-    }
+    /// Value that compares inferior or equal to all possible values.
+    pub const MIN: Self = Self(SubstreamIdInner::SingleStream(yamux::SubstreamId::MIN));
+    /// Value that compares superior or equal to all possible values.
+    pub const MAX: Self = Self(SubstreamIdInner::MultiStream(u32::MAX));
 }
 
 /// Event that happened on the connection. See [`SingleStream::read_write`] and

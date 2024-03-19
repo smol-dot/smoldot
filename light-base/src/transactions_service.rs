@@ -154,11 +154,11 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             runtime_service: config.runtime_service,
             network_service: config.network_service,
             max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
-                .unwrap_or(usize::max_value()),
+                .unwrap_or(usize::MAX),
             max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
-                .unwrap_or(usize::max_value()),
+                .unwrap_or(usize::MAX),
             max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
-                .unwrap_or(usize::max_value()),
+                .unwrap_or(usize::MAX),
         };
 
         let task = Box::pin(background_task::<TPlat>(
@@ -459,7 +459,7 @@ async fn background_task<TPlat: PlatformRef>(
                     // malicious.
                     worker
                         .runtime_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                         .await,
                 )
             };

@@ -423,7 +423,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         let event = event_listener::Event::new();
         let listen = event.listen();
         if let Err(err) = ctrlc::set_handler(move || {
-            event.notify(usize::max_value());
+            event.notify(usize::MAX);
         }) {
             // It is not critical to fail to setup the Ctrl-C handler.
             log_callback.log(

@@ -156,13 +156,13 @@ impl Client {
     /// Returns the current total number of peers of the client.
     // TODO: weird API
     pub async fn num_peers(&self) -> u64 {
-        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::MAX)
     }
 
     /// Returns the current total number of network connections of the client.
     // TODO: weird API
     pub async fn num_network_connections(&self) -> u64 {
-        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::MAX)
     }
 
     // TODO: not the best API

@@ -414,8 +414,8 @@ impl NetworkService {
             for (peer_id, addr) in chain.bootstrap_nodes {
                 // Note that we must call this function before `insert_address`, as documented
                 // in `basic_peering_strategy`.
-                peering_strategy.insert_chain_peer(chain_id, peer_id.clone(), usize::max_value());
-                peering_strategy.insert_address(&peer_id, addr.into_bytes(), usize::max_value());
+                peering_strategy.insert_chain_peer(chain_id, peer_id.clone(), usize::MAX);
+                peering_strategy.insert_address(&peer_id, addr.into_bytes(), usize::MAX);
             }
 
             chain_names.insert(chain_id, chain.log_name);
@@ -2265,7 +2265,7 @@ async fn blocks_request_response(
     database
         .with_database(move |database| {
             let num_blocks = cmp::min(
-                usize::try_from(config.desired_count.get()).unwrap_or(usize::max_value()),
+                usize::try_from(config.desired_count.get()).unwrap_or(usize::MAX),
                 128,
             );
 

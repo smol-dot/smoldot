@@ -159,10 +159,8 @@ pub struct Config {
 /// Creates a new [`ClientMainTask`] and a [`SerializedRequestsIo`] connected to it.
 pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo) {
     let buffers_capacity = usize::try_from(config.max_pending_requests.get())
-        .unwrap_or(usize::max_value())
-        .saturating_add(
-            usize::try_from(config.max_active_subscriptions).unwrap_or(usize::max_value()),
-        );
+        .unwrap_or(usize::MAX)
+        .saturating_add(usize::try_from(config.max_active_subscriptions).unwrap_or(usize::MAX));
 
     let on_serialized_requests_io_destroyed = event_listener::Event::new();
 
@@ -171,7 +169,7 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
             next_subscription_id: 1,
             active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                 cmp::min(
-                    usize::try_from(config.max_active_subscriptions).unwrap_or(usize::max_value()),
+                    usize::try_from(config.max_active_subscriptions).unwrap_or(usize::MAX),
                     32,
                 ),
                 Default::default(),
@@ -235,7 +233,7 @@ impl ClientMainTask {
                             self.inner
                                 .serialized_io
                                 .on_request_pulled_or_task_destroyed
-                                .notify(usize::max_value());
+                                .notify(usize::MAX);
                             break Ok(WakeUpReason::NewRequest(elem));
                         }
                         if let Some(wait) = wait.take() {
@@ -296,7 +294,7 @@ impl ClientMainTask {
                         self.inner
                             .serialized_io
                             .on_response_pushed_or_task_destroyed
-                            .notify(usize::max_value());
+                            .notify(usize::MAX);
                     }
 
                     // Shrink the list of active subscriptions if necessary.
@@ -322,7 +320,7 @@ impl ClientMainTask {
                     self.inner
                         .serialized_io
                         .on_response_pushed_or_task_destroyed
-                        .notify(usize::max_value());
+                        .notify(usize::MAX);
                     continue;
                 }
                 WakeUpReason::Message(ToMainTask::Notification(notification)) => {
@@ -337,7 +335,7 @@ impl ClientMainTask {
                     self.inner
                         .serialized_io
                         .on_response_pushed_or_task_destroyed
-                        .notify(usize::max_value());
+                        .notify(usize::MAX);
                     continue;
                 }
             };
@@ -358,7 +356,7 @@ impl ClientMainTask {
                         self.inner
                             .serialized_io
                             .on_response_pushed_or_task_destroyed
-                            .notify(usize::max_value());
+                            .notify(usize::MAX);
                         continue;
                     }
                     Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
@@ -375,7 +373,7 @@ impl ClientMainTask {
                         self.inner
                             .serialized_io
                             .on_response_pushed_or_task_destroyed
-                            .notify(usize::max_value());
+                            .notify(usize::MAX);
                         continue;
                     }
                 };
@@ -476,8 +474,8 @@ impl ClientMainTask {
                     // Subscription starting requests.
 
                     // We must check the maximum number of subscriptions.
-                    let max_subscriptions = usize::try_from(self.inner.max_active_subscriptions)
-                        .unwrap_or(usize::max_value());
+                    let max_subscriptions =
+                        usize::try_from(self.inner.max_active_subscriptions).unwrap_or(usize::MAX);
                     debug_assert!(self.inner.active_subscriptions.len() <= max_subscriptions);
                     if self.inner.active_subscriptions.len() >= max_subscriptions {
                         let response = parse::build_error_response(
@@ -496,7 +494,7 @@ impl ClientMainTask {
                         self.inner
                             .serialized_io
                             .on_response_pushed_or_task_destroyed
-                            .notify(usize::max_value());
+                            .notify(usize::MAX);
                         continue;
                     }
 
@@ -584,7 +582,7 @@ impl ClientMainTask {
                             );
 
                             kill_channel.dead.store(true, Ordering::Release);
-                            kill_channel.on_dead_changed.notify(usize::max_value());
+                            kill_channel.on_dead_changed.notify(usize::MAX);
                         }
                         _ => {
                             let response = match parsed_request {
@@ -618,7 +616,7 @@ impl ClientMainTask {
                             self.inner
                                 .serialized_io
                                 .on_response_pushed_or_task_destroyed
-                                .notify(usize::max_value());
+                                .notify(usize::MAX);
                         }
                     }
                 }
@@ -649,7 +647,7 @@ impl ClientMainTask {
                             });
 
                             kill_channel.dead.store(true, Ordering::Release);
-                            kill_channel.on_dead_changed.notify(usize::max_value());
+                            kill_channel.on_dead_changed.notify(usize::MAX);
                         }
                         _ => {
                             let response = match parsed_request {
@@ -679,7 +677,7 @@ impl ClientMainTask {
                             self.inner
                                 .serialized_io
                                 .on_response_pushed_or_task_destroyed
-                                .notify(usize::max_value());
+                                .notify(usize::MAX);
                         }
                     }
                 }
@@ -706,16 +704,16 @@ impl Drop for ClientMainTask {
         self.inner
             .serialized_io
             .on_response_pushed_or_task_destroyed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.inner
             .serialized_io
             .on_request_pulled_or_task_destroyed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
 
         // Mark all active subscriptions as dead.
         for (_, InnerSubscription { kill_channel, .. }) in self.inner.active_subscriptions.drain() {
             kill_channel.dead.store(true, Ordering::Release);
-            kill_channel.on_dead_changed.notify(usize::max_value());
+            kill_channel.on_dead_changed.notify(usize::MAX);
         }
     }
 }
@@ -796,7 +794,7 @@ impl SerializedRequestsIo {
 
                     if is_response {
                         let _prev_val = queue.num_requests_in_fly.fetch_sub(1, Ordering::Release);
-                        debug_assert_ne!(_prev_val, u32::max_value()); // Check underflows.
+                        debug_assert_ne!(_prev_val, u32::MAX); // Check underflows.
                     }
 
                     // Shrink containers if necessary in order to reduce memory usage after a
@@ -876,7 +874,7 @@ impl SerializedRequestsIo {
 
         // Everything successful.
         queue.requests_queue.push(request);
-        queue.on_request_pushed.notify(usize::max_value());
+        queue.on_request_pushed.notify(usize::MAX);
         Ok(())
     }
 
@@ -915,7 +913,7 @@ impl SerializedRequestsIo {
 
         // Everything successful.
         queue.requests_queue.push(request);
-        queue.on_request_pushed.notify(usize::max_value());
+        queue.on_request_pushed.notify(usize::MAX);
         Ok(())
     }
 }
@@ -928,8 +926,7 @@ impl fmt::Debug for SerializedRequestsIo {
 
 impl Drop for SerializedRequestsIo {
     fn drop(&mut self) {
-        self.on_serialized_requests_io_destroyed
-            .notify(usize::max_value());
+        self.on_serialized_requests_io_destroyed.notify(usize::MAX);
     }
 }
 
@@ -1015,7 +1012,7 @@ impl RequestProcess {
             .push(ToMainTask::RequestResponse(serialized));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
     }
 
@@ -1033,7 +1030,7 @@ impl RequestProcess {
             .push(ToMainTask::RequestResponse(serialized));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
     }
 
@@ -1050,7 +1047,7 @@ impl RequestProcess {
             .push(ToMainTask::RequestResponse(serialized));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
     }
 
@@ -1070,7 +1067,7 @@ impl RequestProcess {
             .push(ToMainTask::RequestResponse(serialized));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
     }
 }
@@ -1094,7 +1091,7 @@ impl Drop for RequestProcess {
                 .push(ToMainTask::RequestResponse(serialized));
             self.responses_notifications_queue
                 .on_pushed
-                .notify(usize::max_value());
+                .notify(usize::MAX);
         }
     }
 }
@@ -1183,7 +1180,7 @@ impl SubscriptionStartProcess {
             .push(ToMainTask::RequestResponse(serialized_response));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
 
         Subscription {
@@ -1212,7 +1209,7 @@ impl SubscriptionStartProcess {
             });
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
         self.has_sent_response = true;
     }
 }
@@ -1241,7 +1238,7 @@ impl Drop for SubscriptionStartProcess {
                 });
             self.responses_notifications_queue
                 .on_pushed
-                .notify(usize::max_value());
+                .notify(usize::MAX);
         }
     }
 }
@@ -1324,7 +1321,7 @@ impl Subscription {
             .push(ToMainTask::Notification(serialized));
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
     }
 
     /// Returns `true` if the JSON-RPC client has unsubscribed, or the [`ClientMainTask`] has been
@@ -1374,6 +1371,6 @@ impl Drop for Subscription {
             });
         self.responses_notifications_queue
             .on_pushed
-            .notify(usize::max_value());
+            .notify(usize::MAX);
     }
 }

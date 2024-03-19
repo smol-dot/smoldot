@@ -302,8 +302,8 @@ impl<TTx> Pool<TTx> {
         for tx_id in self
             .by_height
             .range(
-                (0, TransactionId(usize::min_value()))
-                    ..=(block_inferior_of_equal, TransactionId(usize::max_value())),
+                (0, TransactionId(usize::MIN))
+                    ..=(block_inferior_of_equal, TransactionId(usize::MAX)),
             )
             .map(|(_, id)| *id)
             .collect::<Vec<_>>()
@@ -313,10 +313,9 @@ impl<TTx> Pool<TTx> {
 
         // Extracts all the transactions that we are about to remove from `by_height`.
         let to_remove = {
-            let remaining_txs = self.by_height.split_off(&(
-                block_inferior_of_equal + 1,
-                TransactionId(usize::min_value()),
-            ));
+            let remaining_txs = self
+                .by_height
+                .split_off(&(block_inferior_of_equal + 1, TransactionId(usize::MIN)));
             mem::replace(&mut self.by_height, remaining_txs)
         };
 
@@ -434,10 +433,7 @@ impl<TTx> Pool<TTx> {
     ) -> impl Iterator<Item = TransactionId> + '_ {
         let hash = blake2_hash(scale_encoded);
         self.by_hash
-            .range(
-                (hash, TransactionId(usize::min_value()))
-                    ..=(hash, TransactionId(usize::max_value())),
-            )
+            .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
             .map(|(_, tx_id)| *tx_id)
     }
 
@@ -458,8 +454,8 @@ impl<TTx> Pool<TTx> {
         for tx_id in self
             .by_validation_expiration
             .range(
-                (0, TransactionId(usize::min_value()))
-                    ..=(self.best_block_height, TransactionId(usize::max_value())),
+                (0, TransactionId(usize::MIN))
+                    ..=(self.best_block_height, TransactionId(usize::MAX)),
             )
             .map(|(_, id)| *id)
             .collect::<Vec<_>>()
@@ -487,12 +483,7 @@ impl<TTx> Pool<TTx> {
         // Checks that there's no transaction included above `self.best_block_height`.
         debug_assert!(self
             .by_height
-            .range(
-                (
-                    self.best_block_height + 1,
-                    TransactionId(usize::min_value()),
-                )..,
-            )
+            .range((self.best_block_height + 1, TransactionId(usize::MIN),)..,)
             .next()
             .is_none());
 
@@ -502,12 +493,7 @@ impl<TTx> Pool<TTx> {
         // List of transactions that were included in these blocks.
         let transactions_to_retract = self
             .by_height
-            .range(
-                (
-                    self.best_block_height + 1,
-                    TransactionId(usize::min_value()),
-                )..,
-            )
+            .range((self.best_block_height + 1, TransactionId(usize::MIN))..)
             .map(|(block_height, tx_id)| (*tx_id, *block_height))
             .collect::<Vec<_>>();
 
@@ -562,10 +548,7 @@ impl<TTx> Pool<TTx> {
         let non_included = {
             let hash = blake2_hash(bytes);
             self.by_hash
-                .range(
-                    (hash, TransactionId(usize::min_value()))
-                        ..=(hash, TransactionId(usize::max_value())),
-                )
+                .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
                 .find(|(_, tx_id)| {
                     self.transactions
                         .get(tx_id.0)

@@ -331,7 +331,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         for target in self
             .peers_assumed_know_blocks(block_number, &hash)
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
@@ -381,7 +381,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             .network_service
             .peers_list()
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
@@ -426,7 +426,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> StorageQuery<TPlat> {
-        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::max_value());
+        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
         let requests = requests
             .map(|request| match request.ty {

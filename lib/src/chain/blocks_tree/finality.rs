@@ -42,7 +42,7 @@ impl<T> NonFinalizedTree<T> {
             .range((
                 ops::Bound::Excluded((
                     Some(self.finalized_block_number),
-                    fork_tree::NodeIndex::max_value(),
+                    fork_tree::NodeIndex::MAX,
                 )),
                 ops::Bound::Unbounded,
             ))

@@ -1864,7 +1864,7 @@ fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
         };
 
     // Note: we use `checked_add`, as it is possible that the storage entry erroneously starts
-    // with `u64::max_value()`.
+    // with `u64::MAX`.
     let new_len = match curr_len.checked_add(1) {
         Some(l) => l,
         None => {

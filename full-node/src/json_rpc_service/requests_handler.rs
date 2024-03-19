@@ -618,7 +618,7 @@ pub fn spawn_requests_handler(config: Config) {
 
                         request.respond(methods::Response::system_health(methods::SystemHealth {
                             is_syncing,
-                            peers: u64::try_from(peers).unwrap_or(u64::max_value()),
+                            peers: u64::try_from(peers).unwrap_or(u64::MAX),
                             should_have_peers: config.chain_is_live,
                         }));
                     }

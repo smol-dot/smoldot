@@ -1550,7 +1550,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     peers: u64::try_from(
                                         me.sync_service.syncing_peers().await.len(),
                                     )
-                                    .unwrap_or(u64::max_value()),
+                                    .unwrap_or(u64::MAX),
                                     should_have_peers: me.chain_is_live,
                                 })
                                 .to_json_response(request_id_json),
@@ -2146,7 +2146,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             if let Some(operation) =
                                 subscription.operations_in_progress.remove(&*operation_id)
                             {
-                                operation.interrupt.notify(usize::max_value());
+                                operation.interrupt.notify(usize::MAX);
                                 subscription.available_operation_slots += operation.occupied_slots;
                             }
                         }
@@ -2246,7 +2246,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .remove(&*follow_subscription)
                         {
                             for (_, operation) in subscription.operations_in_progress {
-                                operation.interrupt.notify(usize::max_value());
+                                operation.interrupt.notify(usize::MAX);
                             }
                         };
 
@@ -2375,8 +2375,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             &me.sync_service,
                             &me.runtime_service,
                             &me.genesis_block_hash,
-                            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
-                                .unwrap_or(usize::max_value()),
+                            usize::try_from(max_size_bytes.unwrap_or(u64::MAX))
+                                .unwrap_or(usize::MAX),
                         )
                         .await;
 
@@ -2718,7 +2718,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .cloned()
                                     .filter(|k| *k >= *start_key) // TODO: not sure if start should be in the set or not?
                                     .map(methods::HexString)
-                                    .take(usize::try_from(*count).unwrap_or(usize::max_value()))
+                                    .take(usize::try_from(*count).unwrap_or(usize::MAX))
                                     .collect::<Vec<_>>();
                                 let _ = me
                                     .responses_tx
@@ -3524,7 +3524,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .cloned()
                             .filter(|k| *k >= start_key) // TODO: not sure if start should be in the set or not?
                             .map(methods::HexString)
-                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                            .take(usize::try_from(count).unwrap_or(usize::MAX))
                             .collect::<Vec<_>>();
 
                         // If the returned response is somehow truncated, it is very likely that the
@@ -4457,7 +4457,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Cancel operations isn't necessary, but is also not a bad idea, to
                 // save resources.
                 for (_, operation) in subscription_info.operations_in_progress {
-                    operation.interrupt.notify(usize::max_value());
+                    operation.interrupt.notify(usize::MAX);
                 }
 
                 // Send a stop event.
@@ -4576,8 +4576,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service
                             .subscribe_all(
                                 32,
-                                NonZeroUsize::new(usize::max_value())
-                                    .unwrap_or_else(|| unreachable!()),
+                                NonZeroUsize::new(usize::MAX).unwrap_or_else(|| unreachable!()),
                             )
                             .await
                     }));
@@ -5097,7 +5096,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         num_peers: u32::try_from(
                                             transaction_watch.num_broadcasted_peers,
                                         )
-                                        .unwrap_or(u32::max_value()),
+                                        .unwrap_or(u32::MAX),
                                     },
                                 }
                                 .to_json_request_object_parameters(None),

@@ -173,7 +173,7 @@ where
     /// currently being opened, then there is no need to open any additional one.
     pub fn desired_outbound_substreams(&self) -> u32 {
         u32::try_from(self.desired_out_substreams.len())
-            .unwrap_or(u32::max_value())
+            .unwrap_or(u32::MAX)
             .saturating_add(if self.ping_substream.is_none() { 1 } else { 0 })
     }
 

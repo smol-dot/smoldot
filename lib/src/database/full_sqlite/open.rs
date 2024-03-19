@@ -69,7 +69,7 @@ PRAGMA foreign_keys = ON;
                 "PRAGMA cache_size = {}",
                 0i64.saturating_sub_unsigned(
                     u64::try_from((config.cache_size.saturating_sub(1) / 1024).saturating_add(1))
-                        .unwrap_or(u64::max_value()),
+                        .unwrap_or(u64::MAX),
                 )
             ),
             (),

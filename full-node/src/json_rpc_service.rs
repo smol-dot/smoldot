@@ -109,7 +109,7 @@ pub struct JsonRpcService {
 
 impl Drop for JsonRpcService {
     fn drop(&mut self) {
-        self.service_dropped.notify(usize::max_value());
+        self.service_dropped.notify(usize::MAX);
     }
 }
 
@@ -148,8 +148,8 @@ impl JsonRpcService {
 
         let (virtual_client_main_task, virtual_client_io) =
             service::client_main_task(service::Config {
-                max_active_subscriptions: u32::max_value(),
-                max_pending_requests: NonZeroU32::new(u32::max_value()).unwrap(),
+                max_active_subscriptions: u32::MAX,
+                max_pending_requests: NonZeroU32::new(u32::MAX).unwrap(),
             });
 
         spawn_client_main_task(

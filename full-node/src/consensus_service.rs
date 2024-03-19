@@ -107,9 +107,9 @@ pub struct Config {
     /// slot. This threshold after which the block creation should end is determined by this value.
     ///
     /// The moment in the slot when the authoring ends is determined by
-    /// `slot_duration * slot_duration_author_ratio / u16::max_value()`.
-    /// For example, passing `u16::max_value()` means that the entire slot is used. Passing
-    /// `u16::max_value() / 2` means that half of the slot is used.
+    /// `slot_duration * slot_duration_author_ratio / u16::MAX`.
+    /// For example, passing `u16::MAX` means that the entire slot is used. Passing
+    /// `u16::MAX / 2` means that half of the slot is used.
     ///
     /// A typical value is `43691_u16`, representing 2/3 of a slot.
     ///
@@ -404,7 +404,7 @@ impl ConsensusService {
     /// or non-canonical that the consensus service will pin at the same time for this
     /// subscription. If this maximum is reached, the channel will get closed. In situations
     /// where the subscriber is guaranteed to always properly unpin blocks, a value of
-    /// `usize::max_value()` can be passed in order to ignore this maximum.
+    /// `usize::MAX` can be passed in order to ignore this maximum.
     ///
     /// All the blocks being reported are guaranteed to be present in the database associated to
     /// this [`ConsensusService`].
@@ -1517,7 +1517,7 @@ impl SyncBackground {
                         network::codec::BlocksRequestConfig {
                             start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                             desired_count: NonZeroU32::new(
-                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                                u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                             )
                             .unwrap(),
                             // The direction is hardcoded based on the documentation of the syncing
@@ -2221,8 +2221,7 @@ impl SyncBackground {
             debug_assert!(SystemTime::now() >= SystemTime::UNIX_EPOCH + start);
             SystemTime::UNIX_EPOCH
                 + start
-                + (end - start) * u32::from(self.slot_duration_author_ratio)
-                    / u32::from(u16::max_value())
+                + (end - start) * u32::from(self.slot_duration_author_ratio) / u32::from(u16::MAX)
         };
 
         // Actual block production now happening.

@@ -141,7 +141,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     unsafe { bindings::monotonic_clock_us() } - before_polling,
                 );
                 TOTAL_CPU_USAGE_US.fetch_add(
-                    u64::try_from(poll_duration.as_micros()).unwrap_or(u64::max_value()),
+                    u64::try_from(poll_duration.as_micros()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
                 );
 
@@ -1032,7 +1032,7 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
         connection_handles_alive,
         local_tls_certificate_sha256: *local_tls_certificate_sha256,
     };
-    connection.something_happened.notify(usize::max_value());
+    connection.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u32) {
@@ -1058,7 +1058,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     // As documented, the number of writable bytes must never become exceedingly large (a few
     // megabytes). As such, this can't overflow unless there is a bug on the JavaScript side.
     stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
@@ -1117,7 +1117,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
 
     stream.messages_queue_total_size += message.len();
     stream.messages_queue.push_back(message.into_boxed_slice());
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
@@ -1154,7 +1154,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
             },
         ));
 
-        connection.something_happened.notify(usize::max_value());
+        connection.something_happened.notify(usize::MAX);
     } else {
         panic!()
     }
@@ -1186,17 +1186,18 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
         _message: message.clone(),
     };
 
-    connection.something_happened.notify(usize::max_value());
+    connection.something_happened.notify(usize::MAX);
 
-    for ((_, _), stream) in lock.streams.range_mut(
-        (connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())),
-    ) {
+    for ((_, _), stream) in lock
+        .streams
+        .range_mut((connection_id, Some(u32::MIN))..=(connection_id, Some(u32::MAX)))
+    {
         stream.reset = Some(message.clone());
-        stream.something_happened.notify(usize::max_value());
+        stream.something_happened.notify(usize::MAX);
     }
     if let Some(stream) = lock.streams.get_mut(&(connection_id, None)) {
         stream.reset = Some(message);
-        stream.something_happened.notify(usize::max_value());
+        stream.something_happened.notify(usize::MAX);
     }
 }
 
@@ -1213,5 +1214,5 @@ pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>)
         .get_mut(&(connection_id, Some(stream_id)))
         .unwrap();
     stream.reset = Some(message);
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }

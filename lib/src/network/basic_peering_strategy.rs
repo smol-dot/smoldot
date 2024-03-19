@@ -170,12 +170,12 @@ where
             let mut in_chain_and_after_chain = self.peers_chains_by_state.split_off(&(
                 chain_index,
                 PeerChainState::Assignable,
-                usize::min_value(),
+                usize::MIN,
             ));
             let mut after_chain = in_chain_and_after_chain.split_off(&(
                 chain_index + 1,
                 PeerChainState::Assignable,
-                usize::min_value(),
+                usize::MIN,
             ));
             self.peers_chains_by_state.append(&mut after_chain);
             in_chain_and_after_chain
@@ -213,16 +213,16 @@ where
             let peer_to_remove = if self
                 .peers_chains_by_state
                 .range(
-                    (chain_index, PeerChainState::Assignable, usize::min_value())
-                        ..=(chain_index, PeerChainState::Slot, usize::max_value()),
+                    (chain_index, PeerChainState::Assignable, usize::MIN)
+                        ..=(chain_index, PeerChainState::Slot, usize::MAX),
                 )
                 .count()
                 >= max_peers_per_chain
             {
                 self.peers_chains_by_state
                     .range(
-                        (chain_index, PeerChainState::Assignable, usize::min_value())
-                            ..(chain_index, PeerChainState::Slot, usize::min_value()),
+                        (chain_index, PeerChainState::Assignable, usize::MIN)
+                            ..(chain_index, PeerChainState::Slot, usize::MIN),
                     )
                     .choose(&mut self.randomness)
                     .map(|(_, _, peer_index)| *peer_index)
@@ -323,8 +323,8 @@ where
         either::Left(
             self.peers_chains_by_state
                 .range(
-                    (chain_index, PeerChainState::Assignable, usize::min_value())
-                        ..=(chain_index, PeerChainState::Slot, usize::max_value()),
+                    (chain_index, PeerChainState::Assignable, usize::MIN)
+                        ..=(chain_index, PeerChainState::Slot, usize::MAX),
                 )
                 .map(|(_, _, p)| &self.peer_ids[*p]),
         )
@@ -372,7 +372,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the number of connections is equal to `u32::max_value()`.
+    /// Panics if the number of connections is equal to `u32::MAX`.
     ///
     pub fn increase_address_connections(
         &mut self,
@@ -472,13 +472,13 @@ where
         if let Some((_, _, peer_id_index)) = self
             .peers_chains_by_state
             .range(
-                (chain_index, PeerChainState::Assignable, usize::min_value())
+                (chain_index, PeerChainState::Assignable, usize::MIN)
                     ..=(
                         chain_index,
                         PeerChainState::Banned {
                             expires: now.clone(),
                         },
-                        usize::max_value(),
+                        usize::MAX,
                     ),
             )
             .choose(&mut self.randomness)
@@ -494,9 +494,9 @@ where
                     PeerChainState::Banned {
                         expires: now.clone(),
                     },
-                    usize::max_value(),
+                    usize::MAX,
                 )),
-                ops::Bound::Excluded((chain_index, PeerChainState::Slot, usize::min_value())),
+                ops::Bound::Excluded((chain_index, PeerChainState::Slot, usize::MIN)),
             ))
             .next()
         {
@@ -633,9 +633,7 @@ where
             peers_chains_by_state: &mut self.peers_chains_by_state,
             inner_iter: Some(
                 self.peers_chains
-                    .range_mut(
-                        (peer_id_index, usize::min_value())..=(peer_id_index, usize::max_value()),
-                    )
+                    .range_mut((peer_id_index, usize::MIN)..=(peer_id_index, usize::MAX))
                     .fuse(),
             ),
             peer_id_index,
@@ -745,8 +743,8 @@ where
         if self
             .peers_chains_by_state
             .range(
-                (chain_index, PeerChainState::Assignable, usize::min_value())
-                    ..=(chain_index, PeerChainState::Slot, usize::max_value()),
+                (chain_index, PeerChainState::Assignable, usize::MIN)
+                    ..=(chain_index, PeerChainState::Slot, usize::MAX),
             )
             .next()
             .is_some()
@@ -780,7 +778,7 @@ where
     fn try_clean_up_peer_id(&mut self, peer_id_index: usize) {
         if self
             .peers_chains
-            .range((peer_id_index, usize::min_value())..=(peer_id_index, usize::max_value()))
+            .range((peer_id_index, usize::MIN)..=(peer_id_index, usize::MAX))
             .next()
             .is_some()
         {
@@ -1038,11 +1036,7 @@ mod tests {
         use super::PeerChainState;
         assert!(PeerChainState::Assignable < PeerChainState::Banned { expires: 0 });
         assert!(PeerChainState::Banned { expires: 5 } < PeerChainState::Banned { expires: 7 });
-        assert!(
-            PeerChainState::Banned {
-                expires: u32::max_value()
-            } < PeerChainState::Slot
-        );
+        assert!(PeerChainState::Banned { expires: u32::MAX } < PeerChainState::Slot);
     }
 
     #[test]
@@ -1056,12 +1050,12 @@ mod tests {
         let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
 
         assert!(matches!(
-            bps.insert_chain_peer(0, peer_id.clone(), usize::max_value()),
+            bps.insert_chain_peer(0, peer_id.clone(), usize::MAX),
             InsertChainPeerResult::Inserted { peer_removed: None }
         ));
 
         assert!(matches!(
-            bps.insert_address(&peer_id, Vec::new(), usize::max_value()),
+            bps.insert_address(&peer_id, Vec::new(), usize::MAX),
             InsertAddressResult::Inserted {
                 address_removed: None
             }
@@ -1083,19 +1077,19 @@ mod tests {
         let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
 
         assert!(matches!(
-            bps.insert_chain_peer(0, peer_id.clone(), usize::max_value()),
+            bps.insert_chain_peer(0, peer_id.clone(), usize::MAX),
             InsertChainPeerResult::Inserted { peer_removed: None }
         ));
 
         assert!(matches!(
-            bps.increase_address_connections(&peer_id, Vec::new(), usize::max_value()),
+            bps.increase_address_connections(&peer_id, Vec::new(), usize::MAX),
             InsertAddressConnectionsResult::Inserted {
                 address_removed: None
             }
         ));
 
         assert!(matches!(
-            bps.insert_address(&peer_id, vec![1], usize::max_value()),
+            bps.insert_address(&peer_id, vec![1], usize::MAX),
             InsertAddressResult::Inserted {
                 address_removed: None
             }
@@ -1120,7 +1114,7 @@ mod tests {
         let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
 
         assert!(matches!(
-            bps.insert_address(&peer_id, Vec::new(), usize::max_value()),
+            bps.insert_address(&peer_id, Vec::new(), usize::MAX),
             InsertAddressResult::UnknownPeer
         ));
 
@@ -1138,7 +1132,7 @@ mod tests {
         let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
 
         assert!(matches!(
-            bps.increase_address_connections(&peer_id, Vec::new(), usize::max_value()),
+            bps.increase_address_connections(&peer_id, Vec::new(), usize::MAX),
             InsertAddressConnectionsResult::Inserted { .. }
         ));
 
