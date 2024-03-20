@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.23 - 2024-03-20
+
 ### Changed
 
 - Add support for the `transaction_v1_broadcast` and `transaction_v1_stop` JSON-RPC functions. ([#1724](https://github.com/smol-dot/smoldot/pull/1724))
