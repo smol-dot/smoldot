@@ -146,15 +146,10 @@ pub struct Config {
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
-    /// Returns the value that compares inferior or equal to any possible [`ConnectionId`̀].
-    pub fn min_value() -> Self {
-        ConnectionId(u64::min_value())
-    }
-
-    /// Returns the value that compares superior or equal to any possible [`ConnectionId`̀].
-    pub fn max_value() -> Self {
-        ConnectionId(u64::max_value())
-    }
+    /// Value that compares inferior or equal to any possible [`ConnectionId`̀].
+    pub const MIN: Self = ConnectionId(u64::MIN);
+    /// Value that compares superior or equal to any possible [`ConnectionId`̀].
+    pub const MAX: Self = ConnectionId(u64::MAX);
 }
 
 /// Identifier of a request, or an inbound substream, or an outbound substream.
@@ -164,15 +159,10 @@ impl ConnectionId {
 pub struct SubstreamId(u64);
 
 impl SubstreamId {
-    /// Returns the value that compares inferior or equal to any possible [`SubstreamId`̀].
-    pub fn min_value() -> Self {
-        SubstreamId(u64::min_value())
-    }
-
-    /// Returns the value that compares superior or equal to any possible [`SubstreamId`̀].
-    pub fn max_value() -> Self {
-        SubstreamId(u64::max_value())
-    }
+    /// Value that compares inferior or equal to any possible [`SubstreamId`̀].
+    pub const MIN: Self = SubstreamId(u64::MIN);
+    /// Value that compares superior or equal to any possible [`SubstreamId`̀].
+    pub const MAX: Self = SubstreamId(u64::MAX);
 }
 
 /// Data structure containing the list of all connections, pending or not, and their latest known
@@ -1132,8 +1122,8 @@ where
                 if let Some((_, substream_id)) = self
                     .outgoing_notification_substreams_by_connection
                     .range(
-                        (shutting_down_connection, SubstreamId::min_value())
-                            ..=(shutting_down_connection, SubstreamId::max_value()),
+                        (shutting_down_connection, SubstreamId::MIN)
+                            ..=(shutting_down_connection, SubstreamId::MAX),
                     )
                     .cloned()
                     .next()
@@ -1158,14 +1148,8 @@ where
                 if let Some((key, substream_id)) = self
                     .ingoing_notification_substreams_by_connection
                     .range(
-                        (
-                            shutting_down_connection,
-                            established::SubstreamId::min_value(),
-                        )
-                            ..=(
-                                shutting_down_connection,
-                                established::SubstreamId::max_value(),
-                            ),
+                        (shutting_down_connection, established::SubstreamId::MIN)
+                            ..=(shutting_down_connection, established::SubstreamId::MAX),
                     )
                     .map(|(k, v)| (*k, *v))
                     .next()
@@ -1195,8 +1179,8 @@ where
                 if let Some((_, substream_id)) = self
                     .outgoing_requests
                     .range(
-                        (shutting_down_connection, SubstreamId::min_value())
-                            ..=(shutting_down_connection, SubstreamId::max_value()),
+                        (shutting_down_connection, SubstreamId::MIN)
+                            ..=(shutting_down_connection, SubstreamId::MAX),
                     )
                     .next()
                 {
@@ -1214,8 +1198,8 @@ where
                 if let Some((_, substream_id)) = self
                     .ingoing_requests_by_connection
                     .range(
-                        (shutting_down_connection, SubstreamId::min_value())
-                            ..=(shutting_down_connection, SubstreamId::max_value()),
+                        (shutting_down_connection, SubstreamId::MIN)
+                            ..=(shutting_down_connection, SubstreamId::MAX),
                     )
                     .next()
                 {
@@ -1235,14 +1219,8 @@ where
                 if let Some((key, substream_id)) = self
                     .ingoing_negotiated_substreams_by_connection
                     .range(
-                        (
-                            shutting_down_connection,
-                            established::SubstreamId::min_value(),
-                        )
-                            ..=(
-                                shutting_down_connection,
-                                established::SubstreamId::max_value(),
-                            ),
+                        (shutting_down_connection, established::SubstreamId::MIN)
+                            ..=(shutting_down_connection, established::SubstreamId::MAX),
                     )
                     .map(|(k, v)| (*k, *v))
                     .next()
@@ -1335,8 +1313,8 @@ where
                     debug_assert_eq!(
                         self.ingoing_notification_substreams_by_connection
                             .range(
-                                (connection_id, established::SubstreamId::min_value())
-                                    ..=(connection_id, established::SubstreamId::max_value())
+                                (connection_id, established::SubstreamId::MIN)
+                                    ..=(connection_id, established::SubstreamId::MAX)
                             )
                             .count(),
                         0
@@ -1344,8 +1322,8 @@ where
                     debug_assert_eq!(
                         self.outgoing_notification_substreams_by_connection
                             .range(
-                                (connection_id, SubstreamId::min_value())
-                                    ..=(connection_id, SubstreamId::max_value())
+                                (connection_id, SubstreamId::MIN)
+                                    ..=(connection_id, SubstreamId::MAX)
                             )
                             .count(),
                         0
@@ -1353,8 +1331,8 @@ where
                     debug_assert_eq!(
                         self.ingoing_requests_by_connection
                             .range(
-                                (connection_id, SubstreamId::min_value())
-                                    ..=(connection_id, SubstreamId::max_value())
+                                (connection_id, SubstreamId::MIN)
+                                    ..=(connection_id, SubstreamId::MAX)
                             )
                             .count(),
                         0

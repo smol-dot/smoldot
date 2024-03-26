@@ -105,7 +105,7 @@ pub fn check_inherents_parameter<'a>(
     // The second parameter of `BlockBuilder_check_inherents` is a SCALE-encoded list of
     // tuples containing an "inherent identifier" (`[u8; 8]`) and a value (`Vec<u8>`).
     let inherent_data = inherents::InherentData {
-        timestamp: u64::try_from(now_from_unix_epoch.as_millis()).unwrap_or(u64::max_value()),
+        timestamp: u64::try_from(now_from_unix_epoch.as_millis()).unwrap_or(u64::MAX),
     };
     let list = inherent_data.into_raw_list();
     let len = util::encode_scale_compact_usize(list.len());

@@ -615,7 +615,7 @@ where
                         .get();
 
                     let actual_window_update =
-                        u32::try_from(pending_window_increase).unwrap_or(u32::max_value());
+                        u32::try_from(pending_window_increase).unwrap_or(u32::MAX);
                     buffers.push(
                         header::encode(&header::DecodedYamuxHeader::Window {
                             syn: !*first_message_queued && !*inbound,
@@ -743,7 +743,7 @@ where
                         // Discard the next `remaining_bytes`.
                         // TODO: don't use `incoming_bytes_take` but instead simply discard as much as possible or something
                         match outer_read_write.incoming_bytes_take(
-                            usize::try_from(*remaining_bytes).unwrap_or(usize::max_value()),
+                            usize::try_from(*remaining_bytes).unwrap_or(usize::MAX),
                         ) {
                             Ok(Some(taken)) => {
                                 debug_assert_eq!(taken.len() as u32, *remaining_bytes);
@@ -769,13 +769,13 @@ where
                         // we copy everything into its read buffer in order to free the outer
                         // incoming buffer.
                         // The window system of Yamux ensures that the read buffer size is capped.
-                        usize::try_from(*remaining_bytes).unwrap_or(usize::max_value())
+                        usize::try_from(*remaining_bytes).unwrap_or(usize::MAX)
                     } else {
                         cmp::min(
                             expected_incoming_bytes
                                 .unwrap_or(0)
                                 .saturating_sub(read_buffer.len()),
-                            usize::try_from(*remaining_bytes).unwrap_or(usize::max_value()),
+                            usize::try_from(*remaining_bytes).unwrap_or(usize::MAX),
                         )
                     };
 
@@ -1367,7 +1367,7 @@ where
                                     u64::from(self.inner.max_out_data_frame_size.get()),
                                     *allowed_window,
                                 ))
-                                .unwrap_or(usize::max_value())
+                                .unwrap_or(usize::MAX)
                                 .saturating_sub(write_buffers_len_before),
                             )
                         } else {
@@ -1769,15 +1769,17 @@ where
 pub struct SubstreamId(NonZeroU32);
 
 impl SubstreamId {
-    /// Returns the value that compares inferior or equal to all possible values.
-    pub fn min_value() -> Self {
-        Self(NonZeroU32::new(1).unwrap())
-    }
+    /// Value that compares inferior or equal to all possible values.
+    pub const MIN: Self = Self(match NonZeroU32::new(1) {
+        Some(v) => v,
+        None => unreachable!(),
+    });
 
-    /// Returns the value that compares superior or equal to all possible values.
-    pub fn max_value() -> Self {
-        Self(NonZeroU32::new(u32::max_value()).unwrap())
-    }
+    /// Value that compares superior or equal to all possible values.
+    pub const MAX: Self = Self(match NonZeroU32::new(u32::MAX) {
+        Some(v) => v,
+        None => unreachable!(),
+    });
 }
 
 /// Details about the incoming data.
@@ -1924,20 +1926,19 @@ where
 
         // If the substream requests more data than the remote is allowed to send, send out a
         // window frame. This ensures that the reading can never stall due to window frames issues.
-        if let Some(mut missing_window_size) =
-            NonZeroUsize::new(expected_incoming_bytes.unwrap().saturating_sub(
-                usize::try_from(*remote_allowed_window).unwrap_or(usize::max_value()),
-            ))
-        {
+        if let Some(mut missing_window_size) = NonZeroUsize::new(
+            expected_incoming_bytes
+                .unwrap()
+                .saturating_sub(usize::try_from(*remote_allowed_window).unwrap_or(usize::MAX)),
+        ) {
             // Don't send super tiny window frames.
             if missing_window_size.get() < 1024 {
                 missing_window_size = NonZeroUsize::new(1024).unwrap();
             }
 
-            let missing_window_size = NonZeroU64::new(
-                u64::try_from(missing_window_size.get()).unwrap_or(u64::max_value()),
-            )
-            .unwrap();
+            let missing_window_size =
+                NonZeroU64::new(u64::try_from(missing_window_size.get()).unwrap_or(u64::MAX))
+                    .unwrap();
 
             self.yamux
                 .inner
@@ -2049,9 +2050,7 @@ where
                         // Because the number of queuable bytes is capped by the value in
                         // `Config::max_out_data_frame_size`, we are guaranteed that the length
                         // to write out fits in a `u32`.
-                        debug_assert!(
-                            self.yamux.inner.max_out_data_frame_size.get() <= u32::max_value()
-                        );
+                        debug_assert!(self.yamux.inner.max_out_data_frame_size.get() <= u32::MAX);
                         u32::try_from(self.inner_read_write.write_bytes_queued).unwrap()
                     },
                 },

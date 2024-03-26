@@ -481,7 +481,7 @@ where
         self.inner.yamux.add_remote_window_saturating(
             substream_id,
             u64::try_from(max_response_size)
-                .unwrap_or(u64::max_value())
+                .unwrap_or(u64::MAX)
                 .saturating_add(64)
                 .saturating_sub(yamux::NEW_SUBSTREAMS_FRAME_SIZE),
         );

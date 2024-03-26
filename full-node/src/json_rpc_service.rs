@@ -109,7 +109,7 @@ pub struct JsonRpcService {
 
 impl Drop for JsonRpcService {
     fn drop(&mut self) {
-        self.service_dropped.notify(usize::max_value());
+        self.service_dropped.notify(usize::MAX);
     }
 }
 
@@ -148,8 +148,8 @@ impl JsonRpcService {
 
         let (virtual_client_main_task, virtual_client_io) =
             service::client_main_task(service::Config {
-                max_active_subscriptions: u32::max_value(),
-                max_pending_requests: NonZeroU32::new(u32::max_value()).unwrap(),
+                max_active_subscriptions: u32::MAX,
+                max_pending_requests: NonZeroU32::new(u32::MAX).unwrap(),
             });
 
         spawn_client_main_task(
@@ -262,7 +262,7 @@ struct JsonRpcBackground {
     tcp_listener: TcpListener,
 
     /// Event notified when the frontend is dropped.
-    on_service_dropped: Pin<Box<event_listener::EventListener>>,
+    on_service_dropped: event_listener::EventListener,
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,

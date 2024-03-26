@@ -47,7 +47,7 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
-pub use network_service::EncodedMerkleProof;
+pub use network_service::Role;
 
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -331,7 +331,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         for target in self
             .peers_assumed_know_blocks(block_number, &hash)
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
@@ -381,7 +381,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             .network_service
             .peers_list()
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
@@ -426,7 +426,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> StorageQuery<TPlat> {
-        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::max_value());
+        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
         let requests = requests
             .map(|request| match request.ty {
@@ -1142,7 +1142,8 @@ pub enum Notification {
         /// [`Notification::Finalized`] is generated and contains the highest finalized block.
         hash: [u8; 32],
 
-        /// Hash of the best block after the finalization.
+        /// If the current best block is pruned by the finalization, contains the updated hash
+        /// of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
@@ -1151,7 +1152,14 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        best_block_hash: [u8; 32],
+        best_block_hash_if_changed: Option<[u8; 32]>,
+
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
+        /// they're not descendants of the newly-finalized block.
+        ///
+        /// This list contains all the siblings of the newly-finalized block and all their
+        /// descendants.
+        pruned_blocks: Vec<[u8; 32]>,
     },
 
     /// A new block has been added to the list of unfinalized blocks.

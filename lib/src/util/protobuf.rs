@@ -373,7 +373,7 @@ macro_rules! message_decode_helper_store {
         $dest = Some($value);
     };
     ($input_data:expr, $value:expr => $dest:expr; repeated(max = $max:expr)) => {
-        if $dest.len() >= usize::try_from($max).unwrap_or(usize::max_value()) {
+        if $dest.len() >= usize::try_from($max).unwrap_or(usize::MAX) {
             return core::result::Result::Err(nom::Err::Error(
                 nom::error::ParseError::<&[u8]>::from_error_kind(
                     $input_data,

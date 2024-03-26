@@ -100,7 +100,7 @@ fn add_chain(
             // realistically happen as Wasm is a 32 bits platform. This avoids potentially running
             // into OOM errors. The threshold is completely empirical and should probably be
             // updated regularly to account for changes in the implementation.
-            if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+            if allocator::total_alloc_bytes() >= usize::MAX - 400 * 1024 * 1024 {
                 client_lock.chains.remove(outer_chain_id);
                 unsafe {
                     let error = "Wasm node is running low on memory and will prevent any new chain from being added";

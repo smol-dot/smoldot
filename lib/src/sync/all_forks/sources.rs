@@ -181,7 +181,7 @@ impl<TSrc> AllForksSources<TSrc> {
         // Purge `known_blocks1` and `known_blocks2`.
         let known_blocks = self
             .known_blocks1
-            .range((source_id, 0, [0; 32])..=(source_id, u64::max_value(), [0xff; 32]))
+            .range((source_id, 0, [0; 32])..=(source_id, u64::MAX, [0xff; 32]))
             .map(|(_, n, h)| (*n, *h))
             .collect::<Vec<_>>();
         for (height, hash) in known_blocks {
@@ -209,12 +209,8 @@ impl<TSrc> AllForksSources<TSrc> {
         debug_assert_eq!(
             self.known_blocks2
                 .range(
-                    (0, [0; 32], SourceId(u64::min_value()))
-                        ..=(
-                            self.finalized_block_height,
-                            [0xff; 32],
-                            SourceId(u64::max_value())
-                        ),
+                    (0, [0; 32], SourceId(u64::MIN))
+                        ..=(self.finalized_block_height, [0xff; 32], SourceId(u64::MAX)),
                 )
                 .count(),
             0
@@ -222,10 +218,7 @@ impl<TSrc> AllForksSources<TSrc> {
 
         let entries = self
             .known_blocks2
-            .range(
-                (0, [0; 32], SourceId(u64::min_value()))
-                    ..=(height, [0xff; 32], SourceId(u64::max_value())),
-            )
+            .range((0, [0; 32], SourceId(u64::MIN))..=(height, [0xff; 32], SourceId(u64::MAX)))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -260,10 +253,7 @@ impl<TSrc> AllForksSources<TSrc> {
     pub fn remove_known_block(&mut self, height: u64, hash: &[u8; 32]) {
         let sources = self
             .known_blocks2
-            .range(
-                (height, *hash, SourceId(u64::min_value()))
-                    ..=(height, *hash, SourceId(u64::max_value())),
-            )
+            .range((height, *hash, SourceId(u64::MIN))..=(height, *hash, SourceId(u64::MAX)))
             .map(|(_, _, source)| *source)
             .collect::<Vec<_>>();
 
@@ -345,10 +335,7 @@ impl<TSrc> AllForksSources<TSrc> {
     ) -> impl Iterator<Item = SourceId> + 'a {
         assert!(height > self.finalized_block_height);
         self.known_blocks2
-            .range(
-                (height, *hash, SourceId(u64::min_value()))
-                    ..=(height, *hash, SourceId(u64::max_value())),
-            )
+            .range((height, *hash, SourceId(u64::MIN))..=(height, *hash, SourceId(u64::MAX)))
             .map(|(_, _, id)| *id)
     }
 

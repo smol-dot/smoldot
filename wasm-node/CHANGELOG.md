@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 2.0.23 - 2024-03-20
+
+### Changed
+
+- Add support for the `transaction_v1_broadcast` and `transaction_v1_stop` JSON-RPC functions. ([#1724](https://github.com/smol-dot/smoldot/pull/1724))
+- The JSON-RPC server has been rewritten in order to simplify the code flow. It is unfortunately possible for new bugs to have appeared. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- JSON-RPC functions that require access to the runtime (for example `state_call`) now cache older runtimes that had to be downloaded, rather than downloading the runtime from scratch every single time. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- Smoldot is no longer compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled due to the Rust compiler considering target features as unstable. ([#1716](https://github.com/smol-dot/smoldot/pull/1716))
+
+### Fixed
+
+- The `chainHead_unstable_unpin` JSON-RPC function no longer panics if multiple identical block hashes are passed. ([#1728](https://github.com/smol-dot/smoldot/pull/1728))
+
 ## 2.0.22 - 2024-03-04
 
 ### Fixed

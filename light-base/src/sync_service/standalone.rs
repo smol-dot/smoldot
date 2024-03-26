@@ -597,7 +597,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         all::FinalityProofVerifyOutcome::NewFinalized {
                             updates_best_block,
                             finalized_blocks_newest_to_oldest,
-                            ..
+                            pruned_blocks,
                         },
                     ) => {
                         log!(
@@ -625,7 +625,12 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
                             hash: *sync.finalized_block_hash(),
-                            best_block_hash: *sync.best_block_hash(),
+                            best_block_hash_if_changed: if updates_best_block {
+                                Some(*sync.best_block_hash())
+                            } else {
+                                None
+                            },
+                            pruned_blocks,
                         });
 
                         task.sync = Some(sync);
@@ -1249,7 +1254,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     network::codec::BlocksRequestConfig {
                         start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                         desired_count: NonZeroU32::new(
-                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                         )
                         .unwrap(),
                         // The direction is hardcoded based on the documentation of the syncing

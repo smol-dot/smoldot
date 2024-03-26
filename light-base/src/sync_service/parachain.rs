@@ -77,7 +77,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let relay_chain_sync = relay_chain_sync.clone();
                 Box::pin(async move {
                     relay_chain_sync
-                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                         .await
                 })
             },
@@ -366,7 +366,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         );
                         let finalized_index =
                             async_tree.input_insert_block(finalized_hash, None, false, true);
-                        async_tree.input_finalize(finalized_index, finalized_index);
+                        async_tree.input_finalize(finalized_index);
                         for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -416,6 +416,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             async_tree::OutputUpdate::Finalized {
                                 former_finalized_async_op_user_data: former_finalized_parahead,
                                 pruned_blocks,
+                                best_output_block_updated,
                                 ..
                             } if *runtime_subscription
                                 .async_tree
@@ -461,6 +462,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 }
 
                                 // Must unpin the pruned blocks if they haven't already been unpinned.
+                                let mut pruned_blocks_hashes =
+                                    Vec::with_capacity(pruned_blocks.len());
                                 for (_, hash, pruned_block_parahead) in pruned_blocks {
                                     if pruned_block_parahead.is_none() {
                                         runtime_subscription
@@ -468,6 +471,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             .unpin_block(hash)
                                             .await;
                                     }
+                                    pruned_blocks_hashes.push(hash);
                                 }
 
                                 log!(
@@ -498,7 +502,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                         runtime_subscription.all_subscriptions.swap_remove(index);
                                     let notif = super::Notification::Finalized {
                                         hash,
-                                        best_block_hash,
+                                        best_block_hash_if_changed: if best_output_block_updated {
+                                            Some(best_block_hash)
+                                        } else {
+                                            None
+                                        },
+                                        pruned_blocks: pruned_blocks_hashes.clone(),
                                     };
                                     if sender.try_send(notif).is_ok() {
                                         runtime_subscription.all_subscriptions.push(sender);
@@ -777,7 +786,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (
                     WakeUpReason::Notification(runtime_service::Notification::Finalized {
                         hash,
-                        best_block_hash,
+                        best_block_hash_if_changed,
                         ..
                     }),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
@@ -791,21 +800,25 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         hash = HashDisplay(&hash)
                     );
 
+                    if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
+                        let best = runtime_subscription
+                            .async_tree
+                            .input_output_iter_unordered()
+                            .find(|b| *b.user_data == best_block_hash_if_changed)
+                            .unwrap()
+                            .id;
+                        runtime_subscription
+                            .async_tree
+                            .input_set_best_block(Some(best));
+                    }
+
                     let finalized = runtime_subscription
                         .async_tree
                         .input_output_iter_unordered()
                         .find(|b| *b.user_data == hash)
                         .unwrap()
                         .id;
-                    let best = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == best_block_hash)
-                        .unwrap()
-                        .id;
-                    runtime_subscription
-                        .async_tree
-                        .input_finalize(finalized, best);
+                    runtime_subscription.async_tree.input_finalize(finalized);
                     runtime_subscription.must_process_sync_tree = true;
                 }
 
@@ -884,10 +897,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(
-                                        32,
-                                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                                    )
+                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -959,10 +969,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(
-                                        32,
-                                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                                    )
+                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
