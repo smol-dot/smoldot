@@ -1181,6 +1181,9 @@ impl ReadyToRun {
                     rollback: false,
                 }
             }
+            HostFunction::ext_storage_proof_size_storage_proof_size_version_1 => {
+                host_fn_not_implemented!()
+            }
             HostFunction::ext_default_child_storage_get_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
