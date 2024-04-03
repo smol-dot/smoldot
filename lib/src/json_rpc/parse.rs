@@ -25,6 +25,7 @@ pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
 
     if let Some(id) = &serde_request.id {
         // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
+        #[allow(dead_code)] // Necessary to silence warnings about unused fields.
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         #[serde(untagged)]
@@ -55,6 +56,7 @@ pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
             result,
         }) => {
             // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
+            #[allow(dead_code)] // Necessary to silence warnings about unused fields.
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             #[serde(untagged)]
@@ -86,6 +88,7 @@ pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
                 },
         }) if id.get() != "null" => {
             // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
+            #[allow(dead_code)] // Necessary to silence warnings about unused fields.
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             #[serde(untagged)]
