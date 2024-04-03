@@ -16,7 +16,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::borrow::Cow;
-use core::{fmt, future::Future, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
+use core::{
+    fmt,
+    future::Future,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops,
+    panic::UnwindSafe,
+    pin::Pin,
+    str,
+    time::Duration,
+};
 use futures_util::future;
 
 pub use smoldot::libp2p::read_write;
@@ -372,12 +381,12 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
             Address::WebSocketIp {
                 ip: IpAddr::V4(ip), ..
             } => ConnectionType::WebSocketIpv4 {
-                remote_is_localhost: no_std_net::Ipv4Addr::from(*ip).is_loopback(),
+                remote_is_localhost: Ipv4Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketIp {
                 ip: IpAddr::V6(ip), ..
             } => ConnectionType::WebSocketIpv6 {
-                remote_is_localhost: no_std_net::Ipv6Addr::from(*ip).is_loopback(),
+                remote_is_localhost: Ipv6Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketDns {
                 hostname, secure, ..
@@ -473,17 +482,6 @@ pub enum MultiStreamAddress<'a> {
         /// SHA-256 hash of the target's WebRTC certificate.
         remote_certificate_sha256: &'a [u8; 32],
     },
-}
-
-/// Either an IPv4 or IPv6 address.
-///
-/// > **Note**: This enum is the same as `std::net::IpAddr`, but is copy-pasted here in order to
-/// >           be no-std-compatible.
-// TODO: replace this with `core::net::IpAddr` once it's stable: https://github.com/rust-lang/rust/issues/108443
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum IpAddr {
-    V4([u8; 4]),
-    V6([u8; 16]),
 }
 
 // TODO: find a way to keep this private somehow?

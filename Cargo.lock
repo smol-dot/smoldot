@@ -2409,7 +2409,6 @@ dependencies = [
  "futures-lite",
  "futures-util",
  "hashbrown 0.14.3",
- "no-std-net",
  "nom",
  "pin-project",
  "slab",

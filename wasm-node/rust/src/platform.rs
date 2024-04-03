@@ -32,7 +32,9 @@ use alloc::{
 use async_lock::Mutex;
 use core::{
     fmt::{self, Write as _},
-    future, iter, mem, ops, pin, str,
+    future, iter, mem,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops, pin, str,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task,
     time::Duration,
@@ -314,36 +316,36 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let encoded_address: Vec<u8> = match address {
             smoldot_light::platform::Address::TcpIp {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
             } => iter::once(0u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpIp {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
             } => iter::once(1u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpDns { hostname, port } => iter::once(2u8)
                 .chain(port.to_be_bytes())
                 .chain(hostname.as_bytes().iter().copied())
                 .collect(),
             smoldot_light::platform::Address::WebSocketIp {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
             } => iter::once(4u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketIp {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
             } => iter::once(5u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketDns {
                 hostname,
@@ -423,22 +425,22 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let encoded_address: Vec<u8> = match address {
             smoldot_light::platform::MultiStreamAddress::WebRtc {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
                 remote_certificate_sha256,
             } => iter::once(16u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::MultiStreamAddress::WebRtc {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
                 remote_certificate_sha256,
             } => iter::once(17u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
         };
 
