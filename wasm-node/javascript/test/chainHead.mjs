@@ -21,12 +21,12 @@ import { start } from "../dist/mjs/index-nodejs.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
-test('chainHead_unstable_follow works', async t => {
+test('chainHead_v1_follow works', async t => {
   const client = start({ logCallback: () => { } });
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_v1_follow","params":[false]}');
       return chain;
     })
     .then(async (chain) => {
@@ -47,18 +47,18 @@ test('chainHead_unstable_follow works', async t => {
     .then(() => client.terminate());
 });
 
-test('chainHead_unstable_unfollow works', async t => {
+test('chainHead_v1_unfollow works', async t => {
   const client = start({ logCallback: () => { } });
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_v1_follow","params":[false]}');
       return chain;
     })
     .then(async (chain) => {
       const parsed = JSON.parse(await chain.nextJsonRpcResponse());
       t.assert(parsed.id === 1);
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_unfollow","params":[' + JSON.stringify(parsed.result) + ']}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":2,"method":"chainHead_v1_unfollow","params":[' + JSON.stringify(parsed.result) + ']}');
       return chain;
     })
     .then(async (chain) => {
@@ -73,12 +73,12 @@ test('chainHead_unstable_unfollow works', async t => {
     .then(() => client.terminate());
 });
 
-test('chainHead_unstable_body works', async t => {
+test('chainHead_v1_body works', async t => {
   const client = start({ logCallback: () => { } });
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_v1_follow","params":[false]}');
       return chain;
     })
     .then(async (chain) => {
@@ -88,18 +88,18 @@ test('chainHead_unstable_body works', async t => {
     })
     .then(async ([chain, followSubscription]) => {
       const parsed = JSON.parse(await chain.nextJsonRpcResponse());
-      t.assert(parsed.method == "chainHead_unstable_followEvent" && parsed.params.subscription == followSubscription);
+      t.assert(parsed.method == "chainHead_v1_followEvent" && parsed.params.subscription == followSubscription);
       if (parsed.params.result.event == "initialized") {
         if (parsed.params.result.finalizedBlockHash.toLowerCase() != "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158")
           t.fail(parsed);
-        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_unstable_body", "params": [followSubscription, parsed.params.result.finalizedBlockHash] }));
+        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_v1_body", "params": [followSubscription, parsed.params.result.finalizedBlockHash] }));
       }
       return chain;
     })
     .then(async (chain) => {
       while (true) {
         const parsed = JSON.parse(await chain.nextJsonRpcResponse());
-        if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.result.event == "operationInaccessible") {
+        if (parsed.method == "chainHead_v1_followEvent" && parsed.params.result.event == "operationInaccessible") {
           t.pass();
           break;
         }

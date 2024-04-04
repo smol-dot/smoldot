@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- All `chainHead_unstable`-prefixed JSON-RPC functions have been renamed to `chainHead_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1748](https://github.com/smol-dot/smoldot/pull/1748))
+
 ### Fixed
 
 - Fix `QueueFullError` being thrown even when the number of requests is way below the value passed to `jsonRpcMaxPendingRequests`. ([#1747](https://github.com/smol-dot/smoldot/pull/1747))
