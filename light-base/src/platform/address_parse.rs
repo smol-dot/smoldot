@@ -17,8 +17,11 @@
 
 use smoldot::libp2p::multiaddr::{Multiaddr, Protocol};
 
-use super::{Address, ConnectionType, IpAddr, MultiStreamAddress};
-use core::str;
+use super::{Address, ConnectionType, MultiStreamAddress};
+use core::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    str,
+};
 
 pub enum AddressOrMultiStreamAddress<'a> {
     Address(Address<'a>),
@@ -50,13 +53,13 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
     Ok(match (proto1, proto2, proto3, proto4) {
         (Protocol::Ip4(ip), Protocol::Tcp(port), None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
-                ip: IpAddr::V4(ip),
+                ip: IpAddr::V4(Ipv4Addr::from(ip)),
                 port,
             })
         }
         (Protocol::Ip6(ip), Protocol::Tcp(port), None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
-                ip: IpAddr::V6(ip),
+                ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 port,
             })
         }
@@ -71,13 +74,13 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
         }),
         (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
-                ip: IpAddr::V4(ip),
+                ip: IpAddr::V4(Ipv4Addr::from(ip)),
                 port,
             })
         }
         (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
-                ip: IpAddr::V6(ip),
+                ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 port,
             })
         }
@@ -121,7 +124,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
                 return Err(Error::InvalidMultihashLength);
             };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
-                ip: IpAddr::V4(ip),
+                ip: IpAddr::V4(Ipv4Addr::from(ip)),
                 port,
                 remote_certificate_sha256,
             })
@@ -140,7 +143,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
                 return Err(Error::InvalidMultihashLength);
             };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
-                ip: IpAddr::V6(ip),
+                ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 port,
                 remote_certificate_sha256,
             })
