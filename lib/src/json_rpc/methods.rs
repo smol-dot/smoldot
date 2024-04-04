@@ -452,41 +452,41 @@ define_methods! {
     system_version() -> Cow<'a, str>,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_body(
+    chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> ChainHeadBodyCallReturn<'a>,
-    chainHead_unstable_call(
+    chainHead_v1_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
         #[rename = "callParameters"] call_parameters: HexString
     ) -> ChainHeadBodyCallReturn<'a>,
-    chainHead_unstable_follow(
+    chainHead_v1_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
-    chainHead_unstable_header(
+    chainHead_v1_header(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> Option<HexString>,
-    chainHead_unstable_stopOperation(
+    chainHead_v1_stopOperation(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_storage(
+    chainHead_v1_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>
     ) -> ChainHeadStorageReturn<'a>,
-    chainHead_unstable_continue(
+    chainHead_v1_continue(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_unfollow(
+    chainHead_v1_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_unpin(
+    chainHead_v1_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "hashOrHashes"] hash_or_hashes: HashHexStringSingleOrArray
     ) -> (),
@@ -523,7 +523,7 @@ define_methods! {
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
+    chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     transactionWatch_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
@@ -1265,7 +1265,7 @@ mod tests {
     fn no_params_refused() {
         // No `params` field in the request.
         let err = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_follow"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_v1_follow"}"#,
         );
 
         assert!(matches!(
@@ -1273,7 +1273,7 @@ mod tests {
             Err(super::ParseClientToServerError::Method {
                 request_id: "2",
                 error: super::MethodError::MissingParameters {
-                    rpc_method: "chainHead_unstable_follow"
+                    rpc_method: "chainHead_v1_follow"
                 }
             })
         ));

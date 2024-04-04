@@ -439,14 +439,14 @@ impl ClientMainTask {
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
-                | methods::MethodCall::chainHead_unstable_body { .. }
-                | methods::MethodCall::chainHead_unstable_call { .. }
-                | methods::MethodCall::chainHead_unstable_continue { .. }
+                | methods::MethodCall::chainHead_v1_body { .. }
+                | methods::MethodCall::chainHead_v1_call { .. }
+                | methods::MethodCall::chainHead_v1_continue { .. }
                 | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
-                | methods::MethodCall::chainHead_unstable_header { .. }
-                | methods::MethodCall::chainHead_unstable_stopOperation { .. }
-                | methods::MethodCall::chainHead_unstable_storage { .. }
-                | methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                | methods::MethodCall::chainHead_v1_header { .. }
+                | methods::MethodCall::chainHead_v1_stopOperation { .. }
+                | methods::MethodCall::chainHead_v1_storage { .. }
+                | methods::MethodCall::chainHead_v1_unpin { .. } => {
                     // Simple one-request-one-response.
                     return Event::HandleRequest {
                         request_process: RequestProcess {
@@ -470,7 +470,7 @@ impl ClientMainTask {
                 | methods::MethodCall::transaction_v1_broadcast { .. }
                 | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
-                | methods::MethodCall::chainHead_unstable_follow { .. } => {
+                | methods::MethodCall::chainHead_v1_follow { .. } => {
                     // Subscription starting requests.
 
                     // We must check the maximum number of subscriptions.
@@ -543,7 +543,7 @@ impl ClientMainTask {
                 }
                 | methods::MethodCall::transactionWatch_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
-                | methods::MethodCall::chainHead_unstable_unfollow {
+                | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
                     ..
                 } => {
@@ -573,8 +573,8 @@ impl ClientMainTask {
                                     methods::MethodCall::sudo_network_unstable_unwatch {
                                         ..
                                     } => methods::Response::sudo_network_unstable_unwatch(()),
-                                    methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                                        methods::Response::chainHead_unstable_unfollow(())
+                                    methods::MethodCall::chainHead_v1_unfollow { .. } => {
+                                        methods::Response::chainHead_v1_unfollow(())
                                     }
                                     _ => unreachable!(),
                                 }
@@ -1168,8 +1168,8 @@ impl SubscriptionStartProcess {
             methods::MethodCall::sudo_network_unstable_watch { .. } => {
                 methods::Response::sudo_network_unstable_watch(Cow::Borrowed(&self.subscription_id))
             }
-            methods::MethodCall::chainHead_unstable_follow { .. } => {
-                methods::Response::chainHead_unstable_follow(Cow::Borrowed(&self.subscription_id))
+            methods::MethodCall::chainHead_v1_follow { .. } => {
+                methods::Response::chainHead_v1_follow(Cow::Borrowed(&self.subscription_id))
             }
             _ => unreachable!(),
         }

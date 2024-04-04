@@ -45,10 +45,10 @@ pub struct Config {
     /// Receiver for actions that the JSON-RPC client wants to perform.
     pub receiver: async_channel::Receiver<Message>,
 
-    /// `chainHead_unstable_follow` subscription start handle.
+    /// `chainHead_v1_follow` subscription start handle.
     pub chain_head_follow_subscription: service::SubscriptionStartProcess,
 
-    /// Parameter that was passed by the user when requesting `chainHead_unstable_follow`.
+    /// Parameter that was passed by the user when requesting `chainHead_v1_follow`.
     pub with_runtime: bool,
 
     /// Consensus service of the chain.
@@ -68,7 +68,7 @@ pub enum Message {
     },
 }
 
-/// Spawns a new tasks dedicated to handling a `chainHead_unstable_follow` subscription.
+/// Spawns a new tasks dedicated to handling a `chainHead_v1_follow` subscription.
 ///
 /// Returns the identifier of the subscription.
 pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
@@ -93,7 +93,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
 
         pinned_blocks.insert(consensus_service_subscription.finalized_block_hash);
         json_rpc_subscription
-            .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
+            .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
                 subscription: (&json_rpc_subscription_id).into(),
                 result: methods::FollowEvent::Initialized {
                     finalized_block_hash: methods::HashHexString(
@@ -115,7 +115,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
         for block in consensus_service_subscription.non_finalized_blocks_ancestry_order {
             pinned_blocks.insert(block.block_hash);
             json_rpc_subscription
-                .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
+                .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
                     subscription: (&json_rpc_subscription_id).into(),
                     result: methods::FollowEvent::NewBlock {
                         block_hash: methods::HashHexString(block.block_hash),
@@ -134,7 +134,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
             if block.is_new_best {
                 current_best_block = block.block_hash;
                 json_rpc_subscription
-                    .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
+                    .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
                         subscription: (&json_rpc_subscription_id).into(),
                         result: methods::FollowEvent::BestBlockChanged {
                             best_block_hash: methods::HashHexString(block.block_hash),
@@ -172,8 +172,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
             match wake_up_reason {
                 WakeUpReason::ForegroundClosed => return,
                 WakeUpReason::Foreground(Message::Header { request }) => {
-                    let methods::MethodCall::chainHead_unstable_header { hash, .. } =
-                        request.request()
+                    let methods::MethodCall::chainHead_v1_header { hash, .. } = request.request()
                     else {
                         unreachable!()
                     };
@@ -190,7 +189,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
 
                     match database_outcome {
                         Ok(Some(header)) => {
-                            request.respond(methods::Response::chainHead_unstable_header(Some(
+                            request.respond(methods::Response::chainHead_v1_header(Some(
                                 methods::HexString(header),
                             )))
                         }
@@ -228,35 +227,31 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
                 }) => {
                     pinned_blocks.insert(block.block_hash);
                     json_rpc_subscription
-                        .send_notification(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&json_rpc_subscription_id).into(),
-                                result: methods::FollowEvent::NewBlock {
-                                    block_hash: methods::HashHexString(block.block_hash),
-                                    new_runtime: if let (Some(new_runtime), true) =
-                                        (&block.runtime_update, config.with_runtime)
-                                    {
-                                        Some(convert_runtime_spec(new_runtime.runtime_version()))
-                                    } else {
-                                        None
-                                    },
-                                    parent_block_hash: methods::HashHexString(block.parent_hash),
+                        .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
+                            subscription: (&json_rpc_subscription_id).into(),
+                            result: methods::FollowEvent::NewBlock {
+                                block_hash: methods::HashHexString(block.block_hash),
+                                new_runtime: if let (Some(new_runtime), true) =
+                                    (&block.runtime_update, config.with_runtime)
+                                {
+                                    Some(convert_runtime_spec(new_runtime.runtime_version()))
+                                } else {
+                                    None
                                 },
+                                parent_block_hash: methods::HashHexString(block.parent_hash),
                             },
-                        )
+                        })
                         .await;
 
                     if block.is_new_best {
                         current_best_block = block.block_hash;
                         json_rpc_subscription
-                            .send_notification(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: (&json_rpc_subscription_id).into(),
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(block.block_hash),
-                                    },
+                            .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
+                                subscription: (&json_rpc_subscription_id).into(),
+                                result: methods::FollowEvent::BestBlockChanged {
+                                    best_block_hash: methods::HashHexString(block.block_hash),
                                 },
-                            )
+                            })
                             .await;
                     }
                 }
@@ -268,49 +263,43 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
                     },
                 ) => {
                     json_rpc_subscription
-                        .send_notification(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&json_rpc_subscription_id).into(),
-                                result: methods::FollowEvent::Finalized {
-                                    // As specified in the JSON-RPC spec, the list must be ordered
-                                    // in increasing block number. Consequently we have to reverse
-                                    // the list.
-                                    finalized_blocks_hashes: finalized_blocks_newest_to_oldest
-                                        .into_iter()
-                                        .map(methods::HashHexString)
-                                        .rev()
-                                        .collect(),
-                                    pruned_blocks_hashes: pruned_blocks_hashes
-                                        .into_iter()
-                                        .map(methods::HashHexString)
-                                        .collect(),
-                                },
+                        .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
+                            subscription: (&json_rpc_subscription_id).into(),
+                            result: methods::FollowEvent::Finalized {
+                                // As specified in the JSON-RPC spec, the list must be ordered
+                                // in increasing block number. Consequently we have to reverse
+                                // the list.
+                                finalized_blocks_hashes: finalized_blocks_newest_to_oldest
+                                    .into_iter()
+                                    .map(methods::HashHexString)
+                                    .rev()
+                                    .collect(),
+                                pruned_blocks_hashes: pruned_blocks_hashes
+                                    .into_iter()
+                                    .map(methods::HashHexString)
+                                    .collect(),
                             },
-                        )
+                        })
                         .await;
 
                     if best_block_hash != current_best_block {
                         current_best_block = best_block_hash;
                         json_rpc_subscription
-                            .send_notification(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: (&json_rpc_subscription_id).into(),
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(best_block_hash),
-                                    },
+                            .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
+                                subscription: (&json_rpc_subscription_id).into(),
+                                result: methods::FollowEvent::BestBlockChanged {
+                                    best_block_hash: methods::HashHexString(best_block_hash),
                                 },
-                            )
+                            })
                             .await;
                     }
                 }
                 WakeUpReason::ConsensusSubscriptionStop => {
                     json_rpc_subscription
-                        .send_notification(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&json_rpc_subscription_id).into(),
-                                result: methods::FollowEvent::Stop {},
-                            },
-                        )
+                        .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
+                            subscription: (&json_rpc_subscription_id).into(),
+                            result: methods::FollowEvent::Stop {},
+                        })
                         .await;
                 }
             }

@@ -47,7 +47,7 @@ fn basic_block_generated() {
 
         loop {
             client.send_json_rpc_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}"#
+                r#"{"jsonrpc":"2.0","id":1,"method":"chainHead_v1_follow","params":[false]}"#
                     .to_owned(),
             );
 
@@ -60,11 +60,11 @@ fn basic_block_generated() {
                 match json_rpc::methods::parse_notification(&client.next_json_rpc_response().await)
                     .unwrap()
                 {
-                    json_rpc::methods::ServerToClient::chainHead_unstable_followEvent {
+                    json_rpc::methods::ServerToClient::chainHead_v1_followEvent {
                         result: json_rpc::methods::FollowEvent::NewBlock { .. },
                         ..
                     } => return, // Test success
-                    json_rpc::methods::ServerToClient::chainHead_unstable_followEvent {
+                    json_rpc::methods::ServerToClient::chainHead_v1_followEvent {
                         result: json_rpc::methods::FollowEvent::Stop { .. },
                         ..
                     } => break,
