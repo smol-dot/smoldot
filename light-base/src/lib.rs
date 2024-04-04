@@ -935,13 +935,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests,
                 max_subscriptions,
-                // Note that the settings below are intentionally not exposed in the publicly
-                // available configuration, as "good" values depend on the global number of tasks.
-                // In other words, these constants are relative to the number of other things that
-                // happen within the client rather than absolute values. Since the user isn't
-                // supposed to know what happens within the client, they can't rationally decide
-                // what value is appropriate.
-                max_parallel_requests: NonZeroU32::new(24).unwrap(),
             });
 
             service_starter.start(json_rpc_service::StartConfig {
