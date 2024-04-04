@@ -70,6 +70,7 @@ pub struct Config<TPlat: PlatformRef> {
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
+    // TODO: unused at the moment
     pub max_pending_requests: NonZeroU32,
 
     /// Maximum number of active subscriptions. Any additional subscription will be immediately
@@ -77,14 +78,8 @@ pub struct Config<TPlat: PlatformRef> {
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
-    pub max_subscriptions: u32,
-
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
     // TODO: unused at the moment
-    pub max_parallel_requests: NonZeroU32,
+    pub max_subscriptions: u32,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -96,7 +91,7 @@ pub struct Config<TPlat: PlatformRef> {
 pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> (Frontend<TPlat>, ServicePrototype) {
     let log_target = format!("json-rpc-{}", config.log_name);
 
-    let (requests_tx, requests_rx) = async_channel::bounded(32); // TODO: capacity?
+    let (requests_tx, requests_rx) = async_channel::unbounded(); // TODO: capacity?
     let (responses_tx, responses_rx) = async_channel::bounded(16); // TODO: capacity?
 
     let frontend = Frontend {
