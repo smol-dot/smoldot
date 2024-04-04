@@ -4,7 +4,7 @@
 
 ### Changed
 
-- All `chainHead_unstable`-prefixed JSON-RPC functions have been renamed to `chainHead_v1`, in accordance with the latest changes in the JSON-RPC API specification.
+- All `chainHead_unstable`-prefixed JSON-RPC functions have been renamed to `chainHead_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1748](https://github.com/smol-dot/smoldot/pull/1748))
 
 ### Fixed
 
