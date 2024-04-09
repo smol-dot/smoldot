@@ -767,15 +767,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     // Non-legacy-API functions.
-                    methods::MethodCall::chainHead_unstable_body { .. }
-                    | methods::MethodCall::chainHead_unstable_call { .. }
-                    | methods::MethodCall::chainHead_unstable_continue { .. }
-                    | methods::MethodCall::chainHead_unstable_follow { .. }
-                    | methods::MethodCall::chainHead_unstable_header { .. }
-                    | methods::MethodCall::chainHead_unstable_stopOperation { .. }
-                    | methods::MethodCall::chainHead_unstable_storage { .. }
-                    | methods::MethodCall::chainHead_unstable_unfollow { .. }
-                    | methods::MethodCall::chainHead_unstable_unpin { .. }
+                    methods::MethodCall::chainHead_v1_body { .. }
+                    | methods::MethodCall::chainHead_v1_call { .. }
+                    | methods::MethodCall::chainHead_v1_continue { .. }
+                    | methods::MethodCall::chainHead_v1_follow { .. }
+                    | methods::MethodCall::chainHead_v1_header { .. }
+                    | methods::MethodCall::chainHead_v1_stopOperation { .. }
+                    | methods::MethodCall::chainHead_v1_storage { .. }
+                    | methods::MethodCall::chainHead_v1_unfollow { .. }
+                    | methods::MethodCall::chainHead_v1_unpin { .. }
                     | methods::MethodCall::chainSpec_v1_chainName { .. }
                     | methods::MethodCall::chainSpec_v1_genesisHash { .. }
                     | methods::MethodCall::chainSpec_v1_properties { .. }
@@ -1550,7 +1550,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     peers: u64::try_from(
                                         me.sync_service.syncing_peers().await.len(),
                                     )
-                                    .unwrap_or(u64::max_value()),
+                                    .unwrap_or(u64::MAX),
                                     should_have_peers: me.chain_is_live,
                                 })
                                 .to_json_response(request_id_json),
@@ -1646,7 +1646,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_body {
+                    methods::MethodCall::chainHead_v1_body {
                         follow_subscription,
                         hash,
                     } => {
@@ -1658,7 +1658,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_body(
+                                    methods::Response::chainHead_v1_body(
                                         methods::ChainHeadBodyCallReturn::LimitReached {},
                                     )
                                     .to_json_response(request_id_json),
@@ -1682,7 +1682,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                         None,
                                     ))
                                     .await;
@@ -1698,7 +1698,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     let _ = me
                                         .responses_tx
                                         .send(
-                                            methods::Response::chainHead_unstable_body(
+                                            methods::Response::chainHead_v1_body(
                                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                                             )
                                             .to_json_response(request_id_json),
@@ -1742,7 +1742,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_body(
+                                methods::Response::chainHead_v1_body(
                                     methods::ChainHeadBodyCallReturn::Started {
                                         operation_id: (&operation_id).into(),
                                     },
@@ -1772,7 +1772,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }));
                     }
 
-                    methods::MethodCall::chainHead_unstable_call {
+                    methods::MethodCall::chainHead_v1_call {
                         follow_subscription,
                         hash,
                         function,
@@ -1786,7 +1786,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_call(
+                                    methods::Response::chainHead_v1_call(
                                         methods::ChainHeadBodyCallReturn::LimitReached {},
                                     )
                                     .to_json_response(request_id_json),
@@ -1802,7 +1802,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
+                                    parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                     None,
                                 ))
                                 .await;
@@ -1817,7 +1817,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     let _ = me
                                         .responses_tx
                                         .send(
-                                            methods::Response::chainHead_unstable_call(
+                                            methods::Response::chainHead_v1_call(
                                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                                             )
                                             .to_json_response(request_id_json),
@@ -1864,7 +1864,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 let _ = me
                                     .responses_tx
                                     .send(
-                                        methods::Response::chainHead_unstable_call(
+                                        methods::Response::chainHead_v1_call(
                                             methods::ChainHeadBodyCallReturn::LimitReached {},
                                         )
                                         .to_json_response(request_id_json),
@@ -1917,7 +1917,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_call(
+                                methods::Response::chainHead_v1_call(
                                     methods::ChainHeadBodyCallReturn::Started {
                                         operation_id: (&operation_id).into(),
                                     },
@@ -1946,18 +1946,18 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }));
                     }
 
-                    methods::MethodCall::chainHead_unstable_continue { .. } => {
+                    methods::MethodCall::chainHead_v1_continue { .. } => {
                         // TODO: not implemented properly
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_continue(())
+                                methods::Response::chainHead_v1_continue(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_storage {
+                    methods::MethodCall::chainHead_v1_storage {
                         follow_subscription,
                         hash,
                         items,
@@ -1971,7 +1971,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_storage(
+                                    methods::Response::chainHead_v1_storage(
                                         methods::ChainHeadStorageReturn::LimitReached {},
                                     )
                                     .to_json_response(request_id_json),
@@ -1995,7 +1995,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
+                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
                                         None,
                                     ))
                                     .await;
@@ -2020,7 +2020,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 &me.platform,
                                 Warn,
                                 &me.log_target,
-                                "chainHead_unstable_storage has been called with a non-null childTrie. \
+                                "chainHead_v1_storage has been called with a non-null childTrie. \
                                 This isn't supported by smoldot yet."
                             );
                             continue;
@@ -2064,7 +2064,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_storage(
+                                    methods::Response::chainHead_v1_storage(
                                         methods::ChainHeadStorageReturn::LimitReached {},
                                     )
                                     .to_json_response(request_id_json),
@@ -2104,7 +2104,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_storage(
+                                methods::Response::chainHead_v1_storage(
                                     methods::ChainHeadStorageReturn::Started {
                                         operation_id: (&operation_id).into(),
                                         discarded_items: items.len(),
@@ -2133,7 +2133,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }));
                     }
 
-                    methods::MethodCall::chainHead_unstable_stopOperation {
+                    methods::MethodCall::chainHead_v1_stopOperation {
                         follow_subscription,
                         operation_id,
                     } => {
@@ -2146,7 +2146,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             if let Some(operation) =
                                 subscription.operations_in_progress.remove(&*operation_id)
                             {
-                                operation.interrupt.notify(usize::max_value());
+                                operation.interrupt.notify(usize::MAX);
                                 subscription.available_operation_slots += operation.occupied_slots;
                             }
                         }
@@ -2154,13 +2154,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_stopOperation(())
+                                methods::Response::chainHead_v1_stopOperation(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                    methods::MethodCall::chainHead_v1_follow { with_runtime } => {
                         // Check that the number of existing subscriptions is below the limit.
                         // TODO: configurable limit
                         if me.chain_head_follow_subscriptions.len() >= 2 {
@@ -2205,7 +2205,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_follow(Cow::Borrowed(
+                                methods::Response::chainHead_v1_follow(Cow::Borrowed(
                                     &subscription_id,
                                 ))
                                 .to_json_response(request_id_json),
@@ -2238,7 +2238,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
                     }
 
-                    methods::MethodCall::chainHead_unstable_unfollow {
+                    methods::MethodCall::chainHead_v1_unfollow {
                         follow_subscription,
                     } => {
                         if let Some(subscription) = me
@@ -2246,20 +2246,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .remove(&*follow_subscription)
                         {
                             for (_, operation) in subscription.operations_in_progress {
-                                operation.interrupt.notify(usize::max_value());
+                                operation.interrupt.notify(usize::MAX);
                             }
                         };
 
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_unfollow(())
+                                methods::Response::chainHead_v1_unfollow(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_header {
+                    methods::MethodCall::chainHead_v1_header {
                         follow_subscription,
                         hash,
                     } => {
@@ -2271,7 +2271,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_header(None)
+                                    methods::Response::chainHead_v1_header(None)
                                         .to_json_response(request_id_json),
                                 )
                                 .await;
@@ -2297,7 +2297,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_header(Some(
+                                methods::Response::chainHead_v1_header(Some(
                                     methods::HexString(block.clone()),
                                 ))
                                 .to_json_response(request_id_json),
@@ -2305,7 +2305,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_unpin {
+                    methods::MethodCall::chainHead_v1_unpin {
                         follow_subscription,
                         hash_or_hashes,
                     } => {
@@ -2317,7 +2317,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::Response::chainHead_unstable_unpin(())
+                                    methods::Response::chainHead_v1_unpin(())
                                         .to_json_response(request_id_json),
                                 )
                                 .await;
@@ -2333,22 +2333,55 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             }
                         };
 
-                        // TODO: what if duplicate hashes
-                        if !all_hashes
-                            .clone()
-                            .all(|hash| subscription.pinned_blocks_headers.contains_key(hash))
-                        {
-                            let _ = me
-                                .responses_tx
-                                .send(parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
-                                    None,
-                                ))
-                                .await;
+                        let checks_passed = {
+                            let mut dedup_check = hashbrown::HashSet::with_capacity_and_hasher(
+                                0,
+                                SipHasherBuild::new({
+                                    let mut seed = [0; 16];
+                                    me.randomness.fill_bytes(&mut seed);
+                                    seed
+                                })
+                            );
+                            let mut all_hashes = all_hashes.clone();
+
+                            loop {
+                                let Some(hash) = all_hashes.next()
+                                else {
+                                    break true;
+                                };
+
+                                if !dedup_check.insert(hash) {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(parse::build_error_response(
+                                            request_id_json,
+                                            parse::ErrorResponse::ApplicationDefined(-32804, "duplicate block hash"),
+                                            None,
+                                        ))
+                                        .await;
+                                    break false;
+                                }
+
+                                if !subscription.pinned_blocks_headers.contains_key(hash) {
+                                    let _ = me
+                                        .responses_tx
+                                        .send(parse::build_error_response(
+                                            request_id_json,
+                                            parse::ErrorResponse::InvalidParams,
+                                            None,
+                                        ))
+                                        .await;
+                                    break false;
+                                }
+                            }
+                        };
+
+                        if !checks_passed {
                             continue;
                         }
 
+                        // The logic below assumes that all hashes are unique, which is ensured
+                        // above.
                         for hash in all_hashes {
                             subscription.pinned_blocks_headers.remove(hash);
                             if let Some(subscription_id) =
@@ -2361,7 +2394,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_unstable_unpin(())
+                                methods::Response::chainHead_v1_unpin(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -2375,8 +2408,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             &me.sync_service,
                             &me.runtime_service,
                             &me.genesis_block_hash,
-                            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
-                                .unwrap_or(usize::max_value()),
+                            usize::try_from(max_size_bytes.unwrap_or(u64::MAX))
+                                .unwrap_or(usize::MAX),
                         )
                         .await;
 
@@ -2718,7 +2751,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .cloned()
                                     .filter(|k| *k >= *start_key) // TODO: not sure if start should be in the set or not?
                                     .map(methods::HexString)
-                                    .take(usize::try_from(*count).unwrap_or(usize::max_value()))
+                                    .take(usize::try_from(*count).unwrap_or(usize::MAX))
                                     .collect::<Vec<_>>();
                                 let _ = me
                                     .responses_tx
@@ -3524,7 +3557,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .cloned()
                             .filter(|k| *k >= start_key) // TODO: not sure if start should be in the set or not?
                             .map(methods::HexString)
-                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                            .take(usize::try_from(count).unwrap_or(usize::MAX))
                             .collect::<Vec<_>>();
 
                         // If the returned response is somehow truncated, it is very likely that the
@@ -3712,7 +3745,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let _ = me
                     .responses_tx
                     .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
@@ -3748,7 +3781,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let _ = me
                         .responses_tx
                         .send(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
+                            methods::ServerToClient::chainHead_v1_followEvent {
                                 subscription: Cow::Borrowed(&subscription_id),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
@@ -3785,7 +3818,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
@@ -3856,7 +3889,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                    methods::ServerToClient::chainHead_v1_followEvent {
                                         subscription: Cow::Borrowed(&subscription_id),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(
@@ -3872,7 +3905,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::Finalized {
                                         finalized_blocks_hashes: vec![methods::HashHexString(hash)],
@@ -3890,7 +3923,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
@@ -3911,7 +3944,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::NewBlock {
                                         block_hash: methods::HashHexString(block_hash),
@@ -3941,7 +3974,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                    methods::ServerToClient::chainHead_v1_followEvent {
                                         subscription: Cow::Borrowed(&subscription_id),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(block_hash),
@@ -3991,7 +4024,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                    methods::ServerToClient::chainHead_v1_followEvent {
                                         subscription: Cow::Borrowed(&subscription_id),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(
@@ -4007,7 +4040,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::Finalized {
                                         finalized_blocks_hashes: vec![methods::HashHexString(hash)],
@@ -4025,7 +4058,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
@@ -4046,7 +4079,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::NewBlock {
                                         block_hash: methods::HashHexString(block_hash),
@@ -4064,7 +4097,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             let _ = me
                                 .responses_tx
                                 .send(
-                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                    methods::ServerToClient::chainHead_v1_followEvent {
                                         subscription: Cow::Borrowed(&subscription_id),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(block_hash),
@@ -4161,7 +4194,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let _ = me
                     .responses_tx
                     .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result,
                         }
@@ -4217,7 +4250,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::OperationBodyDone {
                                         operation_id: operation_id.clone().into(),
@@ -4232,7 +4265,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                methods::ServerToClient::chainHead_v1_followEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::FollowEvent::OperationInaccessible {
                                         operation_id: operation_id.clone().into(),
@@ -4325,7 +4358,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     let _ = me
                         .responses_tx
                         .send(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
+                            methods::ServerToClient::chainHead_v1_followEvent {
                                 subscription: Cow::Borrowed(&subscription_id),
                                 result: methods::FollowEvent::OperationStorageItems {
                                     operation_id: Cow::Borrowed(&operation_id),
@@ -4393,7 +4426,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let _ = me
                     .responses_tx
                     .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::OperationStorageDone {
                                 operation_id: Cow::Borrowed(&operation_id),
@@ -4430,7 +4463,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let _ = me
                     .responses_tx
                     .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::OperationInaccessible {
                                 operation_id: Cow::Borrowed(&operation_id),
@@ -4457,14 +4490,14 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 // Cancel operations isn't necessary, but is also not a bad idea, to
                 // save resources.
                 for (_, operation) in subscription_info.operations_in_progress {
-                    operation.interrupt.notify(usize::max_value());
+                    operation.interrupt.notify(usize::MAX);
                 }
 
                 // Send a stop event.
                 let _ = me
                     .responses_tx
                     .send(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Stop {},
                         }
@@ -4576,8 +4609,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service
                             .subscribe_all(
                                 32,
-                                NonZeroUsize::new(usize::max_value())
-                                    .unwrap_or_else(|| unreachable!()),
+                                NonZeroUsize::new(usize::MAX).unwrap_or_else(|| unreachable!()),
                             )
                             .await
                     }));
@@ -5097,7 +5129,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         num_peers: u32::try_from(
                                             transaction_watch.num_broadcasted_peers,
                                         )
-                                        .unwrap_or(u32::max_value()),
+                                        .unwrap_or(u32::MAX),
                                     },
                                 }
                                 .to_json_request_object_parameters(None),

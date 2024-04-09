@@ -434,12 +434,12 @@ impl<T> ForkTree<T> {
         &'_ self,
         node_index: NodeIndex,
     ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
-        debug_assert!(self.nodes.get(usize::max_value()).is_none());
+        debug_assert!(self.nodes.get(usize::MAX).is_none());
 
         // First element is an invalid key, each successor is the last element of
         // `node_to_root_path(node_index)` that isn't equal to `current`.
         // Since the first element is invalid, we skip it.
-        iter::successors(Some(NodeIndex(usize::max_value())), move |&current| {
+        iter::successors(Some(NodeIndex(usize::MAX)), move |&current| {
             self.node_to_root_path(node_index)
                 .take_while(move |n| *n != current)
                 .last()
@@ -677,15 +677,10 @@ pub struct PrunedNode<T> {
 pub struct NodeIndex(usize);
 
 impl NodeIndex {
-    /// Returns the value that compares inferior or equal to any possible [`NodeIndex`̀].
-    pub fn min_value() -> Self {
-        NodeIndex(usize::min_value())
-    }
-
+    /// Value that compares inferior or equal to any possible [`NodeIndex`̀].
+    pub const MIN: Self = NodeIndex(usize::MIN);
     /// Returns the value that compares superior or equal to any possible [`NodeIndex`̀].
-    pub fn max_value() -> Self {
-        NodeIndex(usize::max_value())
-    }
+    pub const MAX: Self = NodeIndex(usize::MAX);
 
     /// Adds `1` to `self`. Returns `None` if this causes an overflow.
     pub fn inc(self) -> Option<Self> {

@@ -196,7 +196,7 @@ pub fn verify_header<'a>(
     // Since we're using a modulo operation, `signing_authority` is always inferior to
     // `current_authorities.len()`, meaning that it always fits in a `usize`.
     let signing_authority = usize::try_from(
-        slot_number % u64::try_from(config.current_authorities.len()).unwrap_or(u64::max_value()),
+        slot_number % u64::try_from(config.current_authorities.len()).unwrap_or(u64::MAX),
     )
     .unwrap_or_else(|_| unreachable!());
 

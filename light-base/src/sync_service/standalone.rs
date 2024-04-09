@@ -1254,7 +1254,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     network::codec::BlocksRequestConfig {
                         start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                         desired_count: NonZeroU32::new(
-                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                         )
                         .unwrap(),
                         // The direction is hardcoded based on the documentation of the syncing

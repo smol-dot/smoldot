@@ -235,34 +235,28 @@ pub struct MaxBytes(pub usize);
 fn parse_max_bytes(string: &str) -> Result<MaxBytes, String> {
     let (multiplier, num) = if let Some(s) = string.strip_suffix("Ti") {
         (
-            usize::try_from(1024 * 1024 * 1024 * 1024u64).unwrap_or(usize::max_value()),
+            usize::try_from(1024 * 1024 * 1024 * 1024u64).unwrap_or(usize::MAX),
             s,
         )
     } else if let Some(s) = string.strip_suffix('T') {
         (
-            usize::try_from(1000 * 1000 * 1000 * 1000u64).unwrap_or(usize::max_value()),
+            usize::try_from(1000 * 1000 * 1000 * 1000u64).unwrap_or(usize::MAX),
             s,
         )
     } else if let Some(s) = string.strip_suffix("Gi") {
         (
-            usize::try_from(1024 * 1024 * 1024u64).unwrap_or(usize::max_value()),
+            usize::try_from(1024 * 1024 * 1024u64).unwrap_or(usize::MAX),
             s,
         )
     } else if let Some(s) = string.strip_suffix('G') {
         (
-            usize::try_from(1000 * 1000 * 1000u64).unwrap_or(usize::max_value()),
+            usize::try_from(1000 * 1000 * 1000u64).unwrap_or(usize::MAX),
             s,
         )
     } else if let Some(s) = string.strip_suffix("Mi") {
-        (
-            usize::try_from(1024 * 1024u64).unwrap_or(usize::max_value()),
-            s,
-        )
+        (usize::try_from(1024 * 1024u64).unwrap_or(usize::MAX), s)
     } else if let Some(s) = string.strip_suffix('M') {
-        (
-            usize::try_from(1000 * 1000u64).unwrap_or(usize::max_value()),
-            s,
-        )
+        (usize::try_from(1000 * 1000u64).unwrap_or(usize::MAX), s)
     } else if let Some(s) = string.strip_suffix("ki") {
         (1024, s)
     } else if let Some(s) = string.strip_suffix('k') {

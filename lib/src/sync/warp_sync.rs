@@ -282,10 +282,8 @@ pub enum WarpSyncInitError {
 pub struct SourceId(usize);
 
 impl SourceId {
-    /// Returns the smallest possible [`SourceId`]. It is always inferior or equal to any other.
-    pub fn min_value() -> Self {
-        SourceId(usize::min_value())
-    }
+    /// Smallest possible [`SourceId`]. It is always inferior or equal to any other.
+    pub const MIN: Self = SourceId(usize::MIN);
 }
 
 // TODO: consider removing this entirely
@@ -713,10 +711,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 
         let obsolete_requests_indices = self
             .in_progress_requests_by_source
-            .range(
-                (to_remove, RequestId(usize::min_value()))
-                    ..=(to_remove, RequestId(usize::max_value())),
-            )
+            .range((to_remove, RequestId(usize::MIN))..=(to_remove, RequestId(usize::MAX)))
             .map(|(_, rq_id)| rq_id.0)
             .collect::<Vec<_>>();
         let mut obsolete_requests = Vec::with_capacity(obsolete_requests_indices.len());
@@ -850,7 +845,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                         if src.finalized_block_height
                             <= verify_queue_tail_block_number.saturating_add(
-                                u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
+                                u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::MAX),
                             )
                         {
                             return None;
@@ -907,7 +902,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             // have the highest chance for the block to not be pruned.
             let sources_with_block = self
                 .sources_by_finalized_height
-                .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                .range((self.warped_header_number, SourceId(usize::MIN))..)
                 .map(|(_, src_id)| src_id);
 
             either::Left(sources_with_block.map(move |source_id| {
@@ -939,7 +934,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 // have the highest chance for the block to not be pruned.
                 let sources_with_block = self
                     .sources_by_finalized_height
-                    .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                    .range((self.warped_header_number, SourceId(usize::MIN))..)
                     .map(|(_, src_id)| src_id);
 
                 either::Left(sources_with_block.map(move |source_id| {
@@ -978,7 +973,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                         // have the highest chance for the block to not be pruned.
                         let sources_with_block = self
                             .sources_by_finalized_height
-                            .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                            .range((self.warped_header_number, SourceId(usize::MIN))..)
                             .map(|(_, src_id)| src_id);
 
                         sources_with_block.map(move |source_id| {

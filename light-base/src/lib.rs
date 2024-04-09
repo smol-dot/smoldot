@@ -158,7 +158,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// A typical value is 128.
@@ -171,7 +171,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// While a typical reasonable value would be for example 64, existing UIs tend to start
@@ -935,13 +935,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests,
                 max_subscriptions,
-                // Note that the settings below are intentionally not exposed in the publicly
-                // available configuration, as "good" values depend on the global number of tasks.
-                // In other words, these constants are relative to the number of other things that
-                // happen within the client rather than absolute values. Since the user isn't
-                // supposed to know what happens within the client, they can't rationally decide
-                // what value is appropriate.
-                max_parallel_requests: NonZeroU32::new(24).unwrap(),
             });
 
             service_starter.start(json_rpc_service::StartConfig {
@@ -1002,7 +995,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         removed_chain
             .public_api_chain_destroyed_event
-            .notify(usize::max_value());
+            .notify(usize::MAX);
 
         // `chains_by_key` is created lazily when `add_chain` is called.
         // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
@@ -1042,7 +1035,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// API user is encouraged to stop sending requests and start pulling answers with
     /// [`JsonRpcResponses::next`].
     ///
-    /// Passing `u32::max_value()` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
+    /// Passing `u32::MAX` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
     /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
     /// trusted.
     ///

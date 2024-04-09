@@ -41,15 +41,15 @@ atomic-take = { version = "1.1.0" }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
-bs58 = { version = "0.5.0", default-features = false, features = ["alloc"] }
+bs58 = { version = "0.5.1", default-features = false, features = ["alloc"] }
 chacha20 = { version = "0.9.1", default-features = false }
 crossbeam-queue = { version = "0.3.11", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "4.0.1", default-features = false }
 either = { version = "1.9.0", default-features = false }
-event-listener = { version = "5.0.0", default-features = false }
+event-listener = { version = "5.3.0", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
-futures-lite = { version = "2.0.0", default-features = false, features = ["alloc"] }
+futures-lite = { version = "2.3.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
@@ -73,9 +73,9 @@ serde = { version = "1.0.183", default-features = false, features = ["alloc", "d
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.7", default-features = false }
 sha3 = { version = "0.10.8", default-features = false }
-siphasher = { version = "1.0.0", default-features = false }
+siphasher = { version = "1.0.1", default-features = false }
 slab = { version = "0.4.8", default-features = false }
-smallvec = { version = "1.13.1", default-features = false }
+smallvec = { version = "1.13.2", default-features = false }
 twox-hash = { version = "1.6.3", default-features = false }
 wasmi = { version = "0.32.0-beta.6", default-features = false }
 x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["alloc", "precomputed-tables", "static_secrets", "zeroize"] }

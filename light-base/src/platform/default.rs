@@ -336,7 +336,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
 impl Drop for DefaultPlatform {
     fn drop(&mut self) {
-        self.shutdown_notify.notify(usize::max_value());
+        self.shutdown_notify.notify(usize::MAX);
     }
 }
 
@@ -373,7 +373,7 @@ mod tests {
 
         // The platform is destroyed, but the task must still be running.
         assert!(matches!(rx.try_recv(), Ok(None)));
-        platform_destroyed.notify(usize::max_value());
+        platform_destroyed.notify(usize::MAX);
         assert!(matches!(smol::block_on(rx), Ok(())));
     }
 }

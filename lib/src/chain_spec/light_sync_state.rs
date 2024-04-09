@@ -147,6 +147,7 @@ fn gap_epochs<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // Necessary to silence warnings about unused fields.
 pub(super) enum PersistedEpochHeader {
     Genesis(EpochHeader, EpochHeader),
     Regular(EpochHeader),
@@ -192,6 +193,7 @@ fn epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // Necessary to silence warnings about unused fields.
 pub(super) enum PersistedEpoch {
     Genesis(BabeEpoch, BabeEpoch),
     Regular(BabeEpoch),
