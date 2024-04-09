@@ -19,7 +19,7 @@
 //!
 //! # Usage
 //!
-//! Create a new JSON-RPC service by calling [`service()`] then [`ServicePrototype::start`].
+//! Create a new JSON-RPC service by calling [`service()`].
 //! Creating a JSON-RPC service spawns a background task (through [`PlatformRef::spawn_task`])
 //! dedicated to processing JSON-RPC requests.
 //!
@@ -80,6 +80,39 @@ pub struct Config<TPlat: PlatformRef> {
     /// the client.
     // TODO: unused at the moment
     pub max_subscriptions: u32,
+
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
+    /// Service responsible for synchronizing the chain.
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// Service responsible for emitting transactions and tracking their state.
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+
+    /// Service that provides a ready-to-be-called runtime for the current best block.
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    pub chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
+
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    pub system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    pub system_version: String,
+
+    /// Hash of the genesis block of the chain.
+    pub genesis_block_hash: [u8; 32],
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -88,26 +121,44 @@ pub struct Config<TPlat: PlatformRef> {
 /// be initialized using [`ServicePrototype::start`].
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
-pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> (Frontend<TPlat>, ServicePrototype) {
+pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
     let log_target = format!("json-rpc-{}", config.log_name);
 
     let (requests_tx, requests_rx) = async_channel::unbounded(); // TODO: capacity?
     let (responses_tx, responses_rx) = async_channel::bounded(16); // TODO: capacity?
 
     let frontend = Frontend {
-        platform: config.platform,
+        platform: config.platform.clone(),
         log_target: log_target.clone(),
         responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
         requests_tx,
     };
 
-    let prototype = ServicePrototype {
-        log_target,
-        requests_rx,
-        responses_tx,
-    };
+    let platform = config.platform.clone();
+    platform.spawn_task(
+        Cow::Owned(log_target.clone()),
+        background::run(
+            log_target,
+            background::Config {
+                platform: config.platform,
+                network_service: config.network_service,
+                sync_service: config.sync_service,
+                transactions_service: config.transactions_service,
+                runtime_service: config.runtime_service,
+                chain_name: config.chain_name,
+                chain_ty: config.chain_ty,
+                chain_properties_json: config.chain_properties_json,
+                chain_is_live: config.chain_is_live,
+                system_name: config.system_name,
+                system_version: config.system_version,
+                genesis_block_hash: config.genesis_block_hash,
+            },
+            requests_rx,
+            responses_tx,
+        ),
+    );
 
-    (frontend, prototype)
+    frontend
 }
 
 /// Handle that allows sending JSON-RPC requests on the service.
@@ -180,70 +231,6 @@ impl<TPlat: PlatformRef> Frontend<TPlat> {
         );
 
         message
-    }
-}
-
-/// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
-pub struct ServicePrototype {
-    /// Target to use when emitting logs.
-    log_target: String,
-
-    requests_rx: async_channel::Receiver<String>,
-
-    responses_tx: async_channel::Sender<String>,
-}
-
-/// Configuration for a JSON-RPC service.
-pub struct StartConfig<TPlat: PlatformRef> {
-    /// Access to the platform's capabilities.
-    // TODO: redundant with Config above?
-    pub platform: TPlat,
-
-    /// Access to the network, and identifier of the chain from the point of view of the network
-    /// service.
-    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-
-    /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
-
-    /// Service responsible for emitting transactions and tracking their state.
-    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
-
-    /// Service that provides a ready-to-be-called runtime for the current best block.
-    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-
-    /// Name of the chain, as found in the chain specification.
-    pub chain_name: String,
-    /// Type of chain, as found in the chain specification.
-    pub chain_ty: String,
-    /// JSON-encoded properties of the chain, as found in the chain specification.
-    pub chain_properties_json: String,
-    /// Whether the chain is a live network. Found in the chain specification.
-    pub chain_is_live: bool,
-
-    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
-    /// final executable.
-    pub system_name: String,
-
-    /// Value to return when the `system_version` RPC is called. Should be set to the version of
-    /// the final executable.
-    pub system_version: String,
-
-    /// Hash of the genesis block of the chain.
-    pub genesis_block_hash: [u8; 32],
-
-    /// Hash of the storage trie root of the genesis block of the chain.
-    pub genesis_block_state_root: [u8; 32],
-}
-
-impl ServicePrototype {
-    /// Consumes this prototype and starts the service through [`PlatformRef::spawn_task`].
-    pub fn start<TPlat: PlatformRef>(self, config: StartConfig<TPlat>) {
-        let platform = config.platform.clone();
-        platform.spawn_task(
-            Cow::Owned(self.log_target.clone()),
-            background::run(self.log_target, config, self.requests_rx, self.responses_tx),
-        );
     }
 }
 

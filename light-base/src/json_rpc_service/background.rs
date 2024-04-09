@@ -22,8 +22,6 @@ use crate::{
     util::{self, SipHasherBuild},
 };
 
-use super::StartConfig;
-
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
@@ -54,6 +52,46 @@ use smoldot::{
     network::codec,
 };
 
+/// Configuration for a JSON-RPC service.
+pub(super) struct Config<TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    // TODO: redundant with Config above?
+    pub platform: TPlat,
+
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
+    /// Service responsible for synchronizing the chain.
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// Service responsible for emitting transactions and tracking their state.
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+
+    /// Service that provides a ready-to-be-called runtime for the current best block.
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    pub chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
+
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    pub system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    pub system_version: String,
+
+    /// Hash of the genesis block of the chain.
+    pub genesis_block_hash: [u8; 32],
+}
+
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
     /// Target to use for all the logs.
@@ -82,13 +120,13 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
-    /// See [`StartConfig::network_service`].
+    /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    /// See [`StartConfig::sync_service`].
+    /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    /// See [`StartConfig::runtime_service`].
+    /// See [`Config::runtime_service`].
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    /// See [`StartConfig::transactions_service`].
+    /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Tasks that are spawned by the service and running in the background.
@@ -445,7 +483,7 @@ struct GetKeysPagedCacheKey {
 
 pub(super) async fn run<TPlat: PlatformRef>(
     log_target: String,
-    config: StartConfig<TPlat>,
+    config: Config<TPlat>,
     requests_rx: async_channel::Receiver<String>,
     responses_tx: async_channel::Sender<String>,
 ) {
