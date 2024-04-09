@@ -9,7 +9,7 @@ jobs:
   cargo-update:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.77
     steps:
     - uses: actions/checkout@v4
     # Note: `cargo update --workspace` doesn't seem to have any effect.
@@ -17,16 +17,12 @@ jobs:
       working-directory: wasm-node/rust
     - run: cargo update
       working-directory: full-node
-    - run: cargo update
-      working-directory: fuzz
-    - uses: peter-evans/create-pull-request@v5
+    - uses: peter-evans/create-pull-request@v6
       with:
         # We use a custom secret (rather than the default GITHUB_TOKEN) so that opening the pull
         # request triggers other actions such as the CI checks. GitHub prevents actions that use
         # GITHUB_TOKEN from triggering further actions, to avoid recursive actions.
         token: ${{ secrets.GH_TOKEN }}
-        committer: Smoldot <pierre.krieger1708@gmail.com>
-        author: Smoldot <pierre.krieger1708@gmail.com>
         branch: cargo-update
         base: main
         title: Periodic `cargo update`

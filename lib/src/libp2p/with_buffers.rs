@@ -171,6 +171,8 @@ where
 {
     /// Waits until [`WithBuffers::read_write_access`] should be called again.
     ///
+    /// Returns immediately if [`WithBuffers::read_write_access`] has never been called.
+    ///
     /// Returns if an error happens on the socket. If an error happened in the past on the socket,
     /// the future never yields.
     pub async fn wait_read_write_again<F>(
@@ -181,8 +183,9 @@ where
     {
         let mut this = self.project();
 
-        // Return immediately if `wake_up_after <= now`.
+        // Return immediately if `read_write_access` was never called or if `wake_up_after <= now`.
         match (&*this.read_write_wake_up_after, &*this.read_write_now) {
+            (_, None) => return,
             (Some(when_wake_up), Some(now)) if *when_wake_up <= *now => {
                 return;
             }
@@ -235,7 +238,7 @@ where
                     }
                 },
                 SocketProj::Resolved(mut socket) => {
-                    if !*this.read_closed {
+                    if !*this.read_closed && *this.read_buffer_valid < this.read_buffer.len() {
                         let read_result = AsyncRead::poll_read(
                             socket.as_mut(),
                             cx,

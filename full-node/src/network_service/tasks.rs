@@ -49,8 +49,11 @@ pub(super) async fn connection_task(
     socket: impl Future<Output = Result<impl AsyncReadWrite, io::Error>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: channel::Sender<super::ToBackground>,
+    coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
+    connection_to_coordinator: channel::Sender<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
 ) {
     // The socket future is wrapped around an object containing a read buffer and a write buffer
     // and allowing easier usage.
@@ -58,7 +61,10 @@ pub(super) async fn connection_task(
 
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
-    let mut message_sending = None;
+    let mut message_sending = pin::pin!(None);
+
+    // Channel receivers need to be pinned.
+    let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     loop {
         // Because only one message should be sent to the coordinator at a time, and that
@@ -111,19 +117,13 @@ pub(super) async fn connection_task(
                 connection_task = task_update;
                 debug_assert!(message_sending.is_none());
                 if let Some(opaque_message) = opaque_message {
-                    message_sending = Some(connection_to_coordinator.send(
-                        super::ToBackground::FromConnectionTask {
-                            connection_id,
-                            opaque_message: Some(opaque_message),
-                        },
+                    message_sending.set(Some(
+                        connection_to_coordinator.send((connection_id, Some(opaque_message))),
                     ));
                 }
             } else {
                 let _ = connection_to_coordinator
-                    .send(super::ToBackground::FromConnectionTask {
-                        connection_id,
-                        opaque_message,
-                    })
+                    .send((connection_id, opaque_message))
                     .await;
                 return;
             }
@@ -169,12 +169,13 @@ pub(super) async fn connection_task(
             };
 
             let message_sent = async {
-                let result = if let Some(message_sending) = message_sending.as_mut() {
-                    message_sending.await
-                } else {
-                    future::pending().await
-                };
-                message_sending = None;
+                let result =
+                    if let Some(message_sending) = message_sending.as_mut().as_mut().as_pin_mut() {
+                        message_sending.await
+                    } else {
+                        future::pending().await
+                    };
+                message_sending.set(None);
                 if result.is_ok() {
                     WakeUpReason::MessageSent
                 } else {

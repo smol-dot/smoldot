@@ -109,7 +109,7 @@ pub struct JsonRpcService {
 
 impl Drop for JsonRpcService {
     fn drop(&mut self) {
-        self.service_dropped.notify(usize::max_value());
+        self.service_dropped.notify(usize::MAX);
     }
 }
 
@@ -148,8 +148,8 @@ impl JsonRpcService {
 
         let (virtual_client_main_task, virtual_client_io) =
             service::client_main_task(service::Config {
-                max_active_subscriptions: u32::max_value(),
-                max_pending_requests: NonZeroU32::new(u32::max_value()).unwrap(),
+                max_active_subscriptions: u32::MAX,
+                max_pending_requests: NonZeroU32::new(u32::MAX).unwrap(),
             });
 
         spawn_client_main_task(
@@ -262,7 +262,7 @@ struct JsonRpcBackground {
     tcp_listener: TcpListener,
 
     /// Event notified when the frontend is dropped.
-    on_service_dropped: Pin<Box<event_listener::EventListener>>,
+    on_service_dropped: event_listener::EventListener,
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
@@ -570,7 +570,7 @@ fn spawn_client_main_task(
                     client_main_task = task;
 
                     match request_process.request() {
-                        methods::MethodCall::chainHead_unstable_header {
+                        methods::MethodCall::chainHead_v1_header {
                             follow_subscription,
                             ..
                         } => {
@@ -585,10 +585,10 @@ fn spawn_client_main_task(
                                 // TODO racy; doesn't handle situation where follow subscription stops
                             } else {
                                 request_process
-                                    .respond(methods::Response::chainHead_unstable_header(None));
+                                    .respond(methods::Response::chainHead_v1_header(None));
                             }
                         }
-                        methods::MethodCall::chainHead_unstable_unpin {
+                        methods::MethodCall::chainHead_v1_unpin {
                             follow_subscription,
                             hash_or_hashes,
                         } => {
@@ -614,14 +614,12 @@ fn spawn_client_main_task(
 
                                 match outcome_rx.await {
                                     Err(_) => {
-                                        request_process.respond(
-                                            methods::Response::chainHead_unstable_unpin(()),
-                                        );
+                                        request_process
+                                            .respond(methods::Response::chainHead_v1_unpin(()));
                                     }
                                     Ok(Ok(())) => {
-                                        request_process.respond(
-                                            methods::Response::chainHead_unstable_unpin(()),
-                                        );
+                                        request_process
+                                            .respond(methods::Response::chainHead_v1_unpin(()));
                                     }
                                     Ok(Err(())) => {
                                         request_process.fail(service::ErrorResponse::InvalidParams);
@@ -645,7 +643,7 @@ fn spawn_client_main_task(
 
                     match subscription_start.request() {
                         // TODO: enforce limit to number of subscriptions
-                        methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                        methods::MethodCall::chainHead_v1_follow { with_runtime } => {
                             let (tx, rx) = async_channel::bounded(16);
                             let subscription_id =
                                 chain_head_subscriptions::spawn_chain_head_subscription_task(

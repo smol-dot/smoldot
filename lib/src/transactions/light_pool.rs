@@ -313,10 +313,7 @@ where
     ) -> impl Iterator<Item = TransactionId> + '_ {
         let hash = blake2_hash(scale_encoded);
         self.by_hash
-            .range(
-                (hash, TransactionId(usize::min_value()))
-                    ..=(hash, TransactionId(usize::max_value())),
-            )
+            .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
             .map(|(_, tx_id)| *tx_id)
     }
 
@@ -591,15 +588,15 @@ where
             let retracted = self.blocks_tree.get(to_retract_index).unwrap();
 
             for ((_, tx_id), index) in self.transactions_by_inclusion.range(
-                (retracted.hash, TransactionId(usize::min_value()))
-                    ..=(retracted.hash, TransactionId(usize::max_value())),
+                (retracted.hash, TransactionId(usize::MIN))
+                    ..=(retracted.hash, TransactionId(usize::MAX)),
             ) {
                 retracted_transactions.push((*tx_id, retracted.hash, *index));
             }
 
             for (_, tx_id) in self.transactions_by_validation.range(
-                (retracted.hash, TransactionId(usize::min_value()))
-                    ..=(retracted.hash, TransactionId(usize::max_value())),
+                (retracted.hash, TransactionId(usize::MIN))
+                    ..=(retracted.hash, TransactionId(usize::MAX)),
             ) {
                 self.transactions[tx_id.0].best_chain_validation = self.transactions[tx_id.0]
                     .finalized_chain_validation
@@ -615,15 +612,15 @@ where
             let included = self.blocks_tree.get(to_include_index).unwrap();
 
             for ((_, tx_id), index) in self.transactions_by_inclusion.range(
-                (included.hash, TransactionId(usize::min_value()))
-                    ..=(included.hash, TransactionId(usize::max_value())),
+                (included.hash, TransactionId(usize::MIN))
+                    ..=(included.hash, TransactionId(usize::MAX)),
             ) {
                 included_transactions.push((*tx_id, included.hash, *index));
             }
 
             for (_, tx_id) in self.transactions_by_validation.range(
-                (included.hash, TransactionId(usize::min_value()))
-                    ..=(included.hash, TransactionId(usize::max_value())),
+                (included.hash, TransactionId(usize::MIN))
+                    ..=(included.hash, TransactionId(usize::MAX)),
             ) {
                 let validation = self
                     .transaction_validations
@@ -714,10 +711,10 @@ where
             let included_body = included_body.as_ref();
             let hash = blake2_hash(included_body);
 
-            'tx_in_pool: for (_, known_tx_id) in self.by_hash.range(
-                (hash, TransactionId(usize::min_value()))
-                    ..=(hash, TransactionId(usize::max_value())),
-            ) {
+            'tx_in_pool: for (_, known_tx_id) in self
+                .by_hash
+                .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
+            {
                 let mut now_included = is_in_best_chain;
 
                 // Check in which other blocks this transaction has been seen before.
@@ -857,8 +854,8 @@ where
                 let validated_txs = self
                     .transactions_by_validation
                     .range(
-                        (block.hash, TransactionId(usize::min_value()))
-                            ..=(block.hash, TransactionId(usize::max_value())),
+                        (block.hash, TransactionId(usize::MIN))
+                            ..=(block.hash, TransactionId(usize::MAX)),
                     )
                     .map(|(_, tx)| *tx)
                     .collect::<Vec<_>>();
@@ -890,14 +887,8 @@ where
             let included_txs = self
                 .transactions_by_inclusion
                 .range(
-                    (
-                        pruned_block.user_data.hash,
-                        TransactionId(usize::min_value()),
-                    )
-                        ..=(
-                            pruned_block.user_data.hash,
-                            TransactionId(usize::max_value()),
-                        ),
+                    (pruned_block.user_data.hash, TransactionId(usize::MIN))
+                        ..=(pruned_block.user_data.hash, TransactionId(usize::MAX)),
                 )
                 .map(|((_, tx), _)| *tx)
                 .collect::<Vec<_>>();
@@ -916,14 +907,8 @@ where
             let validated_txs = self
                 .transactions_by_validation
                 .range(
-                    (
-                        pruned_block.user_data.hash,
-                        TransactionId(usize::min_value()),
-                    )
-                        ..=(
-                            pruned_block.user_data.hash,
-                            TransactionId(usize::max_value()),
-                        ),
+                    (pruned_block.user_data.hash, TransactionId(usize::MIN))
+                        ..=(pruned_block.user_data.hash, TransactionId(usize::MAX)),
                 )
                 .map(|(_, tx)| *tx)
                 .collect::<Vec<_>>();
@@ -1002,8 +987,8 @@ where
             let included_transactions_ids = self
                 .transactions_by_inclusion
                 .range(
-                    (pruned.user_data.hash, TransactionId(usize::min_value()))
-                        ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
+                    (pruned.user_data.hash, TransactionId(usize::MIN))
+                        ..=(pruned.user_data.hash, TransactionId(usize::MAX)),
                 )
                 .map(|((_, tx_id), index)| (*tx_id, *index))
                 .collect::<Vec<_>>();
@@ -1059,8 +1044,8 @@ where
             let validated_txs = self
                 .transactions_by_validation
                 .range(
-                    (pruned.user_data.hash, TransactionId(usize::min_value()))
-                        ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
+                    (pruned.user_data.hash, TransactionId(usize::MIN))
+                        ..=(pruned.user_data.hash, TransactionId(usize::MAX)),
                 )
                 .map(|(_, tx)| *tx)
                 .collect::<Vec<_>>();

@@ -80,7 +80,7 @@
 //! obtain the list of requests that should be started.
 //!
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
-//! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
+//! Call [`PendingBlocks::remove_request`] to destroy a request after it has finished or been
 //! canceled. Note that this method doesn't require to be passed the response to that request.
 //! The user is encouraged to update the state machine according to the response, but this must
 //! be done manually.
@@ -116,7 +116,7 @@ pub struct Config {
 
     /// If `true`, block bodies are downloaded and verified. If `false`, only headers are
     /// verified.
-    pub verify_bodies: bool,
+    pub download_bodies: bool,
 
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
@@ -172,8 +172,8 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// Blocks whose validity couldn't be determined yet.
     blocks: disjoint::DisjointBlocks<UnverifiedBlock<TBl>>,
 
-    /// See [`Config::verify_bodies`].
-    verify_bodies: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// Set of `(block_height, block_hash, request_id)`.
     /// Contains the list of all requests, associated to their block.
@@ -232,18 +232,22 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 config.finalized_block_height,
             ),
             blocks: disjoint::DisjointBlocks::with_capacity(config.blocks_capacity),
-            verify_bodies: config.verify_bodies,
+            download_bodies: config.download_bodies,
             blocks_requests: Default::default(),
             requested_blocks: Default::default(),
             source_occupations: Default::default(),
             requests: slab::Slab::with_capacity(
                 config.blocks_capacity
-                    * usize::try_from(config.max_requests_per_block.get())
-                        .unwrap_or(usize::max_value()),
+                    * usize::try_from(config.max_requests_per_block.get()).unwrap_or(usize::MAX),
             ),
             max_requests_per_block: usize::try_from(config.max_requests_per_block.get())
-                .unwrap_or(usize::max_value()),
+                .unwrap_or(usize::MAX),
         }
+    }
+
+    /// Returns the value that was passed as [`Config::download_bodies`]
+    pub fn downloading_bodies(&self) -> bool {
+        self.download_bodies
     }
 
     /// Add a new source to the container.
@@ -280,10 +284,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
         let source_occupations_entries = self
             .source_occupations
-            .range(
-                (source_id, RequestId(usize::min_value()))
-                    ..=(source_id, RequestId(usize::max_value())),
-            )
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
             .copied()
             .collect::<Vec<_>>();
 
@@ -412,10 +413,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         self.source_occupations
-            .range(
-                (source_id, RequestId(usize::min_value()))
-                    ..=(source_id, RequestId(usize::max_value())),
-            )
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
             .count()
     }
 
@@ -677,7 +675,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// blocks. These blocks can potentially be verified.
     ///
     /// All the returned block are guaranteed to be in a "header known" state. If
-    /// [`Config::verify_bodies`] if `true`, they they are also guaranteed to be in a "body known"
+    /// [`Config::download_bodies`] if `true`, they they are also guaranteed to be in a "body known"
     /// state.
     ///
     /// > **Note**: The naming of this function assumes that all blocks that are referenced by
@@ -692,7 +690,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 .state
             {
                 UnverifiedBlockState::HeightHash => false,
-                UnverifiedBlockState::Header { .. } => !self.verify_bodies,
+                UnverifiedBlockState::Header { .. } => !self.download_bodies,
                 UnverifiedBlockState::HeaderBody { .. } => true,
             }
         })
@@ -808,7 +806,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         request_id
     }
 
-    /// Marks a request as finished.
+    /// Removes a request from the state machine.
     ///
     /// Returns the parameters that were passed to [`PendingBlocks::add_request`].
     ///
@@ -824,17 +822,14 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     #[track_caller]
-    pub fn finish_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
+    pub fn remove_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
         assert!(self.requests.contains(request_id.0));
         let request = self.requests.remove(request_id.0);
 
         // Update `requested_blocks`.
         let blocks_to_remove = self
             .requested_blocks
-            .range(
-                (request_id, u64::min_value(), [0; 32])
-                    ..=(request_id, u64::max_value(), [0xff; 32]),
-            )
+            .range((request_id, u64::MIN, [0; 32])..=(request_id, u64::MAX, [0xff; 32]))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -868,12 +863,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     #[track_caller]
-    pub fn request_source(&self, request_id: RequestId) -> SourceId {
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
         self.requests.get(request_id.0).unwrap().source_id
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
-    /// [`PendingBlocks::finish_request`].
+    /// [`PendingBlocks::remove_request`].
     ///
     /// A request is considered obsolete if the state of the requested blocks changes in such a
     /// way that they don't need to be requested anymore. The request wouldn't be returned by
@@ -896,7 +891,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// In details, the requests concern:
     ///
-    /// - If [`Config::verify_bodies`] was `true`, downloading the body of blocks whose body is
+    /// - If [`Config::download_bodies`] was `true`, downloading the body of blocks whose body is
     /// unknown.
     /// - Downloading headers of blocks whose state is [`UnverifiedBlockState::HeightHash`].
     ///
@@ -958,7 +953,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // TODO: could provide more optimized requests by avoiding potentially overlapping requests (e.g. if blocks #4 and #5 are unknown, ask for block #5 with num_blocks=2), but this is complicated because peers aren't obligated to respond with the given number of blocks
 
         // List of blocks whose header is known but not its body.
-        let unknown_body_iter = if self.verify_bodies {
+        let unknown_body_iter = if self.download_bodies {
             either::Left(
                 self.blocks
                     .iter()
@@ -997,8 +992,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // Combine the two block iterators and find sources.
         // There isn't any overlap between the two iterators.
         unknown_body_iter
-            .chain(unknown_header_iter)
-            .filter(move |(unknown_block_height, unknown_block_hash)| {
+            .map(|(n, h)| (n, h, false))
+            .chain(unknown_header_iter.map(|(n, h)| (n, h, true)))
+            .filter(move |(unknown_block_height, unknown_block_hash, _)| {
                 // Cap by `max_requests_per_block`.
                 // TODO: O(n)?
                 let num_existing_requests = self
@@ -1007,79 +1003,83 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                         (
                             *unknown_block_height,
                             **unknown_block_hash,
-                            RequestId(usize::min_value()),
+                            RequestId(usize::MIN),
                         )
                             ..=(
                                 *unknown_block_height,
                                 **unknown_block_hash,
-                                RequestId(usize::max_value()),
+                                RequestId(usize::MAX),
                             ),
                     )
                     .count();
 
-                debug_assert!(num_existing_requests <= self.max_requests_per_block);
                 num_existing_requests < self.max_requests_per_block
             })
-            .flat_map(move |(unknown_block_height, unknown_block_hash)| {
-                // Try to find all appropriate sources.
-                let possible_sources = if let Some(force_source) = force_source {
-                    either::Left(iter::once(force_source).filter(move |id| {
-                        self.sources.source_knows_non_finalized_block(
-                            *id,
-                            unknown_block_height,
-                            unknown_block_hash,
-                        )
-                    }))
-                } else {
-                    either::Right(
-                        self.sources
-                            .knows_non_finalized_block(unknown_block_height, unknown_block_hash),
-                    )
-                };
-
-                possible_sources
-                    .filter(move |source_id| {
-                        // Don't start any request towards this source if there's another request
-                        // for the same block from the same source.
-                        // TODO: O(n)?
-                        !self
-                            .blocks_requests
-                            .range(
-                                (
+            .flat_map(
+                move |(unknown_block_height, unknown_block_hash, download_many)| {
+                    // Try to find all appropriate sources.
+                    let possible_sources =
+                        if let Some(force_source) = force_source {
+                            either::Left(iter::once(force_source).filter(move |id| {
+                                self.sources.source_knows_non_finalized_block(
+                                    *id,
                                     unknown_block_height,
-                                    *unknown_block_hash,
-                                    RequestId(usize::min_value()),
+                                    unknown_block_hash,
                                 )
-                                    ..=(
+                            }))
+                        } else {
+                            either::Right(self.sources.knows_non_finalized_block(
+                                unknown_block_height,
+                                unknown_block_hash,
+                            ))
+                        };
+
+                    possible_sources
+                        .filter(move |source_id| {
+                            // Don't start any request towards this source if there's another request
+                            // for the same block from the same source.
+                            // TODO: O(n)?
+                            !self
+                                .blocks_requests
+                                .range(
+                                    (
                                         unknown_block_height,
                                         *unknown_block_hash,
-                                        RequestId(usize::max_value()),
-                                    ),
-                            )
-                            .any(|(_, _, request_id)| {
-                                self.requests[request_id.0].source_id == *source_id
-                            })
-                    })
-                    .map(move |source_id| {
-                        debug_assert!(self.sources.source_knows_non_finalized_block(
-                            source_id,
-                            unknown_block_height,
-                            unknown_block_hash
-                        ));
-
-                        DesiredRequest {
-                            source_id,
-                            request_params: RequestParams {
-                                first_block_hash: *unknown_block_hash,
-                                first_block_height: unknown_block_height,
-                                num_blocks: NonZeroU64::new(
-                                    unknown_block_height - self.sources.finalized_block_height(),
+                                        RequestId(usize::MIN),
+                                    )
+                                        ..=(
+                                            unknown_block_height,
+                                            *unknown_block_hash,
+                                            RequestId(usize::MAX),
+                                        ),
                                 )
-                                .unwrap(),
-                            },
-                        }
-                    })
-            })
+                                .any(|(_, _, request_id)| {
+                                    self.requests[request_id.0].source_id == *source_id
+                                })
+                        })
+                        .map(move |source_id| {
+                            debug_assert!(self.sources.source_knows_non_finalized_block(
+                                source_id,
+                                unknown_block_height,
+                                unknown_block_hash
+                            ));
+
+                            DesiredRequest {
+                                source_id,
+                                request_params: RequestParams {
+                                    first_block_hash: *unknown_block_hash,
+                                    first_block_height: unknown_block_height,
+                                    num_blocks: NonZeroU64::new(if download_many {
+                                        unknown_block_height - self.sources.finalized_block_height()
+                                    } else {
+                                        1
+                                    })
+                                    .unwrap(),
+                                },
+                            }
+                        })
+                },
+            )
     }
 }
 

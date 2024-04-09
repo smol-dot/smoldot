@@ -40,19 +40,25 @@
 mod background;
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service,
 };
 
 use alloc::{
+    borrow::Cow,
+    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
 };
-use core::num::NonZeroU32;
-use smoldot::{chain_spec, json_rpc::service};
+use core::{num::NonZeroU32, pin::Pin};
+use futures_lite::StreamExt as _;
 
 /// Configuration for [`service()`].
-pub struct Config {
+pub struct Config<TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -64,6 +70,7 @@ pub struct Config {
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
+    // TODO: unused at the moment
     pub max_pending_requests: NonZeroU32,
 
     /// Maximum number of active subscriptions. Any additional subscription will be immediately
@@ -71,13 +78,8 @@ pub struct Config {
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
+    // TODO: unused at the moment
     pub max_subscriptions: u32,
-
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
-    pub max_parallel_requests: NonZeroU32,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -86,24 +88,23 @@ pub struct Config {
 /// be initialized using [`ServicePrototype::start`].
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
-pub fn service(config: Config) -> (Frontend, ServicePrototype) {
+pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> (Frontend<TPlat>, ServicePrototype) {
     let log_target = format!("json-rpc-{}", config.log_name);
 
-    let (requests_processing_task, requests_responses_io) =
-        service::client_main_task(service::Config {
-            max_active_subscriptions: config.max_subscriptions,
-            max_pending_requests: config.max_pending_requests,
-        });
+    let (requests_tx, requests_rx) = async_channel::unbounded(); // TODO: capacity?
+    let (responses_tx, responses_rx) = async_channel::bounded(16); // TODO: capacity?
 
     let frontend = Frontend {
+        platform: config.platform,
         log_target: log_target.clone(),
-        requests_responses_io: Arc::new(requests_responses_io),
+        responses_rx: Arc::new(async_lock::Mutex::new(Box::pin(responses_rx))),
+        requests_tx,
     };
 
     let prototype = ServicePrototype {
         log_target,
-        requests_processing_task,
-        max_parallel_requests: config.max_parallel_requests,
+        requests_rx,
+        responses_tx,
     };
 
     (frontend, prototype)
@@ -116,17 +117,22 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 ///
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
-pub struct Frontend {
-    /// Sending requests and receiving responses.
-    ///
-    /// Connected to the [`background`].
-    requests_responses_io: Arc<service::SerializedRequestsIo>,
+pub struct Frontend<TPlat> {
+    /// See [`Config::platform`].
+    platform: TPlat,
+
+    /// How to send requests to the background task.
+    requests_tx: async_channel::Sender<String>,
+
+    /// How to receive responses coming from the background task.
+    // TODO: we use an Arc so that it's clonable, but that's questionnable
+    responses_rx: Arc<async_lock::Mutex<Pin<Box<async_channel::Receiver<String>>>>>,
 
     /// Target to use when emitting logs.
     log_target: String,
 }
 
-impl Frontend {
+impl<TPlat: PlatformRef> Frontend<TPlat> {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
@@ -137,28 +143,20 @@ impl Frontend {
             crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
 
-        match self
-            .requests_responses_io
-            .try_send_request(json_rpc_request)
-        {
+        match self.requests_tx.try_send(json_rpc_request) {
             Ok(()) => {
-                log::debug!(
-                    target: &self.log_target,
-                    "JSON-RPC => {}",
-                    log_friendly_request
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    "json-rpc-request-queued",
+                    request = log_friendly_request
                 );
                 Ok(())
             }
-            Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::TooManyPendingRequests,
-                request,
-            }) => Err(HandleRpcError::TooManyPendingRequests {
-                json_rpc_request: request,
+            Err(err) => Err(HandleRpcError::TooManyPendingRequests {
+                json_rpc_request: err.into_inner(),
             }),
-            Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
-                ..
-            }) => unreachable!(),
         }
     }
 
@@ -167,18 +165,18 @@ impl Frontend {
     /// If this function is called multiple times in parallel, the order in which the calls are
     /// responded to is unspecified.
     pub async fn next_json_rpc_response(&self) -> String {
-        let message = match self.requests_responses_io.wait_next_response().await {
-            Ok(m) => m,
-            Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
+        let message = match self.responses_rx.lock().await.next().await {
+            Some(m) => m,
+            None => unreachable!(),
         };
 
-        log::debug!(
-            target: &self.log_target,
-            "JSON-RPC <= {}",
-            crate::util::truncated_str(
-                message.chars().filter(|c| !c.is_control()),
-                250,
-            )
+        log!(
+            &self.platform,
+            Debug,
+            &self.log_target,
+            "json-rpc-response-yielded",
+            response =
+                crate::util::truncated_str(message.chars().filter(|c| !c.is_control()), 250,)
         );
 
         message
@@ -187,21 +185,18 @@ impl Frontend {
 
 /// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
 pub struct ServicePrototype {
-    /// Task processing the requests.
-    ///
-    /// Later sent to the [`background`].
-    requests_processing_task: service::ClientMainTask,
-
     /// Target to use when emitting logs.
     log_target: String,
 
-    /// Value obtained through [`Config::max_parallel_requests`].
-    max_parallel_requests: NonZeroU32,
+    requests_rx: async_channel::Receiver<String>,
+
+    responses_tx: async_channel::Sender<String>,
 }
 
 /// Configuration for a JSON-RPC service.
-pub struct StartConfig<'a, TPlat: PlatformRef> {
+pub struct StartConfig<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
+    // TODO: redundant with Config above?
     pub platform: TPlat,
 
     /// Access to the network, and identifier of the chain from the point of view of the network
@@ -217,8 +212,14 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Specification of the chain.
-    pub chain_spec: &'a chain_spec::ChainSpec,
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    pub chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.
@@ -229,33 +230,20 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
     pub system_version: String,
 
     /// Hash of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`ServicePrototype::start`] function could in theory use the
-    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_hash: [u8; 32],
 
     /// Hash of the storage trie root of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`ServicePrototype::start`] function could in theory use the
-    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_state_root: [u8; 32],
 }
 
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`PlatformRef::spawn_task`].
-    pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
-        background::start(
-            self.log_target.clone(),
-            config,
-            self.requests_processing_task,
-            self.max_parallel_requests,
-        )
+    pub fn start<TPlat: PlatformRef>(self, config: StartConfig<TPlat>) {
+        let platform = config.platform.clone();
+        platform.spawn_task(
+            Cow::Owned(self.log_target.clone()),
+            background::run(self.log_target, config, self.requests_rx, self.responses_tx),
+        );
     }
 }
 

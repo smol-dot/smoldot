@@ -16,11 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, platform::PlatformRef, runtime_service, util};
+use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{
-    iter, mem,
+    mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -31,7 +31,6 @@ use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
-    executor::{host, runtime_host},
     header,
     informant::HashDisplay,
     libp2p::PeerId,
@@ -46,7 +45,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     finalized_block_header: Vec<u8>,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
-    relay_chain_block_number_bytes: usize,
     parachain_id: u32,
     from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -55,7 +53,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         log_target,
         from_foreground,
         block_number_bytes,
-        relay_chain_block_number_bytes,
         parachain_id,
         from_network_service: None,
         network_service,
@@ -80,7 +77,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let relay_chain_sync = relay_chain_sync.clone();
                 Box::pin(async move {
                     relay_chain_sync
-                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                         .await
                 })
             },
@@ -105,9 +102,6 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
 
     /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,
-
-    /// Number of bytes to use to encode the relay chain block numbers in headers.
-    relay_chain_block_number_bytes: usize,
 
     /// Id of the parachain registered within the relay chain. Chosen by the user.
     parachain_id: u32,
@@ -212,6 +206,9 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
         loop {
+            // Yield at every loop in order to provide better tasks granularity.
+            futures_lite::future::yield_now().await;
+
             // Wait until something interesting happens.
             enum WakeUpReason<TPlat: PlatformRef> {
                 ForegroundClosed,
@@ -339,14 +336,21 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (WakeUpReason::NewSubscription(relay_chain_subscribe_all), _) => {
                     // Subscription to the relay chain has finished.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => NewSubscription(finalized_hash={})",
-                        HashDisplay(&header::hash_from_scale_encoded_header(
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-new-subscription",
+                        finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                             &relay_chain_subscribe_all.finalized_block_scale_encoded_header
                         ))
                     );
-                    log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operations-cleared"
+                    );
 
                     let async_tree = {
                         let mut async_tree =
@@ -362,7 +366,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         );
                         let finalized_index =
                             async_tree.input_insert_block(finalized_hash, None, false, true);
-                        async_tree.input_finalize(finalized_index, finalized_index);
+                        async_tree.input_finalize(finalized_index);
                         for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -410,11 +414,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                         match update {
                             async_tree::OutputUpdate::Finalized {
-                                async_op_user_data: new_finalized_parahead,
                                 former_finalized_async_op_user_data: former_finalized_parahead,
                                 pruned_blocks,
+                                best_output_block_updated,
                                 ..
-                            } if *new_finalized_parahead != former_finalized_parahead => {
+                            } if *runtime_subscription
+                                .async_tree
+                                .output_finalized_async_user_data()
+                                != former_finalized_parahead =>
+                            {
+                                let new_finalized_parahead = runtime_subscription
+                                    .async_tree
+                                    .output_finalized_async_user_data();
                                 debug_assert!(new_finalized_parahead.is_some());
 
                                 // If this is the first time a finalized parahead is known, any
@@ -451,6 +462,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 }
 
                                 // Must unpin the pruned blocks if they haven't already been unpinned.
+                                let mut pruned_blocks_hashes =
+                                    Vec::with_capacity(pruned_blocks.len());
                                 for (_, hash, pruned_block_parahead) in pruned_blocks {
                                     if pruned_block_parahead.is_none() {
                                         runtime_subscription
@@ -458,12 +471,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             .unpin_block(hash)
                                             .await;
                                     }
+                                    pruned_blocks_hashes.push(hash);
                                 }
 
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Subscriptions <= ParablockFinalized(hash={})",
-                                    HashDisplay(&hash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-parablock-finalized",
+                                    hash = HashDisplay(&hash)
                                 );
 
                                 let best_block_hash = runtime_subscription
@@ -486,7 +502,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                         runtime_subscription.all_subscriptions.swap_remove(index);
                                     let notif = super::Notification::Finalized {
                                         hash,
-                                        best_block_hash,
+                                        best_block_hash_if_changed: if best_output_block_updated {
+                                            Some(best_block_hash)
+                                        } else {
+                                            None
+                                        },
+                                        pruned_blocks: pruned_blocks_hashes.clone(),
                                     };
                                     if sender.try_send(notif).is_ok() {
                                         runtime_subscription.all_subscriptions.push(sender);
@@ -532,10 +553,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             .await;
                                     }
 
-                                    log::debug!(
-                                        target: &self.log_target,
-                                        "Subscriptions <= BestBlockChanged(hash={})",
-                                        HashDisplay(&parahash)
+                                    log!(
+                                        &self.platform,
+                                        Debug,
+                                        &self.log_target,
+                                        "subscriptions-notify-best-block-changed",
+                                        hash = HashDisplay(&parahash)
                                     );
 
                                     // Elements in `all_subscriptions` are removed one by one and
@@ -560,11 +583,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 // `block` borrows `async_tree`. We need to mutably access `async_tree`
                                 // below, so deconstruct `block` beforehand.
                                 let is_new_best = block.is_new_best;
-                                let scale_encoded_header: Vec<u8> =
-                                    block.async_op_user_data.clone().unwrap();
+                                let block_index = block.index;
+                                let scale_encoded_header: Vec<u8> = runtime_subscription
+                                    .async_tree
+                                    .block_async_user_data(block.index)
+                                    .unwrap()
+                                    .clone()
+                                    .unwrap();
                                 let parahash =
                                     header::hash_from_scale_encoded_header(&scale_encoded_header);
-                                let block_index = block.index;
 
                                 // Do not report anything to subscriptions if no finalized parahead is
                                 // known yet.
@@ -609,10 +636,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                                 .await;
                                         }
 
-                                        log::debug!(
-                                            target: &self.log_target,
-                                            "Subscriptions <= BestBlockChanged(hash={})",
-                                            HashDisplay(&parahash)
+                                        log!(
+                                            &self.platform,
+                                            Debug,
+                                            &self.log_target,
+                                            "subscriptions-notify-best-block-changed",
+                                            hash = HashDisplay(&parahash)
                                         );
 
                                         // Elements in `all_subscriptions` are removed one by one and
@@ -635,10 +664,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     continue;
                                 }
 
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Subscriptions <= NewParablock(hash={})",
-                                    HashDisplay(&parahash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-new-parablock",
+                                    hash = HashDisplay(&parahash)
                                 );
 
                                 if is_new_best {
@@ -715,27 +746,27 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 Box::pin(future::pending());
                         }
                         async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                            log::debug!(
-                                target: &self.log_target,
-                                "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
-                                HashDisplay(op.block_user_data),
+                            log!(
+                                &self.platform,
+                                Debug,
+                                &self.log_target,
+                                "parahead-fetch-operation-started",
+                                relay_block_hash =
+                                    HashDisplay(&runtime_subscription.async_tree[op.block_index]),
                             );
 
                             runtime_subscription.in_progress_paraheads.push({
                                 let relay_chain_sync = self.relay_chain_sync.clone();
                                 let subscription_id =
                                     runtime_subscription.relay_chain_subscribe_all.id();
-                                let block_hash = *op.block_user_data;
+                                let block_hash = runtime_subscription.async_tree[op.block_index];
                                 let async_op_id = op.id;
-                                let relay_chain_block_number_bytes =
-                                    self.relay_chain_block_number_bytes;
                                 let parachain_id = self.parachain_id;
                                 Box::pin(async move {
                                     (
                                         async_op_id,
                                         fetch_parahead(
                                             &relay_chain_sync,
-                                            relay_chain_block_number_bytes,
                                             subscription_id,
                                             parachain_id,
                                             &block_hash,
@@ -755,17 +786,31 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (
                     WakeUpReason::Notification(runtime_service::Notification::Finalized {
                         hash,
-                        best_block_hash,
+                        best_block_hash_if_changed,
                         ..
                     }),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // Relay chain has a new finalized block.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => Finalized(hash={})",
-                        HashDisplay(&hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-block-finalized",
+                        hash = HashDisplay(&hash)
                     );
+
+                    if let Some(best_block_hash_if_changed) = best_block_hash_if_changed {
+                        let best = runtime_subscription
+                            .async_tree
+                            .input_output_iter_unordered()
+                            .find(|b| *b.user_data == best_block_hash_if_changed)
+                            .unwrap()
+                            .id;
+                        runtime_subscription
+                            .async_tree
+                            .input_set_best_block(Some(best));
+                    }
 
                     let finalized = runtime_subscription
                         .async_tree
@@ -773,15 +818,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .find(|b| *b.user_data == hash)
                         .unwrap()
                         .id;
-                    let best = runtime_subscription
-                        .async_tree
-                        .input_output_iter_unordered()
-                        .find(|b| *b.user_data == best_block_hash)
-                        .unwrap()
-                        .id;
-                    runtime_subscription
-                        .async_tree
-                        .input_finalize(finalized, best);
+                    runtime_subscription.async_tree.input_finalize(finalized);
                     runtime_subscription.must_process_sync_tree = true;
                 }
 
@@ -792,11 +829,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Relay chain has a new block.
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => Block(hash={}, parent_hash={})",
-                        HashDisplay(&hash),
-                        HashDisplay(&block.parent_hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-new-block",
+                        hash = HashDisplay(&hash),
+                        parent_hash = HashDisplay(&block.parent_hash)
                     );
 
                     let parent = runtime_subscription
@@ -822,10 +861,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // Relay chain has a new best block.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => BestBlockChanged(hash={})",
-                        HashDisplay(&hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-best-block-changed",
+                        hash = HashDisplay(&hash)
                     );
 
                     // If the block isn't found in `async_tree`, assume that it is equal to the
@@ -844,17 +885,19 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (WakeUpReason::SubscriptionDead, _) => {
                     // Recreate the channel.
-                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-subscription-reset"
+                    );
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
                         all_subscriptions: Vec::new(),
                         subscribe_future: {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(
-                                        32,
-                                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                                    )
+                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -869,11 +912,19 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // A parahead fetching operation is successful.
-                    log::debug!(
-                        target: &self.log_target,
-                        "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
-                        HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
-                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operation-success",
+                        parahead_hash = HashDisplay(
+                            blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()
+                        ),
+                        relay_blocks = runtime_subscription
+                            .async_tree
+                            .async_op_blocks(async_op_id)
+                            .map(|b| HashDisplay(b))
+                            .join(",")
                     );
 
                     // Unpin the relay blocks whose parahead is now known.
@@ -881,7 +932,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .async_tree
                         .async_op_finished(async_op_id, Some(parahead))
                     {
-                        let hash = runtime_subscription.async_tree.block_user_data(block);
+                        let hash = &runtime_subscription.async_tree[block];
                         runtime_subscription
                             .relay_chain_subscribe_all
                             .unpin_block(*hash)
@@ -895,7 +946,10 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (
                     WakeUpReason::ParaheadFetchFinished {
-                        parahead_result: Err(ParaheadError::ObsoleteSubscription),
+                        parahead_result:
+                            Err(ParaheadError::PinRuntimeError(
+                                runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription,
+                            )),
                         ..
                     },
                     _,
@@ -903,17 +957,19 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // The relay chain runtime service has some kind of gap or issue and has
                     // discarded the runtime.
                     // Destroy the subscription and recreate the channels.
-                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-subscription-reset"
+                    );
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
                         all_subscriptions: Vec::new(),
                         subscribe_future: {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(
-                                        32,
-                                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                                    )
+                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -943,19 +999,33 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .await
                         && !error.is_network_problem()
                     {
-                        log::error!(
-                            target: &self.log_target,
-                            "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                            runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
-                            error
+                        log!(
+                            &self.platform,
+                            Error,
+                            &self.log_target,
+                            format!(
+                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                runtime_subscription
+                                    .async_tree
+                                    .async_op_blocks(async_op_id)
+                                    .map(|b| HashDisplay(b))
+                                    .join(", "),
+                                error
+                            )
                         );
                     }
 
-                    log::debug!(
-                        target: &self.log_target,
-                        "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
-                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
-                        error
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operation-error",
+                        relay_blocks = runtime_subscription
+                            .async_tree
+                            .async_op_blocks(async_op_id)
+                            .map(|b| HashDisplay(b))
+                            .join(","),
+                        ?error
                     );
 
                     runtime_subscription
@@ -1287,150 +1357,43 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
 async fn fetch_parahead<TPlat: PlatformRef>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
-    relay_chain_block_number_bytes: usize,
     subscription_id: runtime_service::SubscriptionId,
     parachain_id: u32,
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
-    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-    // order to know where the parachains are.
-    let precall = match relay_chain_sync
-        .pinned_block_runtime_access(subscription_id, *block_hash)
+    // Call `ParachainHost_persisted_validation_data` in order to know where the parachain is.
+    let (pinned_runtime, block_state_trie_root, block_number) = relay_chain_sync
+        .pin_pinned_block_runtime(subscription_id, *block_hash)
         .await
-    {
-        Ok(p) => p,
-        Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-            return Err(ParaheadError::ObsoleteSubscription)
-        }
-    };
-
-    let (runtime_call_lock, virtual_machine) = precall
-        .start(
-            para::PERSISTED_VALIDATION_FUNCTION_NAME,
+        .map_err(ParaheadError::PinRuntimeError)?;
+    let success = relay_chain_sync
+        .runtime_call(
+            pinned_runtime,
+            *block_hash,
+            block_number,
+            block_state_trie_root,
+            para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
+            None, // TODO: /!\
             para::persisted_validation_data_parameters(
                 parachain_id,
                 para::OccupiedCoreAssumption::TimedOut,
-            ),
+            )
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
             6,
             Duration::from_secs(10),
             NonZeroU32::new(2).unwrap(),
         )
         .await
-        .map_err(ParaheadError::Call)?;
-
-    // TODO: move the logic below in the `para` module
-
-    let mut runtime_call = match runtime_host::run(runtime_host::Config {
-        virtual_machine,
-        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
-        parameter: para::persisted_validation_data_parameters(
-            parachain_id,
-            para::OccupiedCoreAssumption::TimedOut,
-        ),
-        max_log_level: 0,
-        storage_main_trie_changes: Default::default(),
-        calculate_trie_changes: false,
-    }) {
-        Ok(vm) => vm,
-        Err((err, prototype)) => {
-            runtime_call_lock.unlock(prototype);
-            return Err(ParaheadError::StartError(err));
-        }
-    };
-
-    let output = loop {
-        match runtime_call {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let output = success.virtual_machine.value().as_ref().to_owned();
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break output;
-            }
-            runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                runtime_call_lock.unlock(error.prototype);
-                return Err(ParaheadError::Runtime(error.detail));
-            }
-            runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = {
-                    let child_trie = get.child_trie();
-                    runtime_call_lock
-                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                };
-                let storage_value = match storage_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call =
-                    get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
-            }
-            runtime_host::RuntimeHostVm::NextKey(nk) => {
-                let next_key = {
-                    let child_trie = nk.child_trie();
-                    runtime_call_lock.next_key(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        &nk.key().collect::<Vec<_>>(),
-                        nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
-                        nk.branch_nodes(),
-                    )
-                };
-                let next_key = match next_key {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
-            }
-            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                let merkle_value = {
-                    let child_trie = mv.child_trie();
-                    runtime_call_lock.closest_descendant_merkle_value(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        &mv.key().collect::<Vec<_>>(),
-                    )
-                };
-                let merkle_value = match merkle_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
-                                .into_prototype(),
-                        );
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call = mv.inject_merkle_value(merkle_value);
-            }
-            runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                runtime_call = sig.verify_and_resume();
-            }
-            runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
-                // Do nothing.
-                runtime_call = req.resume();
-            }
-            runtime_host::RuntimeHostVm::Offchain(req) => {
-                runtime_call_lock
-                    .unlock(runtime_host::RuntimeHostVm::Offchain(req).into_prototype());
-                return Err(ParaheadError::OffchainWorkerHostFunction);
-            }
-            runtime_host::RuntimeHostVm::LogEmit(log) => {
-                // Logs are ignored.
-                runtime_call = log.resume();
-            }
-        }
-    };
+        .map_err(ParaheadError::RuntimeCall)?;
 
     // Try decode the result of the runtime call.
     // If this fails, it indicates an incompatibility between smoldot and the relay chain.
     match para::decode_persisted_validation_data_return_value(
-        &output,
-        relay_chain_block_number_bytes,
+        &success.output,
+        relay_chain_sync.block_number_bytes(),
     ) {
         Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
         Ok(None) => Err(ParaheadError::NoCore),
@@ -1443,13 +1406,9 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 enum ParaheadError {
     /// Error while performing call request over the network.
     #[display(fmt = "Error while performing call request over the network: {_0}")]
-    Call(runtime_service::RuntimeCallError),
-    /// Error while starting virtual machine to verify call proof.
-    #[display(fmt = "Error while starting virtual machine to verify call proof: {_0}")]
-    StartError(host::StartErr),
-    /// Error during the execution of the virtual machine to verify call proof.
-    #[display(fmt = "Error during the call proof verification: {_0}")]
-    Runtime(runtime_host::ErrorDetail),
+    RuntimeCall(runtime_service::RuntimeCallError),
+    /// Error pinning the runtime of the block.
+    PinRuntimeError(runtime_service::PinPinnedBlockRuntimeError),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
@@ -1457,10 +1416,6 @@ enum ParaheadError {
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
     #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
-    /// Runtime has called an offchain worker host function.
-    OffchainWorkerHostFunction,
-    /// Runtime service subscription is no longer valid.
-    ObsoleteSubscription,
 }
 
 impl ParaheadError {
@@ -1468,13 +1423,16 @@ impl ParaheadError {
     /// issue.
     fn is_network_problem(&self) -> bool {
         match self {
-            ParaheadError::Call(err) => err.is_network_problem(),
-            ParaheadError::StartError(_) => false,
-            ParaheadError::Runtime(_) => false,
+            ParaheadError::RuntimeCall(runtime_service::RuntimeCallError::Inaccessible(_)) => true,
+            ParaheadError::RuntimeCall(
+                runtime_service::RuntimeCallError::Execution(_)
+                | runtime_service::RuntimeCallError::Crash
+                | runtime_service::RuntimeCallError::InvalidRuntime(_)
+                | runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
+            ) => false,
+            ParaheadError::PinRuntimeError(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::OffchainWorkerHostFunction => false,
-            ParaheadError::ObsoleteSubscription => false,
         }
     }
 }

@@ -25,13 +25,17 @@ use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    format,
     string::{String, ToString as _},
     vec::Vec,
 };
 use async_lock::Mutex;
 use core::{
-    future, iter, mem, ops, pin, str,
-    sync::atomic::{AtomicU64, Ordering},
+    fmt::{self, Write as _},
+    future, iter, mem,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops, pin, str,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task,
     time::Duration,
 };
@@ -42,8 +46,14 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+/// Total number of microseconds that all the tasks have spent executing. A `u64` will overflow
+/// after 584 542 years.
+pub static TOTAL_CPU_USAGE_US: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
+
+/// Log level above which log entries aren't emitted.
+pub static MAX_LOG_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct PlatformRef {}
@@ -126,10 +136,59 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         u32::try_from(this.name.as_bytes().len()).unwrap(),
                     )
                 }
+
+                let before_polling = unsafe { bindings::monotonic_clock_us() };
                 let out = this.future.poll(cx);
+                let poll_duration = Duration::from_micros(
+                    unsafe { bindings::monotonic_clock_us() } - before_polling,
+                );
+                TOTAL_CPU_USAGE_US.fetch_add(
+                    u64::try_from(poll_duration.as_micros()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+
                 unsafe {
                     bindings::current_task_exit();
                 }
+
+                // Print a warning if polling the task takes a long time.
+                // It has been noticed that sometimes in Firefox polling a task takes a 16ms + a
+                // small amount. This most likely indicates that Firefox does something like
+                // freezing the JS/Wasm execution before resuming it at the next frame, thus adding
+                // 16ms to the execution time.
+                // For this reason, the threshold above which a task takes too long must be
+                // above 16ms no matter what.
+                if poll_duration.as_millis() >= 20 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Debug,
+                        "smoldot",
+                        "task-too-long-time",
+                        [
+                            ("name", this.name as &dyn fmt::Display),
+                            (
+                                "poll_duration_ms",
+                                &poll_duration.as_millis() as &dyn fmt::Display,
+                            ),
+                        ]
+                        .into_iter(),
+                    );
+                }
+                if poll_duration.as_millis() >= 150 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Warn,
+                        "smoldot",
+                        &format!(
+                            "The task named `{}` has occupied the CPU for an \
+                            unreasonable amount of time ({}ms).",
+                            this.name,
+                            poll_duration.as_millis(),
+                        ),
+                        iter::empty(),
+                    );
+                }
+
                 out
             }
         }
@@ -148,6 +207,63 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         task.detach();
         runnable.schedule();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: smoldot_light::platform::LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        let log_level = match log_level {
+            smoldot_light::platform::LogLevel::Error => 1,
+            smoldot_light::platform::LogLevel::Warn => 2,
+            smoldot_light::platform::LogLevel::Info => 3,
+            smoldot_light::platform::LogLevel::Debug => 4,
+            smoldot_light::platform::LogLevel::Trace => 5,
+        };
+
+        if log_level > MAX_LOG_LEVEL.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut key_values = key_values.peekable();
+
+        if key_values.peek().is_none() {
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message.as_bytes().len()).unwrap(),
+                )
+            }
+        } else {
+            let mut message_build = String::with_capacity(128);
+            message_build.push_str(message);
+            let mut first = true;
+            for (key, value) in key_values {
+                if first {
+                    let _ = write!(message_build, "; ");
+                    first = false;
+                } else {
+                    let _ = write!(message_build, ", ");
+                }
+                let _ = write!(message_build, "{}={}", key, value);
+            }
+
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message_build.as_bytes().len()).unwrap(),
+                )
+            }
+        }
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -200,36 +316,36 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let encoded_address: Vec<u8> = match address {
             smoldot_light::platform::Address::TcpIp {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
             } => iter::once(0u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpIp {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
             } => iter::once(1u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::TcpDns { hostname, port } => iter::once(2u8)
                 .chain(port.to_be_bytes())
                 .chain(hostname.as_bytes().iter().copied())
                 .collect(),
             smoldot_light::platform::Address::WebSocketIp {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
             } => iter::once(4u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketIp {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
             } => iter::once(5u8)
                 .chain(port.to_be_bytes())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::Address::WebSocketDns {
                 hostname,
@@ -309,22 +425,22 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let encoded_address: Vec<u8> = match address {
             smoldot_light::platform::MultiStreamAddress::WebRtc {
-                ip: smoldot_light::platform::IpAddr::V4(ip),
+                ip: IpAddr::V4(ip),
                 port,
                 remote_certificate_sha256,
             } => iter::once(16u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .chain(Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
             smoldot_light::platform::MultiStreamAddress::WebRtc {
-                ip: smoldot_light::platform::IpAddr::V6(ip),
+                ip: IpAddr::V6(ip),
                 port,
                 remote_certificate_sha256,
             } => iter::once(17u8)
                 .chain(port.to_be_bytes())
                 .chain(remote_certificate_sha256.iter().copied())
-                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .chain(Ipv6Addr::from(ip).to_string().bytes())
                 .collect(),
         };
 
@@ -918,7 +1034,7 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
         connection_handles_alive,
         local_tls_certificate_sha256: *local_tls_certificate_sha256,
     };
-    connection.something_happened.notify(usize::max_value());
+    connection.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u32) {
@@ -944,7 +1060,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     // As documented, the number of writable bytes must never become exceedingly large (a few
     // megabytes). As such, this can't overflow unless there is a bug on the JavaScript side.
     stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
@@ -1003,7 +1119,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
 
     stream.messages_queue_total_size += message.len();
     stream.messages_queue.push_back(message.into_boxed_slice());
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }
 
 pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
@@ -1040,7 +1156,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
             },
         ));
 
-        connection.something_happened.notify(usize::max_value());
+        connection.something_happened.notify(usize::MAX);
     } else {
         panic!()
     }
@@ -1072,17 +1188,18 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
         _message: message.clone(),
     };
 
-    connection.something_happened.notify(usize::max_value());
+    connection.something_happened.notify(usize::MAX);
 
-    for ((_, _), stream) in lock.streams.range_mut(
-        (connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())),
-    ) {
+    for ((_, _), stream) in lock
+        .streams
+        .range_mut((connection_id, Some(u32::MIN))..=(connection_id, Some(u32::MAX)))
+    {
         stream.reset = Some(message.clone());
-        stream.something_happened.notify(usize::max_value());
+        stream.something_happened.notify(usize::MAX);
     }
     if let Some(stream) = lock.streams.get_mut(&(connection_id, None)) {
         stream.reset = Some(message);
-        stream.something_happened.notify(usize::max_value());
+        stream.something_happened.notify(usize::MAX);
     }
 }
 
@@ -1099,5 +1216,5 @@ pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>)
         .get_mut(&(connection_id, Some(stream_id)))
         .unwrap();
     stream.reset = Some(message);
-    stream.something_happened.notify(usize::max_value());
+    stream.something_happened.notify(usize::MAX);
 }

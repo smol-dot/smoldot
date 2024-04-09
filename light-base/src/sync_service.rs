@@ -26,9 +26,12 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, platform::PlatformRef, runtime_service};
+use crate::{log, network_service, platform::PlatformRef, runtime_service};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _, boxed::Box, collections::VecDeque, format, string::String, sync::Arc,
+    vec::Vec,
+};
 use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use rand::seq::IteratorRandom as _;
@@ -43,6 +46,8 @@ use smoldot::{
 
 mod parachain;
 mod standalone;
+
+pub use network_service::Role;
 
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
@@ -103,9 +108,6 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Number of bytes used by the block number in the relay chain.
-    pub relay_chain_block_number_bytes: usize,
-
     /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
     /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
     /// block can be gathered.
@@ -152,7 +154,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.finalized_block_header,
                 config.block_number_bytes,
                 config_parachain.relay_chain_sync.clone(),
-                config_parachain.relay_chain_block_number_bytes,
                 config_parachain.para_id,
                 from_foreground,
                 config.network_service.clone(),
@@ -170,12 +171,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }
         };
 
-        config
-            .platform
-            .spawn_task(log_target.clone().into(), async move {
+        config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
+            async move {
                 task.await;
-                log::debug!(target: &log_target, "Shutdown");
-            });
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
 
         SyncService {
             to_background,
@@ -329,16 +331,25 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         for target in self
             .peers_assumed_know_blocks(block_number, &hash)
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(target, request_config.clone(), timeout_per_request)
+                .blocks_request(target.clone(), request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-failed",
+                        )
+                        .await;
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -370,7 +381,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             .network_service
             .peers_list()
             .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+            .take(usize::try_from(total_attempts).unwrap_or(usize::MAX))
         {
             let mut result = match self
                 .network_service
@@ -379,7 +390,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    // Because we have no idea whether the block is canonical, it might be
+                    // totally legitimate for the peer to refuse the request. For this reason,
+                    // we don't ban it.
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -400,40 +416,25 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     ///
     /// See the documentation of [`StorageRequestItem`] and [`StorageResultItem`] for more
     /// information.
-    // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
-    pub async fn storage_query(
+    pub fn storage_query(
         self: Arc<Self>,
         block_number: u64,
-        block_hash: &[u8; 32],
-        main_trie_root_hash: &[u8; 32],
+        block_hash: [u8; 32],
+        main_trie_root_hash: [u8; 32],
         requests: impl Iterator<Item = StorageRequestItem>,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
-    ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
-        // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
-        // TODO: handle max_parallel
-        enum RequestImpl {
-            PrefixScan {
-                requested_key: Vec<u8>,
-                scan: prefix_proof::PrefixScan,
-            },
-            ValueOrHash {
-                key: Vec<u8>,
-                hash: bool,
-            },
-            ClosestDescendantMerkleValue {
-                key: Vec<u8>,
-            },
-        }
+        max_parallel: NonZeroU32,
+    ) -> StorageQuery<TPlat> {
+        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
-        let mut requests_remaining = requests
+        let requests = requests
             .map(|request| match request.ty {
                 StorageRequestItemTy::DescendantsHashes
                 | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
                     scan: prefix_proof::prefix_scan(prefix_proof::Config {
                         prefix: &request.key,
-                        trie_root_hash: *main_trie_root_hash,
+                        trie_root_hash: main_trie_root_hash,
                         full_storage_values_required: matches!(
                             request.ty,
                             StorageRequestItemTy::DescendantsValues
@@ -453,371 +454,27 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
             })
+            .enumerate()
             .collect::<Vec<_>>();
 
-        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::max_value());
-        let mut outcome_errors = Vec::with_capacity(total_attempts);
-
-        let mut final_results =
-            Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
-
-        // Number of nodes that are possible in a response before exceeding the response size
-        // limit. Because the size of a trie node is unknown, this can only ever be a gross
-        // estimate.
-        let mut response_nodes_cap = (16 * 1024 * 1024) / 164;
-
-        let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
-            let mut seed = [0; 32];
-            self.platform.fill_random_bytes(&mut seed);
-            seed
-        });
-
-        loop {
-            // Check if we're done.
-            if requests_remaining.is_empty() {
-                return Ok(final_results);
-            }
-
-            if outcome_errors.len() >= total_attempts {
-                return Err(StorageQueryError {
-                    errors: outcome_errors,
-                });
-            }
-
-            // Choose peer to query.
-            // TODO: better peers selection
-            let Some(target) = self
-                .peers_assumed_know_blocks(block_number, block_hash)
-                .await
-                .choose(&mut randomness)
-            else {
-                // No peer knows this block. Returning with a failure.
-                return Err(StorageQueryError {
-                    errors: outcome_errors,
-                });
-            };
-
-            // Build the list of keys to request.
-            let keys_to_request = {
-                // Keep track of the number of nodes that might be found in the response.
-                // This is a generous overestimation of the actual number.
-                let mut max_reponse_nodes = 0;
-
-                let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
-                    requests_remaining.len() * 4,
-                    fnv::FnvBuildHasher::default(),
-                );
-
-                for request in &requests_remaining {
-                    if max_reponse_nodes >= response_nodes_cap {
-                        break;
-                    }
-
-                    match request {
-                        RequestImpl::PrefixScan { scan, .. } => {
-                            for scan_key in scan.requested_keys() {
-                                if max_reponse_nodes >= response_nodes_cap {
-                                    break;
-                                }
-
-                                let scan_key = trie::nibbles_to_bytes_suffix_extend(scan_key)
-                                    .collect::<Vec<_>>();
-                                let scan_key_len = scan_key.len();
-                                if keys.insert(scan_key) {
-                                    max_reponse_nodes += scan_key_len * 2;
-                                }
-                            }
-                        }
-                        RequestImpl::ValueOrHash { key, .. } => {
-                            if keys.insert(key.clone()) {
-                                max_reponse_nodes += key.len() * 2;
-                            }
-                        }
-                        RequestImpl::ClosestDescendantMerkleValue { key } => {
-                            // We query the parent of `key`.
-                            if key.is_empty() {
-                                if keys.insert(Vec::new()) {
-                                    max_reponse_nodes += 1;
-                                }
-                            } else if keys.insert(key[..key.len() - 1].to_owned()) {
-                                max_reponse_nodes += key.len() * 2 - 1;
-                            }
-                        }
-                    }
-                }
-
-                keys
-            };
-
-            let result = self
-                .network_service
-                .clone()
-                .storage_proof_request(
-                    target,
-                    codec::StorageProofRequestConfig {
-                        block_hash: *block_hash,
-                        keys: keys_to_request.into_iter(),
-                    },
-                    timeout_per_request,
-                )
-                .await;
-
-            let proof = match result {
-                Ok(r) => r,
-                Err(err) => {
-                    // In case of error that isn't a protocol error, we reduce the number of
-                    // trie node items to request.
-                    let reduce_max = match &err {
-                        network_service::StorageProofRequestError::RequestTooLarge => true,
-                        network_service::StorageProofRequestError::Request(
-                            service::StorageProofRequestError::Request(err),
-                        ) => !err.is_protocol_error(),
-                        _ => false,
-                    };
-
-                    if !matches!(
-                        err,
-                        network_service::StorageProofRequestError::RequestTooLarge
-                    ) || response_nodes_cap == 1
-                    {
-                        outcome_errors.push(StorageQueryErrorDetail::Network(err));
-                    }
-
-                    if reduce_max {
-                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
-                    }
-
-                    continue;
-                }
-            };
-
-            let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: proof.decode(),
-            }) {
-                Ok(d) => d,
-                Err(err) => {
-                    outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
-                    continue;
-                }
-            };
-
-            let mut proof_has_advanced_verification = false;
-
-            for request in mem::take(&mut requests_remaining) {
-                match request {
-                    RequestImpl::PrefixScan {
-                        scan,
-                        requested_key,
-                    } => {
-                        // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
-                        match scan.resume_partial(proof.decode()) {
-                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
-                                proof_has_advanced_verification = true;
-                                requests_remaining.push(RequestImpl::PrefixScan {
-                                    scan,
-                                    requested_key,
-                                });
-                            }
-                            Ok(prefix_proof::ResumeOutcome::Success {
-                                entries,
-                                full_storage_values_required,
-                            }) => {
-                                proof_has_advanced_verification = true;
-                                // The value of `full_storage_values_required` determines whether
-                                // we wanted full values (`true`) or hashes (`false`).
-                                for (key, value) in entries {
-                                    match value {
-                                        prefix_proof::StorageValue::Hash(hash) => {
-                                            debug_assert!(!full_storage_values_required);
-                                            final_results.push(StorageResultItem::DescendantHash {
-                                                key,
-                                                hash,
-                                                requested_key: requested_key.clone(),
-                                            });
-                                        }
-                                        prefix_proof::StorageValue::Value(value)
-                                            if full_storage_values_required =>
-                                        {
-                                            final_results.push(
-                                                StorageResultItem::DescendantValue {
-                                                    requested_key: requested_key.clone(),
-                                                    key,
-                                                    value,
-                                                },
-                                            );
-                                        }
-                                        prefix_proof::StorageValue::Value(value) => {
-                                            let hashed_value =
-                                                blake2_rfc::blake2b::blake2b(32, &[], &value);
-                                            final_results.push(StorageResultItem::DescendantHash {
-                                                key,
-                                                hash: *<&[u8; 32]>::try_from(
-                                                    hashed_value.as_bytes(),
-                                                )
-                                                .unwrap(),
-                                                requested_key: requested_key.clone(),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                            Err((_, prefix_proof::Error::InvalidProof(_))) => {
-                                // Since we decode the proof above, this is never supposed to
-                                // be reachable.
-                                unreachable!()
-                            }
-                            Err((scan, prefix_proof::Error::MissingProofEntry)) => {
-                                requests_remaining.push(RequestImpl::PrefixScan {
-                                    requested_key,
-                                    scan,
-                                });
-                            }
-                        }
-                    }
-                    RequestImpl::ValueOrHash { key, hash } => {
-                        // TODO: overhead
-                        match decoded_proof.trie_node_info(
-                            main_trie_root_hash,
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
-                        ) {
-                            Ok(node_info) => match node_info.storage_value {
-                                proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
-                                    proof_has_advanced_verification = true;
-                                    final_results.push(StorageResultItem::Hash {
-                                        key,
-                                        hash: Some(*h),
-                                    });
-                                }
-                                proof_decode::StorageValue::HashKnownValueMissing(_) => {
-                                    requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
-                                }
-                                proof_decode::StorageValue::Known { value, .. } => {
-                                    proof_has_advanced_verification = true;
-                                    if hash {
-                                        let hashed_value =
-                                            blake2_rfc::blake2b::blake2b(32, &[], value);
-                                        final_results.push(StorageResultItem::Hash {
-                                            key,
-                                            hash: Some(
-                                                *<&[u8; 32]>::try_from(hashed_value.as_bytes())
-                                                    .unwrap(),
-                                            ),
-                                        });
-                                    } else {
-                                        final_results.push(StorageResultItem::Value {
-                                            key,
-                                            value: Some(value.to_vec()),
-                                        });
-                                    }
-                                }
-                                proof_decode::StorageValue::None => {
-                                    proof_has_advanced_verification = true;
-                                    if hash {
-                                        final_results
-                                            .push(StorageResultItem::Hash { key, hash: None });
-                                    } else {
-                                        final_results
-                                            .push(StorageResultItem::Value { key, value: None });
-                                    }
-                                }
-                            },
-                            Err(proof_decode::IncompleteProofError { .. }) => {
-                                requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
-                            }
-                        }
-                    }
-                    RequestImpl::ClosestDescendantMerkleValue { key } => {
-                        let key_nibbles =
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-
-                        let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
-                        {
-                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
-                            Ok(None) => None,
-                            Err(proof_decode::IncompleteProofError { .. }) => {
-                                requests_remaining
-                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
-                                continue;
-                            }
-                        };
-
-                        let found_closest_ancestor_excluding = match decoded_proof
-                            .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
-                        {
-                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
-                            Ok(None) => None,
-                            Err(proof_decode::IncompleteProofError { .. }) => {
-                                requests_remaining
-                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
-                                continue;
-                            }
-                        };
-
-                        proof_has_advanced_verification = true;
-
-                        final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
-                            requested_key: key,
-                            closest_descendant_merkle_value,
-                            found_closest_ancestor_excluding,
-                        })
-                    }
-                }
-            }
-
-            // If the proof doesn't contain any item that reduces the number of things to request,
-            // then we push an error.
-            if !proof_has_advanced_verification {
-                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
-            }
+        StorageQuery {
+            block_number,
+            block_hash,
+            main_trie_root_hash,
+            total_attempts,
+            timeout_per_request,
+            _max_parallel: max_parallel,
+            outcome_errors: Vec::with_capacity(total_attempts),
+            available_results: VecDeque::with_capacity(requests.len() * 4),
+            requests_remaining: requests,
+            response_nodes_cap: (16 * 1024 * 1024) / 164,
+            randomness: rand_chacha::ChaCha20Rng::from_seed({
+                let mut seed = [0; 32];
+                self.platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+            sync_service: self,
         }
-    }
-
-    // TODO: documentation
-    // TODO: there's no proof that the call proof is actually correct
-    pub async fn call_proof_query(
-        self: Arc<Self>,
-        block_number: u64,
-        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
-    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
-        let mut outcome_errors =
-            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
-        // TODO: better peers selection ; don't just take the first
-        // TODO: handle max_parallel
-        for target in self
-            .peers_assumed_know_blocks(block_number, &config.block_hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
-            let result = self
-                .network_service
-                .clone()
-                .call_proof_request(target, config.clone(), timeout_per_request)
-                .await;
-
-            match result {
-                Ok(value) if !value.decode().is_empty() => return Ok(value),
-                // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
-                    service::CallProofRequestError::Request(
-                        smoldot::network::service::RequestError::Substream(
-                            smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
-                        ),
-                    ),
-                )),
-                Err(err) => {
-                    outcome_errors.push(err);
-                }
-            }
-        }
-
-        Err(CallProofQueryError {
-            errors: outcome_errors,
-        })
     }
 }
 
@@ -917,7 +574,451 @@ pub enum StorageResultItem {
     },
 }
 
+/// Returned by [`SyncService::storage_query`]. Represents a storage query in progress.
+pub struct StorageQuery<TPlat: PlatformRef> {
+    sync_service: Arc<SyncService<TPlat>>,
+    block_number: u64,
+    block_hash: [u8; 32],
+    main_trie_root_hash: [u8; 32],
+    /// Requests that haven't been fulfilled yet.
+    /// The `usize` is the index of the request in the original list of requests that the API user
+    /// provided.
+    requests_remaining: Vec<(usize, RequestImpl)>,
+    /// Total number of network requests to try before giving up.
+    total_attempts: usize,
+    /// How long to wait for a response to the request.
+    timeout_per_request: Duration,
+    // TODO: value presently ignored
+    _max_parallel: NonZeroU32,
+    /// Non-fatal errors that have happened in the network requests.
+    outcome_errors: Vec<StorageQueryErrorDetail>,
+    /// List of responses that are available to yield.
+    /// The `usize` is the index of the request in the original list of requests that the API user
+    /// provided.
+    available_results: VecDeque<(usize, StorageResultItem)>,
+    /// Number of nodes that are possible in a response before exceeding the response size
+    /// limit. Because the size of a trie node is unknown, this can only ever be a gross
+    /// estimate.
+    /// If a request fails due to the limit being exceeded, this cap is dynamically reduced.
+    response_nodes_cap: usize,
+    /// Source of randomness.
+    randomness: rand_chacha::ChaCha20Rng,
+}
+
+enum RequestImpl {
+    PrefixScan {
+        requested_key: Vec<u8>,
+        scan: prefix_proof::PrefixScan,
+    },
+    ValueOrHash {
+        key: Vec<u8>,
+        hash: bool,
+    },
+    ClosestDescendantMerkleValue {
+        key: Vec<u8>,
+    },
+}
+
+impl<TPlat: PlatformRef> StorageQuery<TPlat> {
+    /// Drain any other item that might be immediately available.
+    ///
+    /// The `usize` corresponds to [`StorageQueryProgress::Progress::request_index`].
+    pub fn try_advance(&mut self) -> Option<(usize, StorageResultItem)> {
+        self.available_results.pop_front()
+    }
+
+    /// Wait until some progress is made.
+    pub async fn advance(mut self) -> StorageQueryProgress<TPlat> {
+        loop {
+            // TODO: instead of buffering everything here, progressively decode the proof
+            if let Some((request_index, item)) = self.available_results.pop_front() {
+                return StorageQueryProgress::Progress {
+                    request_index,
+                    item,
+                    query: self,
+                };
+            }
+
+            // Check if we're done.
+            if self.requests_remaining.is_empty() {
+                return StorageQueryProgress::Finished;
+            }
+
+            if self.outcome_errors.len() >= self.total_attempts {
+                return StorageQueryProgress::Error(StorageQueryError {
+                    errors: self.outcome_errors,
+                });
+            }
+
+            // Choose peer to query.
+            // TODO: better peers selection
+            let Some(target) = self
+                .sync_service
+                .peers_assumed_know_blocks(self.block_number, &self.block_hash)
+                .await
+                .choose(&mut self.randomness)
+            else {
+                // No peer knows this block. Returning with a failure.
+                return StorageQueryProgress::Error(StorageQueryError {
+                    errors: self.outcome_errors,
+                });
+            };
+
+            // Build the list of keys to request.
+            let keys_to_request = {
+                // Keep track of the number of nodes that might be found in the response.
+                // This is a generous overestimation of the actual number.
+                let mut max_reponse_nodes = 0;
+
+                let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
+                    self.requests_remaining.len() * 4,
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                for (_, request) in &self.requests_remaining {
+                    if max_reponse_nodes >= self.response_nodes_cap {
+                        break;
+                    }
+
+                    match request {
+                        RequestImpl::PrefixScan { scan, .. } => {
+                            for scan_key in scan.requested_keys() {
+                                if max_reponse_nodes >= self.response_nodes_cap {
+                                    break;
+                                }
+
+                                let scan_key = trie::nibbles_to_bytes_suffix_extend(scan_key)
+                                    .collect::<Vec<_>>();
+                                let scan_key_len = scan_key.len();
+                                if keys.insert(scan_key) {
+                                    max_reponse_nodes += scan_key_len * 2;
+                                }
+                            }
+                        }
+                        RequestImpl::ValueOrHash { key, .. } => {
+                            if keys.insert(key.clone()) {
+                                max_reponse_nodes += key.len() * 2;
+                            }
+                        }
+                        RequestImpl::ClosestDescendantMerkleValue { key } => {
+                            // We query the parent of `key`.
+                            if key.is_empty() {
+                                if keys.insert(Vec::new()) {
+                                    max_reponse_nodes += 1;
+                                }
+                            } else if keys.insert(key[..key.len() - 1].to_owned()) {
+                                max_reponse_nodes += key.len() * 2 - 1;
+                            }
+                        }
+                    }
+                }
+
+                keys
+            };
+
+            let result = self
+                .sync_service
+                .network_service
+                .clone()
+                .storage_proof_request(
+                    target.clone(),
+                    codec::StorageProofRequestConfig {
+                        block_hash: self.block_hash,
+                        keys: keys_to_request.into_iter(),
+                    },
+                    self.timeout_per_request,
+                )
+                .await;
+
+            let proof = match result {
+                Ok(r) => r,
+                Err(err) => {
+                    // In case of error that isn't a protocol error, we reduce the number of
+                    // trie node items to request.
+                    let reduce_max = match &err {
+                        network_service::StorageProofRequestError::RequestTooLarge => true,
+                        network_service::StorageProofRequestError::Request(
+                            service::StorageProofRequestError::Request(err),
+                        ) => !err.is_protocol_error(),
+                        _ => false,
+                    };
+
+                    if !matches!(
+                        err,
+                        network_service::StorageProofRequestError::RequestTooLarge
+                    ) || self.response_nodes_cap == 1
+                    {
+                        self.sync_service
+                            .network_service
+                            .ban_and_disconnect(
+                                target,
+                                network_service::BanSeverity::Low,
+                                "storage-request-failed",
+                            )
+                            .await;
+                        self.outcome_errors
+                            .push(StorageQueryErrorDetail::Network(err));
+                    }
+
+                    if reduce_max {
+                        self.response_nodes_cap = cmp::max(1, self.response_nodes_cap / 2);
+                    }
+
+                    continue;
+                }
+            };
+
+            let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                proof: proof.decode(),
+            }) {
+                Ok(d) => d,
+                Err(err) => {
+                    self.sync_service
+                        .network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::High,
+                            "bad-merkle-proof",
+                        )
+                        .await;
+                    self.outcome_errors
+                        .push(StorageQueryErrorDetail::ProofVerification(err));
+                    continue;
+                }
+            };
+
+            let mut proof_has_advanced_verification = false;
+
+            for (request_index, request) in mem::take(&mut self.requests_remaining) {
+                match request {
+                    RequestImpl::PrefixScan {
+                        scan,
+                        requested_key,
+                    } => {
+                        // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
+                        match scan.resume_partial(proof.decode()) {
+                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                proof_has_advanced_verification = true;
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::PrefixScan {
+                                        scan,
+                                        requested_key,
+                                    },
+                                ));
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success {
+                                entries,
+                                full_storage_values_required,
+                            }) => {
+                                proof_has_advanced_verification = true;
+                                // The value of `full_storage_values_required` determines whether
+                                // we wanted full values (`true`) or hashes (`false`).
+                                for (key, value) in entries {
+                                    match value {
+                                        prefix_proof::StorageValue::Hash(hash) => {
+                                            debug_assert!(!full_storage_values_required);
+                                            self.available_results.push_back((
+                                                request_index,
+                                                StorageResultItem::DescendantHash {
+                                                    key,
+                                                    hash,
+                                                    requested_key: requested_key.clone(),
+                                                },
+                                            ));
+                                        }
+                                        prefix_proof::StorageValue::Value(value)
+                                            if full_storage_values_required =>
+                                        {
+                                            self.available_results.push_back((
+                                                request_index,
+                                                StorageResultItem::DescendantValue {
+                                                    requested_key: requested_key.clone(),
+                                                    key,
+                                                    value,
+                                                },
+                                            ));
+                                        }
+                                        prefix_proof::StorageValue::Value(value) => {
+                                            let hashed_value =
+                                                blake2_rfc::blake2b::blake2b(32, &[], &value);
+                                            self.available_results.push_back((
+                                                request_index,
+                                                StorageResultItem::DescendantHash {
+                                                    key,
+                                                    hash: *<&[u8; 32]>::try_from(
+                                                        hashed_value.as_bytes(),
+                                                    )
+                                                    .unwrap(),
+                                                    requested_key: requested_key.clone(),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            Err((_, prefix_proof::Error::InvalidProof(_))) => {
+                                // Since we decode the proof above, this is never supposed to
+                                // be reachable.
+                                unreachable!()
+                            }
+                            Err((scan, prefix_proof::Error::MissingProofEntry)) => {
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::PrefixScan {
+                                        requested_key,
+                                        scan,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    RequestImpl::ValueOrHash { key, hash } => {
+                        match decoded_proof.trie_node_info(
+                            &self.main_trie_root_hash,
+                            trie::bytes_to_nibbles(key.iter().copied()),
+                        ) {
+                            Ok(node_info) => match node_info.storage_value {
+                                proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    proof_has_advanced_verification = true;
+                                    self.available_results.push_back((
+                                        request_index,
+                                        StorageResultItem::Hash {
+                                            key,
+                                            hash: Some(*h),
+                                        },
+                                    ));
+                                }
+                                proof_decode::StorageValue::HashKnownValueMissing(_) => {
+                                    self.requests_remaining.push((
+                                        request_index,
+                                        RequestImpl::ValueOrHash { key, hash },
+                                    ));
+                                }
+                                proof_decode::StorageValue::Known { value, .. } => {
+                                    proof_has_advanced_verification = true;
+                                    if hash {
+                                        let hashed_value =
+                                            blake2_rfc::blake2b::blake2b(32, &[], value);
+                                        self.available_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Hash {
+                                                key,
+                                                hash: Some(
+                                                    *<&[u8; 32]>::try_from(hashed_value.as_bytes())
+                                                        .unwrap(),
+                                                ),
+                                            },
+                                        ));
+                                    } else {
+                                        self.available_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Value {
+                                                key,
+                                                value: Some(value.to_vec()),
+                                            },
+                                        ));
+                                    }
+                                }
+                                proof_decode::StorageValue::None => {
+                                    proof_has_advanced_verification = true;
+                                    if hash {
+                                        self.available_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Hash { key, hash: None },
+                                        ));
+                                    } else {
+                                        self.available_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Value { key, value: None },
+                                        ));
+                                    }
+                                }
+                            },
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining
+                                    .push((request_index, RequestImpl::ValueOrHash { key, hash }));
+                            }
+                        }
+                    }
+                    RequestImpl::ClosestDescendantMerkleValue { key } => {
+                        let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
+
+                        let closest_descendant_merkle_value = match decoded_proof
+                            .closest_descendant_merkle_value(
+                                &self.main_trie_root_hash,
+                                key_nibbles.clone(),
+                            ) {
+                            Ok(Some(merkle_value)) => Some(merkle_value.to_vec()),
+                            Ok(None) => None,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::ClosestDescendantMerkleValue { key },
+                                ));
+                                continue;
+                            }
+                        };
+
+                        let found_closest_ancestor_excluding = match decoded_proof
+                            .closest_ancestor_in_proof(&self.main_trie_root_hash, key_nibbles)
+                        {
+                            Ok(Some(ancestor)) => Some(ancestor.collect::<Vec<_>>()),
+                            Ok(None) => None,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::ClosestDescendantMerkleValue { key },
+                                ));
+                                continue;
+                            }
+                        };
+
+                        proof_has_advanced_verification = true;
+
+                        self.available_results.push_back((
+                            request_index,
+                            StorageResultItem::ClosestDescendantMerkleValue {
+                                requested_key: key,
+                                closest_descendant_merkle_value,
+                                found_closest_ancestor_excluding,
+                            },
+                        ))
+                    }
+                }
+            }
+
+            // If the proof doesn't contain any item that reduces the number of things to request,
+            // then we push an error.
+            if !proof_has_advanced_verification {
+                self.outcome_errors
+                    .push(StorageQueryErrorDetail::MissingProofEntry);
+            }
+        }
+    }
+}
+
+/// Progress in a storage query. Returned by [`StorageQuery::advance`].
+pub enum StorageQueryProgress<TPlat: PlatformRef> {
+    /// The query has successfully finished. All the items have been yielded through
+    /// [`StorageQueryProgress::Progress`].
+    Finished,
+    /// The query has yielded an item.
+    Progress {
+        /// Index within the original list of requests passed to [`SyncService::storage_query`]
+        /// the item corresponds to.
+        request_index: usize,
+        /// The item in question.
+        item: StorageResultItem,
+        /// Query to use to continue advancing.
+        query: StorageQuery<TPlat>,
+    },
+    /// The query has failed due to having reached the maximum number of errors.
+    Error(StorageQueryError),
+}
+
 /// Error that can happen when calling [`SyncService::storage_query`].
+// TODO: remove?
 #[derive(Debug, Clone)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
@@ -976,36 +1077,6 @@ pub enum StorageQueryErrorDetail {
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,
-}
-
-/// Error that can happen when calling [`SyncService::call_proof_query`].
-#[derive(Debug, Clone)]
-pub struct CallProofQueryError {
-    /// Contains one error per peer that has been contacted. If this list is empty, then we
-    /// aren't connected to any node.
-    pub errors: Vec<network_service::CallProofRequestError>,
-}
-
-impl CallProofQueryError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    pub fn is_network_problem(&self) -> bool {
-        self.errors.iter().all(|err| err.is_network_problem())
-    }
-}
-
-impl fmt::Display for CallProofQueryError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.errors.is_empty() {
-            write!(f, "No node available for call proof query")
-        } else {
-            write!(f, "Call proof query errors:")?;
-            for err in &self.errors {
-                write!(f, "\n- {err}")?;
-            }
-            Ok(())
-        }
-    }
 }
 
 /// Return value of [`SyncService::subscribe_all`].
@@ -1071,7 +1142,8 @@ pub enum Notification {
         /// [`Notification::Finalized`] is generated and contains the highest finalized block.
         hash: [u8; 32],
 
-        /// Hash of the best block after the finalization.
+        /// If the current best block is pruned by the finalization, contains the updated hash
+        /// of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
@@ -1080,7 +1152,14 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        best_block_hash: [u8; 32],
+        best_block_hash_if_changed: Option<[u8; 32]>,
+
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
+        /// they're not descendants of the newly-finalized block.
+        ///
+        /// This list contains all the siblings of the newly-finalized block and all their
+        /// descendants.
+        pruned_blocks: Vec<[u8; 32]>,
     },
 
     /// A new block has been added to the list of unfinalized blocks.

@@ -152,7 +152,7 @@
 //!     let prototype = HostVmPrototype::new(Config {
 //!         module: &wasm_binary_code,
 //!         heap_pages: HeapPages::from(2048),
-//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         exec_hint: smoldot::executor::vm::ExecHint::ValidateAndExecuteOnce,
 //!         allow_unresolved_imports: false
 //!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
@@ -986,7 +986,7 @@ impl ReadyToRun {
                     calling: id,
                     value_out_ptr: None,
                     offset: 0,
-                    max_size: u32::max_value(),
+                    max_size: u32::MAX,
                     inner: self.inner,
                 })
             }
@@ -1181,6 +1181,9 @@ impl ReadyToRun {
                     rollback: false,
                 }
             }
+            HostFunction::ext_storage_proof_size_storage_proof_size_version_1 => {
+                host_fn_not_implemented!()
+            }
             HostFunction::ext_default_child_storage_get_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
@@ -1191,7 +1194,7 @@ impl ReadyToRun {
                     calling: id,
                     value_out_ptr: None,
                     offset: 0,
-                    max_size: u32::max_value(),
+                    max_size: u32::MAX,
                     inner: self.inner,
                 })
             }
@@ -2142,7 +2145,7 @@ impl ReadyToRun {
                     return HostVm::Error {
                         error: Error::Utf8Error {
                             function: host_fn.name(),
-                            param_num: 2,
+                            param_num: 1,
                             error,
                         },
                         prototype: self.inner.into_prototype(),
@@ -2182,6 +2185,27 @@ impl ReadyToRun {
             }
             HostFunction::ext_logging_max_level_version_1 => {
                 HostVm::GetMaxLogLevel(GetMaxLogLevel { inner: self.inner })
+            }
+            HostFunction::ext_panic_handler_abort_on_panic_version_1 => {
+                let message = {
+                    let message_bytes = expect_pointer_size!(0);
+                    str::from_utf8(message_bytes.as_ref()).map(|msg| msg.to_owned())
+                };
+
+                match message {
+                    Ok(message) => HostVm::Error {
+                        error: Error::AbortOnPanic { message },
+                        prototype: self.inner.into_prototype(),
+                    },
+                    Err(error) => HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 0,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    },
+                }
             }
         }
     }
@@ -3702,8 +3726,8 @@ impl Inner {
     ) -> HostVm {
         let mut data_len = 0u32;
         for chunk in data.clone() {
-            data_len = data_len
-                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+            data_len =
+                data_len.saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::MAX));
         }
 
         let dest_ptr = match self.alloc(function_name, data_len) {
@@ -3722,7 +3746,7 @@ impl Inner {
             self.vm
                 .write_memory(ptr_iter, chunk)
                 .unwrap_or_else(|_| unreachable!());
-            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::MAX);
         }
 
         let ret_val = (u64::from(data_len) << 32) | u64::from(dest_ptr);
@@ -3753,8 +3777,8 @@ impl Inner {
     ) -> HostVm {
         let mut data_len = 0u32;
         for chunk in data.clone() {
-            data_len = data_len
-                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+            data_len =
+                data_len.saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::MAX));
         }
 
         let dest_ptr = match self.alloc(function_name, data_len) {
@@ -3773,7 +3797,7 @@ impl Inner {
             self.vm
                 .write_memory(ptr_iter, chunk)
                 .unwrap_or_else(|_| unreachable!());
-            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::MAX);
         }
 
         let ret_val = i32::from_ne_bytes(dest_ptr.to_ne_bytes());
@@ -3901,6 +3925,12 @@ pub enum Error {
     /// Error in the Wasm code execution.
     #[display(fmt = "{_0}")]
     Trap(vm::Trap),
+    /// Runtime has called the `ext_panic_handler_abort_on_panic_version_1` host function.
+    #[display(fmt = "Runtime has aborted: {message:?}")]
+    AbortOnPanic {
+        /// Message generated by the runtime.
+        message: String,
+    },
     /// A non-`i64` value has been returned by the Wasm entry point.
     #[display(fmt = "A non-I64 value has been returned: {actual:?}")]
     BadReturnValue {

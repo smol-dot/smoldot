@@ -240,8 +240,7 @@ impl AuthoringStart {
         });
 
         let inherent_data = inherents::InherentData {
-            timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
-                .unwrap_or(u64::max_value()),
+            timestamp: u64::try_from(config.now_from_unix_epoch.as_millis()).unwrap_or(u64::MAX),
         };
 
         (Shared {

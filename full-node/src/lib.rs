@@ -156,13 +156,13 @@ impl Client {
     /// Returns the current total number of peers of the client.
     // TODO: weird API
     pub async fn num_peers(&self) -> u64 {
-        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::MAX)
     }
 
     /// Returns the current total number of network connections of the client.
     // TODO: weird API
     pub async fn num_network_connections(&self) -> u64 {
-        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::MAX)
     }
 
     // TODO: not the best API
@@ -270,6 +270,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let genesis_chain_information = chain_spec
         .to_chain_information()
         .map_err(StartError::InvalidGenesisInformation)?
@@ -284,6 +285,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let relay_genesis_chain_information = match &relay_chain_spec {
         Some(r) => Some(
             r.to_chain_information()
@@ -444,6 +446,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         })
                         .await
                 },
+                max_in_peers: 25,
+                max_slots: 15,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + config.chain.additional_bootnodes.len(),
@@ -522,6 +526,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                                 }
                             })
                             .await,
+                        max_in_peers: 25,
+                        max_slots: 15,
                         bootstrap_nodes: {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
@@ -849,7 +855,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
@@ -991,12 +997,15 @@ async fn open_database(
             // no justification.
             let database = empty
                 .initialize(
-                    genesis_chain_information,
+                    &genesis_chain_information
+                        .finalized_block_header
+                        .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                     iter::empty(),
                     None,
-                    genesis_storage_full_trie,
-                    state_version,
                 )
+                .unwrap();
+            database
+                .insert_trie_nodes(genesis_storage_full_trie, state_version)
                 .unwrap();
             (database, false)
         }

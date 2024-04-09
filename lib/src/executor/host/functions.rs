@@ -70,6 +70,7 @@ host_functions! {
     ext_storage_start_transaction_version_1,
     ext_storage_rollback_transaction_version_1,
     ext_storage_commit_transaction_version_1,
+    ext_storage_proof_size_storage_proof_size_version_1,
     ext_default_child_storage_get_version_1,
     ext_default_child_storage_read_version_1,
     ext_default_child_storage_storage_kill_version_1,
@@ -154,6 +155,7 @@ host_functions! {
     ext_allocator_free_version_1,
     ext_logging_log_version_1,
     ext_logging_max_level_version_1,
+    ext_panic_handler_abort_on_panic_version_1,
 }
 
 impl HostFunction {
@@ -198,6 +200,9 @@ impl HostFunction {
             HostFunction::ext_storage_start_transaction_version_1 => crate::signature!(() => ()),
             HostFunction::ext_storage_rollback_transaction_version_1 => crate::signature!(() => ()),
             HostFunction::ext_storage_commit_transaction_version_1 => crate::signature!(() => ()),
+            HostFunction::ext_storage_proof_size_storage_proof_size_version_1 => {
+                crate::signature!(() => vm::ValueType::I64)
+            }
             HostFunction::ext_default_child_storage_get_version_1 => {
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
             }
@@ -447,6 +452,9 @@ impl HostFunction {
             }
             HostFunction::ext_logging_max_level_version_1 => {
                 crate::signature!(() => vm::ValueType::I32)
+            }
+            HostFunction::ext_panic_handler_abort_on_panic_version_1 => {
+                crate::signature!((vm::ValueType::I64) => ())
             }
         }
     }

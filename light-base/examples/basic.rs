@@ -19,7 +19,7 @@ use core::{iter, num::NonZeroU32};
 use futures_lite::FutureExt as _;
 
 fn main() {
-    // The `smoldot_light` library uses the `log` crate to emit logs.
+    // The `DefaultPlatform` that we use below uses the `log` crate to emit logs.
     // We need to register some kind of logs listener, in this example `env_logger`.
     // See also <https://docs.rs/log>.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -53,14 +53,14 @@ fn main() {
                 // Maximum number of JSON-RPC in the queue of requests waiting to be processed.
                 // This parameter is necessary for situations where the JSON-RPC clients aren't
                 // trusted. If you control all the requests that are sent out and don't want them
-                // to fail, feel free to pass `u32::max_value()`.
+                // to fail, feel free to pass `u32::MAX`.
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 // Maximum number of active subscriptions before new ones are automatically
                 // rejected. Any JSON-RPC request that causes the server to generate notifications
                 // counts as a subscription.
                 // While a typical reasonable value would be for example 64, existing UIs tend to
                 // start a lot of subscriptions, and a value such as 1024 is recommended.
-                // Similarly, if you don't want any limit, feel free to pass `u32::max_value()`.
+                // Similarly, if you don't want any limit, feel free to pass `u32::MAX`.
                 max_subscriptions: 1024,
             },
 

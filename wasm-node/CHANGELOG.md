@@ -4,6 +4,135 @@
 
 ### Changed
 
+- All `chainHead_unstable`-prefixed JSON-RPC functions have been renamed to `chainHead_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1748](https://github.com/smol-dot/smoldot/pull/1748))
+
+### Fixed
+
+- Fix `QueueFullError` being thrown even when the number of requests is way below the value passed to `jsonRpcMaxPendingRequests`. ([#1747](https://github.com/smol-dot/smoldot/pull/1747))
+
+## 2.0.23 - 2024-03-20
+
+### Changed
+
+- Add support for the `transaction_v1_broadcast` and `transaction_v1_stop` JSON-RPC functions. ([#1724](https://github.com/smol-dot/smoldot/pull/1724))
+- The JSON-RPC server has been rewritten in order to simplify the code flow. It is unfortunately possible for new bugs to have appeared. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- JSON-RPC functions that require access to the runtime (for example `state_call`) now cache older runtimes that had to be downloaded, rather than downloading the runtime from scratch every single time. ([#1685](https://github.com/smol-dot/smoldot/pull/1685))
+- Smoldot is no longer compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled due to the Rust compiler considering target features as unstable. ([#1716](https://github.com/smol-dot/smoldot/pull/1716))
+
+### Fixed
+
+- The `chainHead_unstable_unpin` JSON-RPC function no longer panics if multiple identical block hashes are passed. ([#1728](https://github.com/smol-dot/smoldot/pull/1728))
+
+## 2.0.22 - 2024-03-04
+
+### Fixed
+
+- Fix crash when extracting the database of a chain when the current Babe epoch number doesn't immediately follow the previous Babe epoch number. ([#1695](https://github.com/smol-dot/smoldot/pull/1695))
+- Fix `isSyncing` is always being equal to `true` in the return value of the `system_health` JSON-RPC function. ([#1697](https://github.com/smol-dot/smoldot/pull/1697))
+
+## 2.0.21 - 2024-02-06
+
+### Changed
+
+- Update back to wasmi v0.32. The wasmi version was downgraded to v0.31 in smoldot v2.0.20 due to performance issues. These performance issues turned out to be simply caused by `debug-assertions = true`. ([#1667](https://github.com/smol-dot/smoldot/pull/1667))
+- Clarify the value of `isSyncing` returned by `system_health`. The value will be equal to `false` if no peer that smoldot is connected to is more than 10 blocks ahead, and that the highest block would runtime code has been downloaded is no more than 12 blocks ahead of the highest block of the local chain. ([#1658](https://github.com/smol-dot/smoldot/pull/1658))
+
+### Fixed
+
+- The warp syncing process no longer repeats itself every 32 blocks, which was causing unnecessary bandwidth and CPU usage. ([#1656](https://github.com/smol-dot/smoldot/pull/1656))
+
+## 2.0.20 - 2024-01-30
+
+### Fixed
+
+- Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned. ([#1618](https://github.com/smol-dot/smoldot/pull/1618))
+- Revert wasmi version to v0.31 due to performance issues with the experimental v0.32. The WebAssembly runtime is no longer compiled lazily as was the same since smoldot v2.0.17. ([#1642](https://github.com/smol-dot/smoldot/pull/1624))
+- Fix blocks not being marked as bad when they are downloaded in an unusual order. ([#1631](https://github.com/smol-dot/smoldot/pull/1631))
+- Fix some Merkle proofs being considered as invalid due to nodes having an invalid format when they are in reality storage nodes. ([#1634](https://github.com/smol-dot/smoldot/pull/1634))
+
+## 2.0.19 - 2024-01-26
+
+### Fixed
+
+- Non-Grandpa justifications are now silently ignored, instead of leading to a ban of the peer that sent the justification. This makes smoldot work better on chains that use BEEFY. ([#1614](https://github.com/smol-dot/smoldot/pull/1614))
+
+## 2.0.18 - 2024-01-24
+
+### Changed
+
+- The `transaction_unstable_submitAndWatch` and `transaction_unstable_unwatch` JSON-RPC functions have been renamed to respectively `transactionWatch_unstable_submitAndWatch` and `transactionWatch_unstable_unwatch`, and the corresponding event has been renamed from `transaction_unstable_watchEvent` to `transactionWatch_unstable_watchEvent`, in accordance with the latest changes in the JSON-RPC API specification. ([#1604](https://github.com/smol-dot/smoldot/pull/1604))
+- The warp syncing and regular syncing algorithms now run in parallel, meaning that smoldot will now try to perform a warp sync against peers whose finalized block is (or pretends to be) far ahead from the local finalized block, while at the same time continuing to sync normally from other peers. Additionally, smoldot will no longer try to warp sync to peers whose finalized block is too close to the local finalized block, and will instead sync normally. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+- The `system_health` JSON-RPC function now returns `isSyncing: true` if any of the peers smoldot is connected to is more than 10 blocks ahead of smoldot, and `false` in any other situation including having no peer. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+- The `chainHead_unstable_storage` JSON-RPC function now yields results progressively as soon as they are received from the peer-to-peer networking, instead of buffering every item and yielding them all at once ([#1605](https://github.com/smol-dot/smoldot/pull/1605)).
+
+### Fixed
+
+- The syncing no longer gets stuck when connecting to a chain whose head is at the same block height as the checkpoint in the chain specification. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+
+## 2.0.17 - 2024-01-17
+
+### Changed
+
+- The WebAssembly runtime is now compiled lazily, meaning that only the code that is executed is validated and translated. Thanks to this, compiling a runtime is now four times faster and the time to head of the chain is around 200ms faster. ([#1488](https://github.com/smol-dot/smoldot/pull/1488), [#1577](https://github.com/smol-dot/smoldot/pull/1577))
+- Most of the log messages emitted by smoldot have been modified in order to unify their syntax and be easier to parse programatically. ([#1560](https://github.com/smol-dot/smoldot/pull/1560))
+- Added support for the `ext_panic_handler_abort_on_panic_version_1` host function. ([#1573](https://github.com/smol-dot/smoldot/pull/1573))
+
+### Fixed
+
+- Fix the nodes discovery process being slow for chains that are added long after the smoldot client has started. This was caused by the fact that the discovery was started at the same time for all chains, and that this discovery intentionally slows down over time. The discovery is now performed and slowed down for each chain individually. ([#1544](https://github.com/smol-dot/smoldot/pull/1544))
+- Fix panic when a JSON-RPC function call requires executing an old runtime that smoldot considers as invalid. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
+- Runtime calls no longer fail instantly when a peer sends back an invalid Merkle proof. Instead, the call proof is requested again from a different peer. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
+- The `chainHead_unstable_call` JSON-RPC function now produces a `operationInaccessible` event instead of an `operationError` event when peers send back bad or incomplete Merkle proofs. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
+
+## 2.0.16 - 2023-12-29
+
+### Changed
+
+- Decoding and analyzing a Merkle proof is now around 10% to 50% faster. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+
+### Fixed
+
+- Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+- Fix bugs in various corner cases when decoding and analyzing a Merkle proof. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+- Fix Merkle proofs being considered as invalid if they contain a storage value that happens to successfully decode as a trie node with an inline child. ([#1504](https://github.com/smol-dot/smoldot/pull/1504))
+- Fix crash when using a worker due to race condition when a chain is removed while a JSON-RPC response is generated for it. ([#1512](https://github.com/smol-dot/smoldot/pull/1512))
+
+## 2.0.15 - 2023-12-20
+
+### Changed
+
+- When a network request fails, or when a block or justification fails to verify, smoldot now closes the gossip link with the peer it tried to send the request to or obtained the block or justification from, and will not re-open a new gossip link for a little while. ([#1482](https://github.com/smol-dot/smoldot/pull/1482))
+
+## 2.0.14 - 2023-12-11
+
+### Fixed
+
+- Fix pings never being sent to peers, which means that smoldot would fail to detect when a connection is no longer responsive. ([#1461](https://github.com/smol-dot/smoldot/pull/1461))
+- Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
+- Fix Merkle proofs with nodes that have one child and no storage value being considered as valid.
+- Fix Merkle proofs with nodes that have no children or storage value and aren't the root being considered as valid.
+
+## 2.0.13 - 2023-11-28
+
+### Changed
+
+- The order in which smoldot connects to peers is now random rather than depending on the peer. ([#1424](https://github.com/smol-dot/smoldot/pull/1424))
+- Increase the rate at which connections are opened to 10 per second, with a pool of 8 simultaneous connections openings. ([#1425](https://github.com/smol-dot/smoldot/pull/1425))
+
+### Fixed
+
+- Fix panic when disconnecting from a peer whose identity didn't match the identity that was expected when connecting to it. ([#1431](https://github.com/smol-dot/smoldot/pull/1431))
+
+## 2.0.12 - 2023-11-27
+
+### Fixed
+
+- Fix panic in network service when all chains are removed. ([#1422](https://github.com/smol-dot/smoldot/pull/1422))
+
+## 2.0.11 - 2023-11-27
+
+### Changed
+
 - A single networking service is now shared between all chains. This means that the same connection (such as a WebSocket or WebRTC connection) can now be used to open multiple block announces substreams for multiple different chains. ([#1398](https://github.com/smol-dot/smoldot/pull/1398))
 - Addresses that are not supported by the host platform are now ignored during the discovery process. For example, TCP/IP connections are ignored while in a browser. This avoids populating the address book with peers that we know we can't connect to anyway. ([#1359](https://github.com/smol-dot/smoldot/pull/1359), [#1360](https://github.com/smol-dot/smoldot/pull/1360))
 - Smoldot will no longer try to connect to the same address over and over again. ([#1358](https://github.com/smol-dot/smoldot/pull/1358))
@@ -14,6 +143,11 @@
 - Incoming notification substreams are now properly when accepted when a peer doesn't have a slot or gets a slot later on. ([#1369](https://github.com/smol-dot/smoldot/pull/1369))
 - Fix panic when `chainHead_unstable_follow` is called too many times. ([#1392](https://github.com/smol-dot/smoldot/pull/1392))
 - Fix panic when opening a gossiping link to a peer that we were previously connected to. ([#1395](https://github.com/smol-dot/smoldot/pull/1395))
+- Fix panic when the discovery system finds same address attributed to two different peers. ([#1412](https://github.com/smol-dot/smoldot/pull/1412))
+- Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Fix automatically refusing inbound notification substreams if a different inbound substream of the same protocol existed on the same connection, even when that other substream has been closed. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Inbound notification substreams opened by the remote and that are no longer wanted are now forcefully closed if the remote doesn't close them gracefully. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Fix panic when a connection is shutting down after the notification substreams of that connection were opened in an unconventional order. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
 
 ## 2.0.10 - 2023-11-17
 

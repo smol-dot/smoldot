@@ -245,8 +245,11 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         // List of all active connections. Keys are IDs assigned by the instance.
         connections: Map<number, Connection>,
         // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
-        // instance notifies that a chain creation has succeeded or failed, an entry is popped.
-        addChainResults: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        // instance notifies that a chainId has been allocated, an entry is popped.
+        addChainIdAllocations: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        // After a chainId has been allocated, the entry from `addChainIdAllocations` is moved
+        // here.
+        addChainResults: Map<number, (outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
         /// Callback called when the `executor-shutdown` or `wasm-panic` event is received.
         onExecutorShutdownOrWasmPanic: () => void,
         // List of all active chains. Keys are chainIDs assigned by the instance.
@@ -259,7 +262,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         instance: { status: "not-created" },
         chainIds: new WeakMap(),
         connections: new Map(),
-        addChainResults: [],
+        addChainIdAllocations: [],
+        addChainResults: new Map(),
         onExecutorShutdownOrWasmPanic: () => { },
         chains: new Map(),
     };
@@ -284,10 +288,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 state.connections.forEach((connec) => connec.reset());
                 state.connections.clear();
 
-                for (const addChainResult of state.addChainResults) {
+                for (const addChainResult of state.addChainIdAllocations) {
                     addChainResult({ success: false, error: "Smoldot has crashed" });
                 }
-                state.addChainResults = [];
+                state.addChainIdAllocations = [];
+                state.addChainResults.forEach((addChainResult) => {
+                    addChainResult({ success: false, error: "Smoldot has crashed" });
+                });
+                state.addChainResults.clear();
 
                 for (const chain of Array.from(state.chains.values())) {
                     for (const callback of chain.jsonRpcResponsesPromises) {
@@ -312,8 +320,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 logCallback(event.level, event.target, event.message)
                 break;
             }
+            case "add-chain-id-allocated": {
+                const callback = state.addChainIdAllocations.shift()!;
+                state.addChainResults.set(event.chainId, callback);
+                break;
+            }
             case "add-chain-result": {
-                (state.addChainResults.shift()!)(event);
+                (state.addChainResults.get(event.chainId)!)(event);
+                state.addChainResults.delete(event.chainId);
                 break;
             }
             case "json-rpc-responses-non-empty": {
@@ -499,7 +513,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
                 throw new AddChainError("`databaseContent` is not a string");
 
-            const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
+            const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainIdAllocations.push(resolve));
 
             state.instance.instance.addChain(
                 options.chainSpec,
@@ -598,10 +612,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
             state.connections.forEach((connec) => connec.reset());
             state.connections.clear();
-            for (const addChainResult of state.addChainResults) {
+            for (const addChainResult of state.addChainIdAllocations) {
                 addChainResult({ success: false, error: "Client.terminate() has been called" });
             }
-            state.addChainResults = [];
+            state.addChainIdAllocations = [];
+            state.addChainResults.forEach((addChainResult) => {
+                addChainResult({ success: false, error: "Client.terminate() has been called" });
+            });
+            state.addChainResults.clear();
             for (const chain of Array.from(state.chains.values())) {
                 for (const callback of chain.jsonRpcResponsesPromises) {
                     callback()

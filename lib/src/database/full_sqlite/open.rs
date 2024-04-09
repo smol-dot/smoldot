@@ -19,13 +19,7 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-// TODO:remove all the unwraps in this module that shouldn't be there
-
-use super::{
-    encode_babe_epoch_information, insert_storage, CorruptedError, InsertTrieNode, InternalError,
-    SqliteFullDatabase,
-};
-use crate::chain::chain_information;
+use super::{CorruptedError, InternalError, SqliteFullDatabase};
 
 use std::path::Path;
 
@@ -75,7 +69,7 @@ PRAGMA foreign_keys = ON;
                 "PRAGMA cache_size = {}",
                 0i64.saturating_sub_unsigned(
                     u64::try_from((config.cache_size.saturating_sub(1) / 1024).saturating_add(1))
-                        .unwrap_or(u64::max_value()),
+                        .unwrap_or(u64::MAX),
                 )
             ),
             (),
@@ -119,31 +113,6 @@ Keys in that table:
 
  - `finalized` (number): Height of the finalized block, as a 64bits big endian number.
 
- - `grandpa_authorities_set_id` (number): Id of the authorities set that must finalize the block
- right after the finalized block. The value is 0 at the genesis block, and increased by 1 at every
- authorities change. Missing if and only if the chain doesn't use Grandpa.
-
- - `grandpa_scheduled_target` (number): Height of the block where the authorities found in
- `grandpa_scheduled_authorities` will be triggered. Blocks whose height is strictly higher than
- this value must be finalized using the new set of authorities. This authority change must have
- been scheduled in or before the finalized block. Missing if no change is scheduled or if the
- chain doesn't use Grandpa.
-
- - `aura_slot_duration` (number): Duration of an Aura slot in milliseconds. Missing if and only if
- the chain doesn't use Aura.
-
- - `babe_slots_per_epoch` (number): Number of slots per Babe epoch. Missing if and only if the
- chain doesn't use Babe.
-
- - `babe_finalized_epoch` (blob): SCALE encoding of a structure that contains the information
- about the Babe epoch used for the finalized block. Missing if and only if the finalized
- block is block #0 or the chain doesn't use Babe.
-
- - `babe_finalized_next_epoch` (blob): SCALE encoding of a structure that contains the information
- about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
- finalized block is block #0, then this contains information about epoch #0. Missing if and
- only if the chain doesn't use Babe.
-
 */
 CREATE TABLE meta(
     key STRING NOT NULL PRIMARY KEY,
@@ -171,8 +140,7 @@ CREATE TABLE trie_node_storage(
     value BLOB,
     trie_root_ref BLOB,
     trie_entry_version INTEGER NOT NULL,
-    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (trie_root_ref) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK((value IS NULL) != (trie_root_ref IS NULL))
 );
 CREATE INDEX trie_node_storage_by_trie_root_ref ON trie_node_storage(trie_root_ref);
@@ -185,8 +153,7 @@ CREATE TABLE trie_node_child(
     child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
     child_hash BLOB NOT NULL,
     PRIMARY KEY (hash, child_num),
-    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
 );
 CREATE INDEX trie_node_child_by_hash ON trie_node_child(hash);
@@ -203,9 +170,7 @@ CREATE TABLE blocks(
     header BLOB NOT NULL,
     justification BLOB,
     is_best_chain BOOLEAN NOT NULL,
-    UNIQUE(number, hash),
-    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
-    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
+    UNIQUE(number, hash)
 );
 CREATE INDEX blocks_by_number ON blocks(number);
 CREATE INDEX blocks_by_parent ON blocks(parent_hash);
@@ -227,37 +192,6 @@ CREATE TABLE blocks_body(
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
 CREATE INDEX blocks_body_by_block ON blocks_body(hash);
-
-/*
-List of public keys and weights of the GrandPa authorities that must finalize the children of the
-finalized block. Empty if the chain doesn't use Grandpa.
-*/
-CREATE TABLE grandpa_triggered_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    weight INTEGER NOT NULL,
-    CHECK(length(public_key) == 32)
-);
-
-/*
-List of public keys and weights of the GrandPa authorities that will be triggered at the block
-found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
-*/
-CREATE TABLE grandpa_scheduled_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    weight INTEGER NOT NULL,
-    CHECK(length(public_key) == 32)
-);
-
-/*
-List of public keys of the Aura authorities that must author the children of the finalized block.
-*/
-CREATE TABLE aura_finalized_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    CHECK(length(public_key) == 32)
-);
 
 PRAGMA user_version = 1;
 
@@ -337,186 +271,26 @@ pub struct DatabaseEmpty {
 }
 
 impl DatabaseEmpty {
-    /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
-    /// order to turn it into an actual database.
-    ///
-    /// Must also pass the body, justification, and state of the storage of the finalized block.
-    // TODO: Passing SameAsParent is invalid, document and error
+    /// Inserts the given finalized block in the database prototype in order to turn it into
+    /// an actual database.
+    // TODO: can a database not be empty?
     pub fn initialize<'a>(
-        mut self,
-        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        self,
+        finalized_block_header: &[u8],
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
-        finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, CorruptedError> {
-        // Start a transaction to insert everything in one go.
-        let transaction = self
-            .database
-            .transaction()
-            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-        // Temporarily disable foreign key checks in order to make the initial insertion easier,
-        // as we don't have to make sure that trie nodes are sorted.
-        // Note that this is immediately disabled again when we `COMMIT`.
-        transaction
-            .execute("PRAGMA defer_foreign_keys = ON", ())
-            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-        let chain_information = chain_information.into();
-
-        let finalized_block_hash = chain_information
-            .finalized_block_header
-            .hash(self.block_number_bytes);
-
-        let scale_encoded_finalized_block_header = chain_information
-            .finalized_block_header
-            .scale_encoding(self.block_number_bytes)
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-
-        insert_storage(
-            &transaction,
-            None,
-            finalized_block_storage_entries,
-            finalized_block_state_version,
-        )?;
-
-        transaction
-            .prepare_cached(
-                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, is_best_chain, justification) VALUES(?, ?, ?, ?, ?, TRUE, ?)",
-            )
-            .unwrap()
-            .execute((
-                &finalized_block_hash[..],
-                if chain_information.finalized_block_header.number != 0 {
-                    Some(&chain_information.finalized_block_header.parent_hash[..])
-                } else { None },
-                &chain_information.finalized_block_header.state_root[..],
-                i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                &scale_encoded_finalized_block_header[..],
-                finalized_block_justification.as_deref(),
-            ))
-            .unwrap();
-
-        {
-            let mut statement = transaction
-                .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
-                .unwrap();
-            for (index, item) in finalized_block_body.enumerate() {
-                statement
-                    .execute((
-                        &finalized_block_hash[..],
-                        i64::try_from(index).unwrap(),
-                        item,
-                    ))
-                    .unwrap();
-            }
-        }
-
-        super::meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
-        super::meta_set_number(
-            &transaction,
-            "finalized",
-            chain_information.finalized_block_header.number,
-        )?;
-
-        match &chain_information.finality {
-            chain_information::ChainInformationFinalityRef::Outsourced => {}
-            chain_information::ChainInformationFinalityRef::Grandpa {
-                finalized_triggered_authorities,
-                after_finalized_block_authorities_set_id,
-                finalized_scheduled_change,
-            } => {
-                super::meta_set_number(
-                    &transaction,
-                    "grandpa_authorities_set_id",
-                    *after_finalized_block_authorities_set_id,
-                )?;
-
-                let mut statement = transaction
-                    .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
-                    .unwrap();
-                for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement
-                        .execute((
-                            i64::try_from(index).unwrap(),
-                            &item.public_key[..],
-                            i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
-                        ))
-                        .unwrap();
-                }
-
-                if let Some((height, list)) = finalized_scheduled_change {
-                    super::meta_set_number(&transaction, "grandpa_scheduled_target", *height)?;
-
-                    let mut statement = transaction
-                        .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
-                        .unwrap();
-                    for (index, item) in list.iter().enumerate() {
-                        statement
-                            .execute((
-                                i64::try_from(index).unwrap(),
-                                &item.public_key[..],
-                                i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
-                            ))
-                            .unwrap();
-                    }
-                }
-            }
-        }
-
-        match &chain_information.consensus {
-            chain_information::ChainInformationConsensusRef::Unknown => {}
-            chain_information::ChainInformationConsensusRef::Aura {
-                finalized_authorities_list,
-                slot_duration,
-            } => {
-                super::meta_set_number(&transaction, "aura_slot_duration", slot_duration.get())
-                    .unwrap();
-
-                let mut statement = transaction
-                    .prepare_cached(
-                        "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
-                    )
-                    .unwrap();
-                for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement
-                        .execute((i64::try_from(index).unwrap(), &item.public_key[..]))
-                        .unwrap();
-                }
-            }
-            chain_information::ChainInformationConsensusRef::Babe {
-                slots_per_epoch,
-                finalized_next_epoch_transition,
-                finalized_block_epoch_information,
-            } => {
-                super::meta_set_number(&transaction, "babe_slots_per_epoch", slots_per_epoch.get())
-                    .unwrap();
-                super::meta_set_blob(
-                    &transaction,
-                    "babe_finalized_next_epoch",
-                    &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
-                )
-                .unwrap();
-
-                if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
-                    super::meta_set_blob(&transaction, "babe_finalized_epoch", &encode_babe_epoch_information(
-            finalized_block_epoch_information.clone(),
-        )[..]).unwrap();
-                }
-            }
-        }
-
-        transaction
-            .commit()
-            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-        Ok(SqliteFullDatabase {
+        let database = SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),
             block_number_bytes: self.block_number_bytes,
-        })
+        };
+
+        database.reset(
+            finalized_block_header,
+            finalized_block_body,
+            finalized_block_justification,
+        )?;
+
+        Ok(database)
     }
 }

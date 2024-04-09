@@ -452,41 +452,41 @@ define_methods! {
     system_version() -> Cow<'a, str>,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_body(
+    chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> ChainHeadBodyCallReturn<'a>,
-    chainHead_unstable_call(
+    chainHead_v1_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
         #[rename = "callParameters"] call_parameters: HexString
     ) -> ChainHeadBodyCallReturn<'a>,
-    chainHead_unstable_follow(
+    chainHead_v1_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
-    chainHead_unstable_header(
+    chainHead_v1_header(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> Option<HexString>,
-    chainHead_unstable_stopOperation(
+    chainHead_v1_stopOperation(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_storage(
+    chainHead_v1_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>
     ) -> ChainHeadStorageReturn<'a>,
-    chainHead_unstable_continue(
+    chainHead_v1_continue(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_unfollow(
+    chainHead_v1_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
-    chainHead_unstable_unpin(
+    chainHead_v1_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "hashOrHashes"] hash_or_hashes: HashHexStringSingleOrArray
     ) -> (),
@@ -498,14 +498,17 @@ define_methods! {
     sudo_unstable_p2pDiscover(multiaddr: Cow<'a, str>) -> (),
     sudo_unstable_version() -> Cow<'a, str>,
 
-    transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
-    transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
+    transaction_v1_broadcast(transaction: HexString) -> Cow<'a, str>,
+    transaction_v1_stop(#[rename = "operationId"] operation_id: Cow<'a, str>) -> (),
+
+    transactionWatch_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
+    transactionWatch_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
-    network_unstable_subscribeEvents() -> Cow<'a, str>,
-    network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    sudo_network_unstable_watch() -> Cow<'a, str>,
+    sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
@@ -520,12 +523,12 @@ define_methods! {
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+    chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
+    transactionWatch_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
-    network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
+    sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -849,88 +852,49 @@ pub struct TransactionWatchEventBlock {
 /// See <https://github.com/paritytech/smoldot/issues/2245>.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
-pub enum NetworkEvent<'a> {
-    #[serde(rename = "startConnect")]
-    StartConnect {
-        when: u64,
+pub enum NetworkEvent {
+    #[serde(rename = "connectionState")]
+    ConnectionState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
-        multiaddr: Cow<'a, str>,
-    },
-    #[serde(rename = "connected")]
-    Connected {
+        #[serde(rename = "targetPeerId", skip_serializing_if = "Option::is_none")]
+        target_peer_id: Option<String>,
+        #[serde(rename = "targetMultiaddr")]
+        target_multiaddr: String,
+        status: NetworkEventStatus,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
     },
-    #[serde(rename = "handshakeFinished")]
-    HandshakeFinished {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "stop")]
-    Stop {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        reason: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-assign")]
-    OutSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-unassign")]
-    OutSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-assign")]
-    InSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-unassign")]
-    InSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-to-out-slot")]
-    InSlotToOutSlot {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-open")]
-    SubstreamOutOpen {
-        when: u64,
+    #[serde(rename = "substreamState")]
+    SubstreamState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
         #[serde(rename = "substreamId")]
         substream_id: u32,
+        status: NetworkEventStatus,
         #[serde(rename = "protocolName")]
-        protocol_name: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-accept")]
-    SubstreamOutAccept {
+        protocol_name: String,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
     },
-    #[serde(rename = "substream-out-stop")]
-    SubstreamOutStop {
-        when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
-        reason: Cow<'a, str>,
-    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventStatus {
+    #[serde(rename = "connecting")]
+    Connecting,
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Close,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventDirection {
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = "out")]
+    Out,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1301,7 +1265,7 @@ mod tests {
     fn no_params_refused() {
         // No `params` field in the request.
         let err = super::parse_jsonrpc_client_to_server(
-            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_follow"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_v1_follow"}"#,
         );
 
         assert!(matches!(
@@ -1309,7 +1273,7 @@ mod tests {
             Err(super::ParseClientToServerError::Method {
                 request_id: "2",
                 error: super::MethodError::MissingParameters {
-                    rpc_method: "chainHead_unstable_follow"
+                    rpc_method: "chainHead_v1_follow"
                 }
             })
         ));

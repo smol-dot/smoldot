@@ -86,10 +86,10 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, pin, time::Duration};
-use futures_util::FutureExt as _;
+use core::{num::NonZeroU32, ops, time::Duration};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
+use platform::PlatformRef;
 use smoldot::{
     chain, chain_spec, header,
     informant::HashDisplay,
@@ -98,12 +98,12 @@ use smoldot::{
 
 mod database;
 mod json_rpc_service;
-mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod network_service;
 pub mod platform;
 
 pub use json_rpc_service::HandleRpcError;
@@ -158,7 +158,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// A typical value is 128.
@@ -171,7 +171,7 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
-        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::MAX` is
         /// completely reasonable.
         ///
         /// While a typical reasonable value would be for example 64, existing UIs tend to start
@@ -209,7 +209,7 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
     /// to initialize, or key found in [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<PublicApiChain<TChain>>,
+    public_api_chains: slab::Slab<PublicApiChain<TPlat, TChain>>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -225,7 +225,7 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     network_service: Option<Arc<network_service::NetworkService<TPlat>>>,
 }
 
-struct PublicApiChain<TChain> {
+struct PublicApiChain<TPlat: PlatformRef, TChain> {
     /// Opaque user data passed to [`Client::add_chain`].
     user_data: TChain,
 
@@ -239,7 +239,7 @@ struct PublicApiChain<TChain> {
     /// Handle that sends requests to the JSON-RPC service that runs in the background.
     /// Destroying this handle also shuts down the service. `None` iff
     /// [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
-    json_rpc_frontend: Option<json_rpc_service::Frontend>,
+    json_rpc_frontend: Option<json_rpc_service::Frontend<TPlat>>,
 
     /// Notified when the [`PublicApiChain`] is destroyed, in order for the [`JsonRpcResponses`]
     /// to detect when the chain has been removed.
@@ -300,7 +300,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
 }
 
 /// Returns by [`Client::add_chain`] on success.
-pub struct AddChainSuccess {
+pub struct AddChainSuccess<TPlat: PlatformRef> {
     /// Newly-allocated identifier for the chain.
     pub chain_id: ChainId,
 
@@ -309,26 +309,26 @@ pub struct AddChainSuccess {
     /// Is always `Some` if [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Enabled`],
     /// and `None` if it was [`AddChainConfigJsonRpc::Disabled`]. In other words, you can unwrap
     /// this `Option` if you passed `Enabled`.
-    pub json_rpc_responses: Option<JsonRpcResponses>,
+    pub json_rpc_responses: Option<JsonRpcResponses<TPlat>>,
 }
 
 /// Stream of JSON-RPC responses or notifications.
 ///
 /// See [`AddChainSuccess::json_rpc_responses`].
-pub struct JsonRpcResponses {
+pub struct JsonRpcResponses<TPlat: PlatformRef> {
     /// Receiving side for responses.
     ///
     /// As long as this object is alive, the JSON-RPC service will continue running. In order
     /// to prevent that from happening, we destroy it as soon as the
     /// [`JsonRpcResponses::public_api_chain_destroyed`] is notified of the destruction of
     /// the sender.
-    inner: Option<json_rpc_service::Frontend>,
+    inner: Option<json_rpc_service::Frontend<TPlat>>,
 
     /// Notified when the [`PublicApiChain`] is destroyed.
-    public_api_chain_destroyed: pin::Pin<Box<event_listener::EventListener>>,
+    public_api_chain_destroyed: event_listener::EventListener,
 }
 
-impl JsonRpcResponses {
+impl<TPlat: PlatformRef> JsonRpcResponses<TPlat> {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
@@ -367,7 +367,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> Result<AddChainSuccess, AddChainError> {
+    ) -> Result<AddChainSuccess<TPlat>, AddChainError> {
         // `chains_by_key` is created lazily whenever needed.
         let chains_by_key = self.chains_by_key.get_or_insert_with(|| {
             HashMap::with_hasher(util::SipHasherBuild::new({
@@ -738,86 +738,128 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // Note that the chain name is printed through the `Debug` trait (rather
                 // than `Display`) because it is an untrusted user input.
                 if let Some((_, para_id, relay_chain_log_name)) = relay_chain.as_ref() {
-                    log::info!(
-                        target: "smoldot",
-                        "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                        hash: {}. Relay chain: {} (id: {})",
-                        log_name,
-                        chain_spec.name(),
-                        HashDisplay(&genesis_block_hash),
-                        relay_chain_log_name,
-                        para_id,
+                    log!(
+                        &self.platform,
+                        Info,
+                        "smoldot",
+                        format!(
+                            "Parachain initialization complete for {}. Name: {:?}. Genesis \
+                            hash: {}. Relay chain: {} (id: {})",
+                            log_name,
+                            chain_spec.name(),
+                            HashDisplay(&genesis_block_hash),
+                            relay_chain_log_name,
+                            para_id
+                        )
                     );
                 } else {
-                    log::info!(
-                        target: "smoldot",
-                        "Chain initialization complete for {}. Name: {:?}. Genesis \
-                        hash: {}. {} starting at: {} (#{})",
-                        log_name,
-                        chain_spec.name(),
-                        HashDisplay(&genesis_block_hash),
-                        if used_database_chain_information { "Database" } else { "Chain specification" },
-                        HashDisplay(&chain_information
-                            .as_ref()
-                            .map(|ci| ci.as_ref().finalized_block_header.hash(usize::from(chain_spec.block_number_bytes())))
-                            .unwrap_or(genesis_block_hash)),
-                        chain_information
-                            .as_ref()
-                            .map(|ci| ci.as_ref().finalized_block_header.number)
-                            .unwrap_or(0)
+                    log!(
+                        &self.platform,
+                        Info,
+                        "smoldot",
+                        format!(
+                            "Chain initialization complete for {}. Name: {:?}. Genesis \
+                            hash: {}. {} starting at: {} (#{})",
+                            log_name,
+                            chain_spec.name(),
+                            HashDisplay(&genesis_block_hash),
+                            if used_database_chain_information {
+                                "Database"
+                            } else {
+                                "Chain specification"
+                            },
+                            HashDisplay(
+                                &chain_information
+                                    .as_ref()
+                                    .map(|ci| ci
+                                        .as_ref()
+                                        .finalized_block_header
+                                        .hash(usize::from(chain_spec.block_number_bytes())))
+                                    .unwrap_or(genesis_block_hash)
+                            ),
+                            chain_information
+                                .as_ref()
+                                .map(|ci| ci.as_ref().finalized_block_header.number)
+                                .unwrap_or(0)
+                        )
                     );
                 }
 
                 if print_warning_genesis_root_chainspec {
-                    log::info!(
-                        target: "smoldot",
-                        "Chain specification of {} contains a `genesis.raw` item. It is \
-                        possible to significantly improve the initialization time by \
-                        replacing the `\"raw\": ...` field with \
-                        `\"stateRootHash\": \"0x{}\"`",
-                        log_name, hex::encode(genesis_block_state_root)
-                    )
+                    log!(
+                        &self.platform,
+                        Info,
+                        "smoldot",
+                        format!(
+                            "Chain specification of {} contains a `genesis.raw` item. It is \
+                            possible to significantly improve the initialization time by \
+                            replacing the `\"raw\": ...` field with \
+                            `\"stateRootHash\": \"0x{}\"`",
+                            log_name,
+                            hex::encode(genesis_block_state_root)
+                        )
+                    );
                 }
 
                 if chain_spec.protocol_id().is_some() {
-                    log::warn!(
-                        target: "smoldot",
-                        "Chain specification of {} contains a `protocolId` field. This \
-                        field is deprecated and its value is no longer used. It can be \
-                        safely removed from the JSON document.", log_name
+                    log!(
+                        &self.platform,
+                        Warn,
+                        "smoldot",
+                        format!(
+                            "Chain specification of {} contains a `protocolId` field. This \
+                            field is deprecated and its value is no longer used. It can be \
+                            safely removed from the JSON document.",
+                            log_name
+                        )
                     );
                 }
 
                 if chain_spec.telemetry_endpoints().count() != 0 {
-                    log::warn!(
-                        target: "smoldot",
-                        "Chain specification of {} contains a non-empty \
-                        `telemetryEndpoints` field. Smoldot doesn't support telemetry \
-                        endpoints and as such this field is unused.", log_name
+                    log!(
+                        &self.platform,
+                        Warn,
+                        "smoldot",
+                        format!(
+                            "Chain specification of {} contains a non-empty \
+                            `telemetryEndpoints` field. Smoldot doesn't support telemetry \
+                            endpoints and as such this field is unused.",
+                            log_name
+                        )
                     );
                 }
 
                 // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
                 if chain_spec.bad_blocks_hashes().count() != 0 {
-                    log::warn!(
-                        target: "smoldot",
-                        "Chain specification of {} contains a list of bad blocks. Bad \
-                        blocks are not implemented in the light client. An appropriate \
-                        way to silence this warning is to remove the bad blocks from the \
-                        chain specification, which can safely be done:\n\
-                        - For relay chains: if the chain specification contains a \
-                        checkpoint and that the bad blocks have a block number inferior \
-                        to this checkpoint.\n\
-                        - For parachains: if the bad blocks have a block number inferior \
-                        to the current parachain finalized block.", log_name
+                    log!(
+                        &self.platform,
+                        Warn,
+                        "smoldot",
+                        format!(
+                            "Chain specification of {} contains a list of bad blocks. Bad \
+                            blocks are not implemented in the light client. An appropriate \
+                            way to silence this warning is to remove the bad blocks from the \
+                            chain specification, which can safely be done:\n\
+                            - For relay chains: if the chain specification contains a \
+                            checkpoint and that the bad blocks have a block number inferior \
+                            to this checkpoint.\n\
+                            - For parachains: if the bad blocks have a block number inferior \
+                            to the current parachain finalized block.",
+                            log_name
+                        )
                     );
                 }
 
                 if database_was_wrong_chain {
-                    log::warn!(
-                        target: "smoldot",
-                        "Ignore database of {} because its genesis hash didn't match the \
-                        genesis hash of the chain.", log_name
+                    log!(
+                        &self.platform,
+                        Warn,
+                        "smoldot",
+                        format!(
+                            "Ignore database of {} because its genesis hash didn't match the \
+                            genesis hash of the chain.",
+                            log_name
+                        )
                     )
                 }
 
@@ -832,11 +874,16 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         if !invalid_bootstrap_nodes_sanitized.is_empty() {
-            log::warn!(
-                target: "smoldot",
-                "Failed to parse some of the bootnodes of {}. \
-                These bootnodes have been ignored. List: {}",
-                log_name, invalid_bootstrap_nodes_sanitized.join(", ")
+            log!(
+                &self.platform,
+                Warn,
+                "smoldot",
+                format!(
+                    "Failed to parse some of the bootnodes of {}. \
+                    These bootnodes have been ignored. List: {}",
+                    log_name,
+                    invalid_bootstrap_nodes_sanitized.join(", ")
+                )
             );
         }
 
@@ -845,11 +892,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             // Note the usage of the word "likely", because another chain with the same key might
             // have been added earlier and contains bootnodes, or we might receive an incoming
             // substream on a connection normally used for a different chain.
-            log::warn!(
-                target: "smoldot",
-                "Newly-added chain {} has an empty list of bootnodes. Smoldot will likely fail \
-                to connect to its peer-to-peer network.",
-                log_name
+            log!(
+                &self.platform,
+                Warn,
+                "smoldot",
+                format!(
+                    "Newly-added chain {} has an empty list of bootnodes. Smoldot will \
+                    likely fail to connect to its peer-to-peer network.",
+                    log_name
+                )
             );
         }
 
@@ -869,7 +920,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     network_service.discover(known_nodes, false).await;
                     network_service.discover(bootstrap_nodes, true).await;
                 }
-                .boxed()
             });
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
@@ -881,16 +931,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         {
             // TODO: the JSON-RPC service splits between first creation and actual services starting because starting the service couldn't be done immediately, since this is now the case considering merging the two together again
             let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
+                platform: self.platform.clone(),
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests,
                 max_subscriptions,
-                // Note that the settings below are intentionally not exposed in the publicly
-                // available configuration, as "good" values depend on the global number of tasks.
-                // In other words, these constants are relative to the number of other things that
-                // happen within the client rather than absolute values. Since the user isn't
-                // supposed to know what happens within the client, they can't rationally decide
-                // what value is appropriate.
-                max_parallel_requests: NonZeroU32::new(24).unwrap(),
             });
 
             service_starter.start(json_rpc_service::StartConfig {
@@ -899,7 +943,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
-                chain_spec: &chain_spec,
+                chain_name: chain_spec.name().to_owned(),
+                chain_ty: chain_spec.chain_type().to_owned(),
+                chain_is_live: chain_spec.has_live_network(),
+                chain_properties_json: chain_spec.properties().to_owned(),
                 system_name: self.platform.client_name().into_owned(),
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
@@ -948,7 +995,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         removed_chain
             .public_api_chain_destroyed_event
-            .notify(usize::max_value());
+            .notify(usize::MAX);
 
         // `chains_by_key` is created lazily when `add_chain` is called.
         // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
@@ -960,7 +1007,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         let running_chain = chains_by_key.get_mut(&removed_chain.key).unwrap();
         if running_chain.num_references.get() == 1 {
-            log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
+            log!(
+                &self.platform,
+                Info,
+                "smoldot",
+                format!("Shutting down chain {}", running_chain.log_name)
+            );
             chains_by_key.remove(&removed_chain.key);
         } else {
             running_chain.num_references =
@@ -983,7 +1035,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// API user is encouraged to stop sending requests and start pulling answers with
     /// [`JsonRpcResponses::next`].
     ///
-    /// Passing `u32::max_value()` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
+    /// Passing `u32::MAX` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
     /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
     /// trusted.
     ///
@@ -1093,8 +1145,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             identify_agent_version: network_identify_agent_version,
-            connections_open_pool_size: 5,
-            connections_open_pool_restore_delay: Duration::from_secs(1),
+            connections_open_pool_size: 8,
+            connections_open_pool_restore_delay: Duration::from_millis(100),
             chains_capacity: 1,
         })
     });
@@ -1172,9 +1224,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                         finalized_block_header,
                         para_id,
                         relay_chain_sync: relay_chain.runtime_service.clone(),
-                        relay_chain_block_number_bytes: relay_chain
-                            .sync_service
-                            .block_number_bytes(),
                     },
                 ),
             }));
@@ -1186,6 +1235,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));
@@ -1224,6 +1274,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));

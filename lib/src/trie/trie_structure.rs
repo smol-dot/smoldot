@@ -1084,13 +1084,13 @@ impl<TUd> TrieStructure<TUd> {
     ///
     /// Panics if `target` is not a valid index.
     fn node_path(&'_ self, target: usize) -> impl Iterator<Item = usize> + '_ {
-        debug_assert!(self.nodes.get(usize::max_value()).is_none());
+        debug_assert!(self.nodes.get(usize::MAX).is_none());
         // First element is an invalid key, each successor is the last element of
         // `reverse_node_path(target)` that isn't equal to `current`.
         // Since the first element is invalid, we skip it.
         // Since `reverse_node_path` never produces `target`, we know that it also won't be
         // produced here.
-        iter::successors(Some(usize::max_value()), move |&current| {
+        iter::successors(Some(usize::MAX), move |&current| {
             self.reverse_node_path(target)
                 .take_while(move |n| *n != current)
                 .last()
