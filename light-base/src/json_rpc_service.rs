@@ -117,8 +117,7 @@ pub struct Config<TPlat: PlatformRef> {
 
 /// Creates a new JSON-RPC service with the given configuration.
 ///
-/// Returns a handler that allows sending requests, and a [`ServicePrototype`] that must later
-/// be initialized using [`ServicePrototype::start`].
+/// Returns a handler that allows sending requests and receiving responses.
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
 pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> Frontend<TPlat> {
