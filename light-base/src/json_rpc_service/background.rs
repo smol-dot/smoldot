@@ -336,7 +336,7 @@ enum MultiStageRequestTy {
     StateGetKeysPaged {
         prefix: Vec<u8>,
         count: u32,
-        start_key: Vec<u8>,
+        start_key: Option<Vec<u8>>,
     },
     StateQueryStorageAt {
         keys: Vec<methods::HexString>,
@@ -362,7 +362,7 @@ enum StorageRequestInProgress {
         block_hash: [u8; 32],
         prefix: Vec<u8>,
         count: u32,
-        start_key: Vec<u8>,
+        start_key: Option<Vec<u8>>,
         in_progress_results: Vec<Vec<u8>>,
     },
     StateQueryStorageAt {
@@ -1323,7 +1323,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             MultiStageRequestTy::StateGetKeysPaged {
                                 prefix: prefix.map_or(Vec::new(), |p| p.0),
                                 count,
-                                start_key: start_key.map_or(Vec::new(), |p| p.0),
+                                start_key: start_key.map(|p| p.0),
                             },
                         ));
                     }
@@ -2787,7 +2787,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 let results_to_client = cache_entry
                                     .iter()
                                     .cloned()
-                                    .filter(|k| *k >= *start_key) // TODO: not sure if start should be in the set or not?
+                                    .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                                     .map(methods::HexString)
                                     .take(usize::try_from(*count).unwrap_or(usize::MAX))
                                     .collect::<Vec<_>>();
@@ -3593,7 +3593,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let results_to_client = final_results
                             .iter()
                             .cloned()
-                            .filter(|k| *k >= start_key) // TODO: not sure if start should be in the set or not?
+                            .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                             .map(methods::HexString)
                             .take(usize::try_from(count).unwrap_or(usize::MAX))
                             .collect::<Vec<_>>();

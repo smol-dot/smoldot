@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix `QueueFullError` being thrown even when the number of requests is way below the value passed to `jsonRpcMaxPendingRequests`. ([#1747](https://github.com/smol-dot/smoldot/pull/1747))
+- The `state_getKeysPaged` JSON-RPC function no longer includes in its results the key that passed as the `startKey` parameter.
 
 ## 2.0.23 - 2024-03-20
 
