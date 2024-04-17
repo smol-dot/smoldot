@@ -1898,9 +1898,9 @@ checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.80"
+version = "1.0.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a56dea16b0a29e94408b9aa5e2940a4eedbd128a1ba20e8f7ae60fd3d465af0e"
+checksum = "3d1597b0c024618f09a9c3b8655b7e430397a36d23fdafec26d6965e9eec3eba"
 dependencies = [
  "unicode-ident",
 ]
@@ -2135,9 +2135,9 @@ checksum = "92d43fe69e652f3df9bdc2b85b2854a0825b86e4fb76bc44d945137d053639ca"
 
 [[package]]
 name = "serde"
-version = "1.0.197"
+version = "1.0.198"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb1c873e1b9b056a4dc4c0c198b24c3ffa059243875552b2bd0933b1aee4ce2"
+checksum = "9846a40c979031340571da2545a4e5b7c4163bdae79b301d5f86d03979451fcc"
 dependencies = [
  "serde_derive",
 ]
@@ -2153,9 +2153,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.197"
+version = "1.0.198"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eb0b34b42edc17f6b7cac84a52a1c5f0e1bb2227e997ca9011ea3dd34e8610b"
+checksum = "e88edab869b01783ba905e7d0153f9fc1a6505a96e4ad3018011eedb838566d9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2164,9 +2164,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.115"
+version = "1.0.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12dc5c46daa8e9fdf4f5e71b6cf9a53f2487da0e86e55808e2d35539666497dd"
+checksum = "3e17db7126d17feb94eb3fad46bf1a96b034e8aacbc2e775fe81505f8b0b2813"
 dependencies = [
  "itoa",
  "ryu",
@@ -2754,9 +2754,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.203.0"
+version = "0.204.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87e3b46a0d9d9143d57aa926c42e2af284b5cb8f0c7b71079afc7a6fca42db50"
+checksum = "500cbde9b4d8dfc0335ec729d226dbf083e51e47501ac71e6addaed10ccb0a51"
 dependencies = [
  "leb128",
 ]
@@ -3081,22 +3081,22 @@ checksum = "c9a8c62e9df8322b2166d2a6f096fbec195ddb093748fd74170dcf25ef596769"
 
 [[package]]
 name = "wast"
-version = "203.0.0"
+version = "204.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "872020f79fa7a09aeaec308d0ba60816e2f808d9b402e2f89d2a9c76eda482cd"
+checksum = "a0e3de19692b3d4c2fa13775271a751935decf530ae59c408c9f0b510b4ead62"
 dependencies = [
  "bumpalo",
  "leb128",
  "memchr",
  "unicode-width",
- "wasm-encoder 0.203.0",
+ "wasm-encoder 0.204.0",
 ]
 
 [[package]]
 name = "wat"
-version = "1.203.0"
+version = "1.204.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2913b554125048798744fce03832d5330d87624782f8ec6ad8c9716a1ef7a37"
+checksum = "4280322d523214024d03bc05e25bdda6088d5229d9515aecd78c5914b1f3e734"
 dependencies = [
  "wast",
 ]
