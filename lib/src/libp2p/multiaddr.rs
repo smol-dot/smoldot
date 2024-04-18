@@ -20,7 +20,7 @@
 use alloc::{borrow::Cow, vec::Vec};
 use base64::Engine as _;
 use core::{
-    fmt, iter,
+    fmt, iter, net,
     str::{self, FromStr},
 };
 
@@ -250,13 +250,13 @@ impl<'a> Protocol<Cow<'a, [u8]>> {
             "ip4" => {
                 let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let parsed =
-                    no_std_net::Ipv4Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
+                    net::Ipv4Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
                 Ok(Protocol::Ip4(parsed.octets()))
             }
             "ip6" => {
                 let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let parsed =
-                    no_std_net::Ipv6Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
+                    net::Ipv6Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
                 Ok(Protocol::Ip6(parsed.octets()))
             }
             "p2p" => {
@@ -396,8 +396,8 @@ impl<T: AsRef<[u8]>> fmt::Display for Protocol<T> {
             Protocol::Dns4(addr) => write!(f, "/dns4/{addr}"),
             Protocol::Dns6(addr) => write!(f, "/dns6/{addr}"),
             Protocol::DnsAddr(addr) => write!(f, "/dnsaddr/{addr}"),
-            Protocol::Ip4(ip) => write!(f, "/ip4/{}", no_std_net::Ipv4Addr::from(*ip)),
-            Protocol::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
+            Protocol::Ip4(ip) => write!(f, "/ip4/{}", net::Ipv4Addr::from(*ip)),
+            Protocol::Ip6(ip) => write!(f, "/ip6/{}", net::Ipv6Addr::from(*ip)),
             Protocol::P2p(multihash) => {
                 // Base58 encoding doesn't have `/` in its characters set.
                 write!(f, "/p2p/{}", bs58::encode(multihash.as_ref()).into_string())
