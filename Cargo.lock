@@ -1609,12 +1609,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "no-std-net"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43794a0ace135be66a25d3ae77d41b91615fb68ae937f904090203e81f755b65"
-
-[[package]]
 name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2306,7 +2300,6 @@ dependencies = [
  "libm",
  "libsecp256k1",
  "merlin",
- "no-std-net",
  "nom",
  "num-bigint",
  "num-rational",
@@ -2391,7 +2384,6 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "lru",
- "no-std-net",
  "parking_lot",
  "pin-project",
  "rand",
