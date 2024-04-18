@@ -468,7 +468,7 @@ impl ClientMainTask {
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
                 | methods::MethodCall::transaction_v1_broadcast { .. }
-                | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+                | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
                 | methods::MethodCall::sudo_network_unstable_watch { .. }
                 | methods::MethodCall::chainHead_v1_follow { .. } => {
                     // Subscription starting requests.
@@ -541,7 +541,7 @@ impl ClientMainTask {
                 | methods::MethodCall::transaction_v1_stop {
                     operation_id: subscription,
                 }
-                | methods::MethodCall::transactionWatch_unstable_unwatch { subscription, .. }
+                | methods::MethodCall::transactionWatch_v1_unwatch { subscription, .. }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
@@ -567,9 +567,9 @@ impl ClientMainTask {
                                     methods::MethodCall::transaction_v1_stop { .. } => {
                                         methods::Response::transaction_v1_stop(())
                                     }
-                                    methods::MethodCall::transactionWatch_unstable_unwatch {
-                                        ..
-                                    } => methods::Response::transactionWatch_unstable_unwatch(()),
+                                    methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
+                                        methods::Response::transactionWatch_v1_unwatch(())
+                                    }
                                     methods::MethodCall::sudo_network_unstable_unwatch {
                                         ..
                                     } => methods::Response::sudo_network_unstable_unwatch(()),
@@ -1160,8 +1160,8 @@ impl SubscriptionStartProcess {
             methods::MethodCall::state_subscribeStorage { .. } => {
                 methods::Response::state_subscribeStorage(Cow::Borrowed(&self.subscription_id))
             }
-            methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
-                methods::Response::transactionWatch_unstable_submitAndWatch(Cow::Borrowed(
+            methods::MethodCall::transactionWatch_v1_submitAndWatch { .. } => {
+                methods::Response::transactionWatch_v1_submitAndWatch(Cow::Borrowed(
                     &self.subscription_id,
                 ))
             }
