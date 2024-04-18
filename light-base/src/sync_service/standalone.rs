@@ -37,7 +37,7 @@ use core::{
 };
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use smoldot::{
     chain, header,
     informant::HashDisplay,
@@ -429,7 +429,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         is_new_best,
                         ..
                     } => {
-                        let verified_height = success.height();
                         let sync = task.sync.insert(success.finish(()));
 
                         log!(
