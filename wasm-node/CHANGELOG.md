@@ -4,7 +4,7 @@
 
 ### Changed
 
-- All `transactionWatch_unstable`-prefixed JSON-RPC functions have been renamed to `transactionWatch_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1748](https://github.com/smol-dot/smoldot/pull/1748))
+- All `transactionWatch_unstable`-prefixed JSON-RPC functions have been renamed to `transactionWatch_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1771](https://github.com/smol-dot/smoldot/pull/1771))
 
 ## 2.0.24 - 2024-04-16
 
