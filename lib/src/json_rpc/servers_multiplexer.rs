@@ -461,6 +461,9 @@ impl<T> ServersMultiplexer<T> {
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                 | methods::MethodCall::state_unsubscribeStorage { subscription }
                 | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+                | methods::MethodCall::transaction_v1_stop {
+                    operation_id: subscription,
+                }
                 | methods::MethodCall::chainHead_v1_body {
                     follow_subscription: subscription,
                     ..
@@ -517,6 +520,13 @@ impl<T> ServersMultiplexer<T> {
                                 .to_json_response(&request_id_json)
                         }
                         methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
+                            parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::InvalidParams,
+                                None,
+                            )
+                        }
+                        methods::MethodCall::transaction_v1_stop { .. } => {
                             parse::build_error_response(
                                 &request_id_json,
                                 parse::ErrorResponse::InvalidParams,
@@ -710,6 +720,9 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::state_unsubscribeStorage { subscription }
             | methods::MethodCall::author_unwatchExtrinsic { subscription }
             | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+            | methods::MethodCall::transaction_v1_stop {
+                operation_id: subscription,
+            }
             | methods::MethodCall::chainHead_v1_body {
                 follow_subscription: subscription,
                 ..
@@ -801,6 +814,14 @@ impl<T> ServersMultiplexer<T> {
                         methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
                             methods::MethodCall::transactionWatch_v1_unwatch {
                                 subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::transaction_v1_stop { .. } => {
+                            methods::MethodCall::transaction_v1_stop {
+                                operation_id: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
                             }
@@ -973,6 +994,13 @@ impl<T> ServersMultiplexer<T> {
                                 None,
                             )
                         }
+                        methods::MethodCall::transaction_v1_stop { .. } => {
+                            parse::build_error_response(
+                                request_id_json,
+                                parse::ErrorResponse::InvalidParams,
+                                None,
+                            )
+                        }
                         methods::MethodCall::chainHead_v1_body { .. } => {
                             methods::Response::chainHead_v1_body(
                                 methods::ChainHeadBodyCallReturn::LimitReached {},
@@ -1026,7 +1054,6 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::author_insertKey { .. }
             | methods::MethodCall::author_pendingExtrinsics { .. }
             | methods::MethodCall::author_submitExtrinsic { .. }
-            | methods::MethodCall::author_unwatchExtrinsic { .. }
             | methods::MethodCall::babe_epochAuthorship { .. }
             | methods::MethodCall::chain_getBlock { .. }
             | methods::MethodCall::chain_getBlockHash { .. }
@@ -1067,6 +1094,7 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
             | methods::MethodCall::chainHead_v1_follow { .. }
             | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
+            | methods::MethodCall::transaction_v1_broadcast { .. }
             | methods::MethodCall::chainSpec_v1_chainName {}
             | methods::MethodCall::chainSpec_v1_genesisHash {}
             | methods::MethodCall::chainSpec_v1_properties {}
@@ -1404,7 +1432,8 @@ impl<T> ServersMultiplexer<T> {
                         | methods::MethodCall::state_subscribeRuntimeVersion {}
                         | methods::MethodCall::state_subscribeStorage { .. }
                         | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-                        | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. },
+                        | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
+                        | methods::MethodCall::transaction_v1_broadcast { .. },
                         parse::Response::Success { result_json, .. },
                     ) => {
                         let subscription_id = match methods::parse_jsonrpc_response(
@@ -1421,7 +1450,8 @@ impl<T> ServersMultiplexer<T> {
                                 | methods::Response::author_submitAndWatchExtrinsic(subscription_id)
                                 | methods::Response::transactionWatch_v1_submitAndWatch(
                                     subscription_id,
-                                ),
+                                )
+                                | methods::Response::transaction_v1_broadcast(subscription_id),
                             ) => subscription_id,
                             Ok(_) => unreachable!(),
                             Err(_) => {
@@ -1513,7 +1543,7 @@ impl<T> ServersMultiplexer<T> {
                                         subscription: Cow::Borrowed(&*subscription_id),
                                     }
                                 }
-                                methods::MethodCall::author_unwatchExtrinsic { .. } => {
+                                methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
                                     methods::MethodCall::author_unwatchExtrinsic {
                                         subscription: Cow::Borrowed(&*subscription_id),
                                     }
@@ -1523,6 +1553,11 @@ impl<T> ServersMultiplexer<T> {
                                 } => methods::MethodCall::transactionWatch_v1_unwatch {
                                     subscription: Cow::Borrowed(&*subscription_id),
                                 },
+                                methods::MethodCall::transaction_v1_broadcast { .. } => {
+                                    methods::MethodCall::transaction_v1_stop {
+                                        operation_id: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
                                 _ => unreachable!(),
                             };
 
@@ -1584,6 +1619,11 @@ impl<T> ServersMultiplexer<T> {
                                     Cow::Borrowed(&rellocated_subscription_id),
                                 )
                             }
+                            methods::MethodCall::transaction_v1_broadcast { .. } => {
+                                methods::Response::transaction_v1_broadcast(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
                             _ => unreachable!(),
                         }
                         .to_json_response(request_id_json);
@@ -1605,6 +1645,9 @@ impl<T> ServersMultiplexer<T> {
                         | methods::MethodCall::state_unsubscribeStorage { subscription }
                         | methods::MethodCall::author_unwatchExtrinsic { subscription }
                         | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+                        | methods::MethodCall::transaction_v1_stop {
+                            operation_id: subscription,
+                        }
                         | methods::MethodCall::chainHead_v1_unfollow {
                             follow_subscription: subscription,
                         },
@@ -1644,6 +1687,9 @@ impl<T> ServersMultiplexer<T> {
                             }
                             methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
                                 methods::Response::transactionWatch_v1_unwatch(())
+                            }
+                            methods::MethodCall::transaction_v1_stop { .. } => {
+                                methods::Response::transaction_v1_stop(())
                             }
                             methods::MethodCall::chainHead_v1_unfollow { .. } => {
                                 methods::Response::chainHead_v1_unfollow(())
