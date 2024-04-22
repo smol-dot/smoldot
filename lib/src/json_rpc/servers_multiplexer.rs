@@ -38,11 +38,11 @@
 //! to an earlier block, but because the legacy JSON-RPC API doesn't provide any way to handle
 //! this situation in a clean way, this is the last bad way to handle it.
 //!
-//! When a server is removed or blacklisted, each active `chainHead_unstable_follow` subscription
+//! When a server is removed or blacklisted, each active `chainHead_v1_follow` subscription
 //! generates a `stop` event, and each active `author_submitAndWatchExtrinsic` and
-//! `transactionWatch_unstable_submitAndWatch` subscription generates a `dropped` event.
+//! `transactionWatch_v1_submitAndWatch` subscription generates a `dropped` event.
 //!
-//! JSON-RPC requests for `chainHead_unstable_follow` and `transaction_unstable_broadcast` are
+//! JSON-RPC requests for `chainHead_v1_follow` and `transaction_unstable_broadcast` are
 //! sent to a randomly-chosen server. If this server returns `null`, indicating that it has reached
 //! its limits, the request is sent to a different randomly-chosen server instead. After 3 failed
 //! attempts, `null` is returned to the client.
@@ -349,9 +349,9 @@ impl<T> ServersMultiplexer<T> {
         // If the client happened to have a request in queue that concerns that subscription,
         // this guarantees that the notification about the cancellation is sent to the client
         // before the responses to this request.
-        // For example, if the client has queued a `chainHead_unstable_header` request, it will
-        // receive the `stop` event of the `chainHead_unstable_follow` subscription before
-        // receiving the error response to the `chainHead_unstable_header` request.
+        // For example, if the client has queued a `chainHead_v1_header` request, it will
+        // receive the `stop` event of the `chainHead_v1_follow` subscription before
+        // receiving the error response to the `chainHead_v1_header` request.
         // While this ordering is in no way a requirement, it is more polite to do so.
         for (_, client_subscription_id) in &subscriptions_to_cancel_or_reopen {
             let hashbrown::hash_map::EntryRef::Occupied(active_subscriptions_entry) =
@@ -374,9 +374,9 @@ impl<T> ServersMultiplexer<T> {
                     );
                     active_subscriptions_entry.remove();
                 }
-                "transactionWatch_unstable_submitAndWatch" => {
+                "transactionWatch_v1_submitAndWatch" => {
                     self.responses_queue.push_back(
-                        methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                        methods::ServerToClient::transactionWatch_v1_watchEvent {
                             subscription: Cow::Borrowed(&*client_subscription_id),
                             result: methods::TransactionWatchEvent::Dropped {
                                 // Unfortunately, there is no way of knowing whether the server
@@ -392,9 +392,9 @@ impl<T> ServersMultiplexer<T> {
                     );
                     active_subscriptions_entry.remove();
                 }
-                "chainHead_unstable_follow" => {
+                "chainHead_v1_follow" => {
                     self.responses_queue.push_back(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
+                        methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&*client_subscription_id),
                             result: methods::FollowEvent::Stop {},
                         }
@@ -460,35 +460,35 @@ impl<T> ServersMultiplexer<T> {
                 | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                 | methods::MethodCall::state_unsubscribeStorage { subscription }
-                | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-                | methods::MethodCall::chainHead_unstable_body {
+                | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+                | methods::MethodCall::chainHead_v1_body {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_call {
+                | methods::MethodCall::chainHead_v1_call {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_header {
+                | methods::MethodCall::chainHead_v1_header {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_stopOperation {
+                | methods::MethodCall::chainHead_v1_stopOperation {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_storage {
+                | methods::MethodCall::chainHead_v1_storage {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_continue {
+                | methods::MethodCall::chainHead_v1_continue {
                     follow_subscription: subscription,
                     ..
                 }
-                | methods::MethodCall::chainHead_unstable_unfollow {
+                | methods::MethodCall::chainHead_v1_unfollow {
                     follow_subscription: subscription,
                 }
-                | methods::MethodCall::chainHead_unstable_unpin {
+                | methods::MethodCall::chainHead_v1_unpin {
                     follow_subscription: subscription,
                     ..
                 } => {
@@ -516,49 +516,49 @@ impl<T> ServersMultiplexer<T> {
                             methods::Response::state_unsubscribeStorage(subscription_exists)
                                 .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                        methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
                             parse::build_error_response(
                                 &request_id_json,
                                 parse::ErrorResponse::InvalidParams,
                                 None,
                             )
                         }
-                        methods::MethodCall::chainHead_unstable_body { .. } => {
-                            methods::Response::chainHead_unstable_body(
+                        methods::MethodCall::chainHead_v1_body { .. } => {
+                            methods::Response::chainHead_v1_body(
                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                             )
                             .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_call { .. } => {
-                            methods::Response::chainHead_unstable_call(
+                        methods::MethodCall::chainHead_v1_call { .. } => {
+                            methods::Response::chainHead_v1_call(
                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                             )
                             .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_header { .. } => {
-                            methods::Response::chainHead_unstable_header(None)
+                        methods::MethodCall::chainHead_v1_header { .. } => {
+                            methods::Response::chainHead_v1_header(None)
                                 .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
-                            methods::Response::chainHead_unstable_stopOperation(())
+                        methods::MethodCall::chainHead_v1_stopOperation { .. } => {
+                            methods::Response::chainHead_v1_stopOperation(())
                                 .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_storage { .. } => {
-                            methods::Response::chainHead_unstable_storage(
+                        methods::MethodCall::chainHead_v1_storage { .. } => {
+                            methods::Response::chainHead_v1_storage(
                                 methods::ChainHeadStorageReturn::LimitReached {},
                             )
                             .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_continue { .. } => {
-                            methods::Response::chainHead_unstable_continue(())
+                        methods::MethodCall::chainHead_v1_continue { .. } => {
+                            methods::Response::chainHead_v1_continue(())
                                 .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                            methods::Response::chainHead_unstable_unfollow(())
+                        methods::MethodCall::chainHead_v1_unfollow { .. } => {
+                            methods::Response::chainHead_v1_unfollow(())
                                 .to_json_response(&request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_unpin { .. } => {
-                            methods::Response::chainHead_unstable_unpin(())
+                        methods::MethodCall::chainHead_v1_unpin { .. } => {
+                            methods::Response::chainHead_v1_unpin(())
                                 .to_json_response(&request_id_json)
                         }
                         _ => unreachable!(),
@@ -709,35 +709,35 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
             | methods::MethodCall::state_unsubscribeStorage { subscription }
             | methods::MethodCall::author_unwatchExtrinsic { subscription }
-            | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-            | methods::MethodCall::chainHead_unstable_body {
+            | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+            | methods::MethodCall::chainHead_v1_body {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_call {
+            | methods::MethodCall::chainHead_v1_call {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_header {
+            | methods::MethodCall::chainHead_v1_header {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_stopOperation {
+            | methods::MethodCall::chainHead_v1_stopOperation {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_storage {
+            | methods::MethodCall::chainHead_v1_storage {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_continue {
+            | methods::MethodCall::chainHead_v1_continue {
                 follow_subscription: subscription,
                 ..
             }
-            | methods::MethodCall::chainHead_unstable_unfollow {
+            | methods::MethodCall::chainHead_v1_unfollow {
                 follow_subscription: subscription,
             }
-            | methods::MethodCall::chainHead_unstable_unpin {
+            | methods::MethodCall::chainHead_v1_unpin {
                 follow_subscription: subscription,
                 ..
             } => {
@@ -798,16 +798,16 @@ impl<T> ServersMultiplexer<T> {
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
-                            methods::MethodCall::transactionWatch_unstable_unwatch {
+                        methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
+                            methods::MethodCall::transactionWatch_v1_unwatch {
                                 subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::chainHead_unstable_body { hash, .. } => {
-                            methods::MethodCall::chainHead_unstable_body {
+                        methods::MethodCall::chainHead_v1_body { hash, .. } => {
+                            methods::MethodCall::chainHead_v1_body {
                                 follow_subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
@@ -815,12 +815,12 @@ impl<T> ServersMultiplexer<T> {
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::chainHead_unstable_call {
+                        methods::MethodCall::chainHead_v1_call {
                             hash,
                             function,
                             call_parameters,
                             ..
-                        } => methods::MethodCall::chainHead_unstable_call {
+                        } => methods::MethodCall::chainHead_v1_call {
                             follow_subscription: Cow::Borrowed(
                                 &subscription_info.server_subscription_id,
                             ),
@@ -829,8 +829,8 @@ impl<T> ServersMultiplexer<T> {
                             call_parameters,
                         }
                         .params_to_json_object(),
-                        methods::MethodCall::chainHead_unstable_header { hash, .. } => {
-                            methods::MethodCall::chainHead_unstable_header {
+                        methods::MethodCall::chainHead_v1_header { hash, .. } => {
+                            methods::MethodCall::chainHead_v1_header {
                                 follow_subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
@@ -838,56 +838,55 @@ impl<T> ServersMultiplexer<T> {
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::chainHead_unstable_stopOperation {
-                            operation_id,
-                            ..
-                        } => methods::MethodCall::chainHead_unstable_stopOperation {
-                            follow_subscription: Cow::Borrowed(
-                                &subscription_info.server_subscription_id,
-                            ),
-                            operation_id,
-                        }
-                        .params_to_json_object(),
-                        methods::MethodCall::chainHead_unstable_storage {
-                            hash,
-                            items,
-                            child_trie,
-                            ..
-                        } => methods::MethodCall::chainHead_unstable_storage {
-                            follow_subscription: Cow::Borrowed(
-                                &subscription_info.server_subscription_id,
-                            ),
-                            hash,
-                            items,
-                            child_trie,
-                        }
-                        .params_to_json_object(),
-                        methods::MethodCall::chainHead_unstable_continue {
+                        methods::MethodCall::chainHead_v1_stopOperation {
                             operation_id, ..
-                        } => methods::MethodCall::chainHead_unstable_continue {
+                        } => methods::MethodCall::chainHead_v1_stopOperation {
                             follow_subscription: Cow::Borrowed(
                                 &subscription_info.server_subscription_id,
                             ),
                             operation_id,
                         }
                         .params_to_json_object(),
-                        methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                            methods::MethodCall::chainHead_unstable_unfollow {
+                        methods::MethodCall::chainHead_v1_storage {
+                            hash,
+                            items,
+                            child_trie,
+                            ..
+                        } => methods::MethodCall::chainHead_v1_storage {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            hash,
+                            items,
+                            child_trie,
+                        }
+                        .params_to_json_object(),
+                        methods::MethodCall::chainHead_v1_continue { operation_id, .. } => {
+                            methods::MethodCall::chainHead_v1_continue {
+                                follow_subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                                operation_id,
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chainHead_v1_unfollow { .. } => {
+                            methods::MethodCall::chainHead_v1_unfollow {
                                 follow_subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::chainHead_unstable_unpin {
-                            hash_or_hashes, ..
-                        } => methods::MethodCall::chainHead_unstable_unpin {
-                            follow_subscription: Cow::Borrowed(
-                                &subscription_info.server_subscription_id,
-                            ),
-                            hash_or_hashes,
+                        methods::MethodCall::chainHead_v1_unpin { hash_or_hashes, .. } => {
+                            methods::MethodCall::chainHead_v1_unpin {
+                                follow_subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                                hash_or_hashes,
+                            }
+                            .params_to_json_object()
                         }
-                        .params_to_json_object(),
                         _ => unreachable!(),
                     };
 
@@ -967,49 +966,49 @@ impl<T> ServersMultiplexer<T> {
                                 None,
                             )
                         }
-                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                        methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
                             parse::build_error_response(
                                 request_id_json,
                                 parse::ErrorResponse::InvalidParams,
                                 None,
                             )
                         }
-                        methods::MethodCall::chainHead_unstable_body { .. } => {
-                            methods::Response::chainHead_unstable_body(
+                        methods::MethodCall::chainHead_v1_body { .. } => {
+                            methods::Response::chainHead_v1_body(
                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                             )
                             .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_call { .. } => {
-                            methods::Response::chainHead_unstable_call(
+                        methods::MethodCall::chainHead_v1_call { .. } => {
+                            methods::Response::chainHead_v1_call(
                                 methods::ChainHeadBodyCallReturn::LimitReached {},
                             )
                             .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_header { .. } => {
-                            methods::Response::chainHead_unstable_header(None)
+                        methods::MethodCall::chainHead_v1_header { .. } => {
+                            methods::Response::chainHead_v1_header(None)
                                 .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
-                            methods::Response::chainHead_unstable_stopOperation(())
+                        methods::MethodCall::chainHead_v1_stopOperation { .. } => {
+                            methods::Response::chainHead_v1_stopOperation(())
                                 .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_storage { .. } => {
-                            methods::Response::chainHead_unstable_storage(
+                        methods::MethodCall::chainHead_v1_storage { .. } => {
+                            methods::Response::chainHead_v1_storage(
                                 methods::ChainHeadStorageReturn::LimitReached {},
                             )
                             .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_continue { .. } => {
-                            methods::Response::chainHead_unstable_continue(())
+                        methods::MethodCall::chainHead_v1_continue { .. } => {
+                            methods::Response::chainHead_v1_continue(())
                                 .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                            methods::Response::chainHead_unstable_unfollow(())
+                        methods::MethodCall::chainHead_v1_unfollow { .. } => {
+                            methods::Response::chainHead_v1_unfollow(())
                                 .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::chainHead_unstable_unpin { .. } => {
-                            methods::Response::chainHead_unstable_unpin(())
+                        methods::MethodCall::chainHead_v1_unpin { .. } => {
+                            methods::Response::chainHead_v1_unpin(())
                                 .to_json_response(request_id_json)
                         }
                         _ => unreachable!(),
@@ -1066,8 +1065,8 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::chain_subscribeFinalizedHeads {}
             | methods::MethodCall::chain_subscribeNewHeads {}
             | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-            | methods::MethodCall::chainHead_unstable_follow { .. }
-            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::chainHead_v1_follow { .. }
+            | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
             | methods::MethodCall::chainSpec_v1_chainName {}
             | methods::MethodCall::chainSpec_v1_genesisHash {}
             | methods::MethodCall::chainSpec_v1_properties {}
@@ -1280,13 +1279,13 @@ impl<T> ServersMultiplexer<T> {
                     methods::ServerToClient::author_extrinsicUpdate {
                         result: methods::TransactionStatus::Dropped,
                         ..
-                    } | methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                    } | methods::ServerToClient::transactionWatch_v1_watchEvent {
                         result: methods::TransactionWatchEvent::Error { .. }
                             | methods::TransactionWatchEvent::Finalized { .. }
                             | methods::TransactionWatchEvent::Invalid { .. }
                             | methods::TransactionWatchEvent::Dropped { .. },
                         ..
-                    } | methods::ServerToClient::chainHead_unstable_followEvent {
+                    } | methods::ServerToClient::chainHead_v1_followEvent {
                         result: methods::FollowEvent::Stop {},
                         ..
                     }
@@ -1389,7 +1388,7 @@ impl<T> ServersMultiplexer<T> {
                     // Some functions return `null` if the server has reached its limit, in which
                     // case we silently discard the response and try a different server instead.
                     // TODO: not finished
-                    (methods::MethodCall::chainHead_unstable_follow { .. }, false) => {}
+                    (methods::MethodCall::chainHead_v1_follow { .. }, false) => {}
 
                     _ => {}
                 }
@@ -1398,14 +1397,14 @@ impl<T> ServersMultiplexer<T> {
                 match (&request_method, parse_result) {
                     // If the function is a subscription, we update our local state.
                     (
-                        methods::MethodCall::chainHead_unstable_follow { .. }
+                        methods::MethodCall::chainHead_v1_follow { .. }
                         | methods::MethodCall::chain_subscribeAllHeads {}
                         | methods::MethodCall::chain_subscribeFinalizedHeads {}
                         | methods::MethodCall::chain_subscribeNewHeads {}
                         | methods::MethodCall::state_subscribeRuntimeVersion {}
                         | methods::MethodCall::state_subscribeStorage { .. }
                         | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-                        | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. },
+                        | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. },
                         parse::Response::Success { result_json, .. },
                     ) => {
                         let subscription_id = match methods::parse_jsonrpc_response(
@@ -1413,14 +1412,14 @@ impl<T> ServersMultiplexer<T> {
                             result_json,
                         ) {
                             Ok(
-                                methods::Response::chainHead_unstable_follow(subscription_id)
+                                methods::Response::chainHead_v1_follow(subscription_id)
                                 | methods::Response::chain_subscribeAllHeads(subscription_id)
                                 | methods::Response::chain_subscribeFinalizedHeads(subscription_id)
                                 | methods::Response::chain_subscribeNewHeads(subscription_id)
                                 | methods::Response::state_subscribeRuntimeVersion(subscription_id)
                                 | methods::Response::state_subscribeStorage(subscription_id)
                                 | methods::Response::author_submitAndWatchExtrinsic(subscription_id)
-                                | methods::Response::transactionWatch_unstable_submitAndWatch(
+                                | methods::Response::transactionWatch_v1_submitAndWatch(
                                     subscription_id,
                                 ),
                             ) => subscription_id,
@@ -1484,8 +1483,8 @@ impl<T> ServersMultiplexer<T> {
                             unsubscribe_request_id.and_then(|rq_id| rq_id.take())
                         {
                             let unsub_request = match request_method {
-                                methods::MethodCall::chainHead_unstable_follow { .. } => {
-                                    methods::MethodCall::chainHead_unstable_unfollow {
+                                methods::MethodCall::chainHead_v1_follow { .. } => {
+                                    methods::MethodCall::chainHead_v1_unfollow {
                                         follow_subscription: Cow::Borrowed(&*subscription_id),
                                     }
                                 }
@@ -1519,9 +1518,9 @@ impl<T> ServersMultiplexer<T> {
                                         subscription: Cow::Borrowed(&*subscription_id),
                                     }
                                 }
-                                methods::MethodCall::transactionWatch_unstable_submitAndWatch {
+                                methods::MethodCall::transactionWatch_v1_submitAndWatch {
                                     ..
-                                } => methods::MethodCall::transactionWatch_unstable_unwatch {
+                                } => methods::MethodCall::transactionWatch_v1_unwatch {
                                     subscription: Cow::Borrowed(&*subscription_id),
                                 },
                                 _ => unreachable!(),
@@ -1545,8 +1544,8 @@ impl<T> ServersMultiplexer<T> {
                         // The response to the client needs to be adjusted for the fact that
                         // we modify the subscription ID.
                         response = match request_method {
-                            methods::MethodCall::chainHead_unstable_follow { .. } => {
-                                methods::Response::chainHead_unstable_follow(Cow::Borrowed(
+                            methods::MethodCall::chainHead_v1_follow { .. } => {
+                                methods::Response::chainHead_v1_follow(Cow::Borrowed(
                                     &rellocated_subscription_id,
                                 ))
                             }
@@ -1580,11 +1579,11 @@ impl<T> ServersMultiplexer<T> {
                                     &rellocated_subscription_id,
                                 ))
                             }
-                            methods::MethodCall::transactionWatch_unstable_submitAndWatch {
-                                ..
-                            } => methods::Response::transactionWatch_unstable_submitAndWatch(
-                                Cow::Borrowed(&rellocated_subscription_id),
-                            ),
+                            methods::MethodCall::transactionWatch_v1_submitAndWatch { .. } => {
+                                methods::Response::transactionWatch_v1_submitAndWatch(
+                                    Cow::Borrowed(&rellocated_subscription_id),
+                                )
+                            }
                             _ => unreachable!(),
                         }
                         .to_json_response(request_id_json);
@@ -1605,8 +1604,8 @@ impl<T> ServersMultiplexer<T> {
                         | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                         | methods::MethodCall::state_unsubscribeStorage { subscription }
                         | methods::MethodCall::author_unwatchExtrinsic { subscription }
-                        | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-                        | methods::MethodCall::chainHead_unstable_unfollow {
+                        | methods::MethodCall::transactionWatch_v1_unwatch { subscription }
+                        | methods::MethodCall::chainHead_v1_unfollow {
                             follow_subscription: subscription,
                         },
                         _,
@@ -1643,11 +1642,11 @@ impl<T> ServersMultiplexer<T> {
                             methods::MethodCall::author_unwatchExtrinsic { .. } => {
                                 methods::Response::author_unwatchExtrinsic(true)
                             }
-                            methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
-                                methods::Response::transactionWatch_unstable_unwatch(())
+                            methods::MethodCall::transactionWatch_v1_unwatch { .. } => {
+                                methods::Response::transactionWatch_v1_unwatch(())
                             }
-                            methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                                methods::Response::chainHead_unstable_unfollow(())
+                            methods::MethodCall::chainHead_v1_unfollow { .. } => {
+                                methods::Response::chainHead_v1_unfollow(())
                             }
                             _ => unreachable!(),
                         }

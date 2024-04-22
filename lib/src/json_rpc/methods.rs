@@ -570,10 +570,8 @@ impl<'a> ServerToClient<'a> {
             ServerToClient::chain_allHead { subscription, .. } => subscription,
             ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
             ServerToClient::state_storage { subscription, .. } => subscription,
-            ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
-            ServerToClient::transactionWatch_unstable_watchEvent { subscription, .. } => {
-                subscription
-            }
+            ServerToClient::chainHead_v1_followEvent { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_v1_watchEvent { subscription, .. } => subscription,
             ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
         }
     }
@@ -587,10 +585,8 @@ impl<'a> ServerToClient<'a> {
             ServerToClient::chain_allHead { subscription, .. } => subscription,
             ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
             ServerToClient::state_storage { subscription, .. } => subscription,
-            ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
-            ServerToClient::transactionWatch_unstable_watchEvent { subscription, .. } => {
-                subscription
-            }
+            ServerToClient::chainHead_v1_followEvent { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_v1_watchEvent { subscription, .. } => subscription,
             ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
         };
 

@@ -34,12 +34,12 @@
 //! [`ClientsMultiplexer`] tries to re-use an existing server subscription. Notifications
 //! concerning these subscriptions are multiplexed.
 //!
-//! When a client sends a `chainHead_unstable_follow` JSON-RPC request, the [`ClientsMultiplexer`]
-//! will let it pass through, no matter how many other existing `chainHead_unstable_follow`
+//! When a client sends a `chainHead_v1_follow` JSON-RPC request, the [`ClientsMultiplexer`]
+//! will let it pass through, no matter how many other existing `chainHead_v1_follow`
 //! subscriptions exist. However, because there exists a limit to the maximum number of
-//! `chainHead_unstable_follow` subscriptions, the server might return `null` to indicate that
+//! `chainHead_v1_follow` subscriptions, the server might return `null` to indicate that
 //! this limit has been reached. When that happens, the [`ClientsMultiplexer`] will use the same
-//! server-side `chainHead_unstable_follow` subscription to feed to multiple clients.
+//! server-side `chainHead_v1_follow` subscription to feed to multiple clients.
 
 use core::cmp;
 
