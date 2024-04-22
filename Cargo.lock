@@ -2045,9 +2045,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.32"
+version = "0.38.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65e04861e65f21776e67888bfbea442b3642beaa0138fdb1dd7a84a52dffdb89"
+checksum = "e3cc72858054fcff6d7dea32df2aeaee6a7c24227366d7ea429aada2f26b16ad"
 dependencies = [
  "bitflags 2.5.0",
  "errno",
@@ -2199,9 +2199,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook-registry"
-version = "1.4.1"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
+checksum = "a9e9e0b4211b72e7b8b6e85c807d36c212bdb33ea8587f7569562a84df5465b1"
 dependencies = [
  "libc",
 ]
@@ -2740,9 +2740,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.8"
+version = "0.32.0-beta.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25c72a5f9570c87a59db8f071bbc1338922c9b19a43128d01e1d0c77f65ff2b1"
+checksum = "1cf574ffeb236cb1c2ffe7ba42c5fbabb414f4ada2393c280313ef762feabe50"
 dependencies = [
  "arrayvec 0.7.4",
  "multi-stash",
@@ -2763,9 +2763,9 @@ checksum = "0f686876d8f92a573a9a1e005b78ec1e893158bbdc3ac75a1270384ca86d6c6b"
 
 [[package]]
 name = "wasmi_core"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06223fd279f83ff4739554b9df82d9632bf5922acb7fc505990a0406837b5474"
+checksum = "9c4158e2c0dac8e5765c1ae82c7f41a779dddae84371f1df7ce8b72d322b5333"
 dependencies = [
  "downcast-rs",
  "libm",
@@ -2786,9 +2786,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser-nostd"
-version = "0.100.1"
+version = "0.100.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9157cab83003221bfd385833ab587a039f5d6fa7304854042ba358a3b09e0724"
+checksum = "d5a015fe95f3504a94bb1462c717aae75253e39b9dd6c3fb1062c934535c64aa"
 dependencies = [
  "indexmap-nostd",
 ]
