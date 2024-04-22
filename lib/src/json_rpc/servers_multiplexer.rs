@@ -52,8 +52,10 @@
 // TODO: what about rpc_methods? should we not query servers for the methods they support or something?
 
 use alloc::{
-    borrow::Cow,
+    borrow::{Cow, ToOwned as _},
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
+    format,
+    string::String,
     sync::Arc,
 };
 use core::{fmt, mem, ops};

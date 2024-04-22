@@ -44,8 +44,10 @@
 use core::cmp;
 
 use alloc::{
-    borrow::Cow,
+    borrow::{Cow, ToOwned as _},
     collections::{BTreeMap, BTreeSet, VecDeque},
+    format,
+    string::String,
     sync::Arc,
 };
 use rand::seq::IteratorRandom as _;
