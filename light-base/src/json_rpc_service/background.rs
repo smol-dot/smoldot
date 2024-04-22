@@ -22,8 +22,6 @@ use crate::{
     util::{self, SipHasherBuild},
 };
 
-use super::StartConfig;
-
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
@@ -54,6 +52,46 @@ use smoldot::{
     network::codec,
 };
 
+/// Configuration for a JSON-RPC service.
+pub(super) struct Config<TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    // TODO: redundant with Config above?
+    pub platform: TPlat,
+
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
+    /// Service responsible for synchronizing the chain.
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// Service responsible for emitting transactions and tracking their state.
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+
+    /// Service that provides a ready-to-be-called runtime for the current best block.
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    pub chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
+
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    pub system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    pub system_version: String,
+
+    /// Hash of the genesis block of the chain.
+    pub genesis_block_hash: [u8; 32],
+}
+
 /// Fields used to process JSON-RPC requests in the background.
 struct Background<TPlat: PlatformRef> {
     /// Target to use for all the logs.
@@ -82,13 +120,13 @@ struct Background<TPlat: PlatformRef> {
     /// Randomness used for various purposes, such as generating subscription IDs.
     randomness: ChaCha20Rng,
 
-    /// See [`StartConfig::network_service`].
+    /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    /// See [`StartConfig::sync_service`].
+    /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    /// See [`StartConfig::runtime_service`].
+    /// See [`Config::runtime_service`].
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    /// See [`StartConfig::transactions_service`].
+    /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Tasks that are spawned by the service and running in the background.
@@ -124,9 +162,9 @@ struct Background<TPlat: PlatformRef> {
     /// subscription ID.
     runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
     /// List of all active `author_submitAndWatchExtrinsic`, `transaction_v1_broadcast`, and
-    /// `transactionWatch_unstable_submitAndWatch` subscriptions, indexed by the subscription ID.
+    /// `transactionWatch_v1_submitAndWatch` subscriptions, indexed by the subscription ID.
     /// When it comes to `author_submitAndWatchExtrinsic` and
-    /// `transactionWatch_unstable_submitAndWatch`, transactions are removed from this list when
+    /// `transactionWatch_v1_submitAndWatch`, transactions are removed from this list when
     /// they are dropped from the transactions service. When it comes
     /// to  `transaction_v1_broadcast`, transactions are left forever until the API user
     /// unsubscribes.
@@ -298,7 +336,7 @@ enum MultiStageRequestTy {
     StateGetKeysPaged {
         prefix: Vec<u8>,
         count: u32,
-        start_key: Vec<u8>,
+        start_key: Option<Vec<u8>>,
     },
     StateQueryStorageAt {
         keys: Vec<methods::HexString>,
@@ -324,7 +362,7 @@ enum StorageRequestInProgress {
         block_hash: [u8; 32],
         prefix: Vec<u8>,
         count: u32,
-        start_key: Vec<u8>,
+        start_key: Option<Vec<u8>>,
         in_progress_results: Vec<Vec<u8>>,
     },
     StateQueryStorageAt {
@@ -430,7 +468,7 @@ enum TransactionWatchTy {
         /// it in the transactions service later, for example if it reports having crashed.
         transaction_bytes: Vec<u8>,
     },
-    /// `transactionWatch_unstable_submitAndWatch`.
+    /// `transactionWatch_v1_submitAndWatch`.
     NewApiWatch,
 }
 
@@ -445,7 +483,7 @@ struct GetKeysPagedCacheKey {
 
 pub(super) async fn run<TPlat: PlatformRef>(
     log_target: String,
-    config: StartConfig<TPlat>,
+    config: Config<TPlat>,
     requests_rx: async_channel::Receiver<String>,
     responses_tx: async_channel::Sender<String>,
 ) {
@@ -784,8 +822,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::sudo_unstable_version { .. }
                     | methods::MethodCall::transaction_v1_broadcast { .. }
                     | methods::MethodCall::transaction_v1_stop { .. }
-                    | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-                    | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
+                    | methods::MethodCall::transactionWatch_v1_submitAndWatch { .. }
+                    | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
                     | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
@@ -1285,7 +1323,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             MultiStageRequestTy::StateGetKeysPaged {
                                 prefix: prefix.map_or(Vec::new(), |p| p.0),
                                 count,
-                                start_key: start_key.map_or(Vec::new(), |p| p.0),
+                                start_key: start_key.map(|p| p.0),
                             },
                         ));
                     }
@@ -1682,7 +1720,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
+                                        parse::ErrorResponse::ApplicationDefined(
+                                            -32801,
+                                            "unknown or unpinned block",
+                                        ),
                                         None,
                                     ))
                                     .await;
@@ -1802,7 +1843,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 .responses_tx
                                 .send(parse::build_error_response(
                                     request_id_json,
-                                    parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32801,
+                                        "unknown or unpinned block",
+                                    ),
                                     None,
                                 ))
                                 .await;
@@ -1995,7 +2039,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     .responses_tx
                                     .send(parse::build_error_response(
                                         request_id_json,
-                                        parse::ErrorResponse::ApplicationDefined(-32801, "unknown or unpinned block"),
+                                        parse::ErrorResponse::ApplicationDefined(
+                                            -32801,
+                                            "unknown or unpinned block",
+                                        ),
                                         None,
                                     ))
                                     .await;
@@ -2297,9 +2344,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::chainHead_v1_header(Some(
-                                    methods::HexString(block.clone()),
-                                ))
+                                methods::Response::chainHead_v1_header(Some(methods::HexString(
+                                    block.clone(),
+                                )))
                                 .to_json_response(request_id_json),
                             )
                             .await;
@@ -2340,13 +2387,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     let mut seed = [0; 16];
                                     me.randomness.fill_bytes(&mut seed);
                                     seed
-                                })
+                                }),
                             );
                             let mut all_hashes = all_hashes.clone();
 
                             loop {
-                                let Some(hash) = all_hashes.next()
-                                else {
+                                let Some(hash) = all_hashes.next() else {
                                     break true;
                                 };
 
@@ -2355,7 +2401,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         .responses_tx
                                         .send(parse::build_error_response(
                                             request_id_json,
-                                            parse::ErrorResponse::ApplicationDefined(-32804, "duplicate block hash"),
+                                            parse::ErrorResponse::ApplicationDefined(
+                                                -32804,
+                                                "duplicate block hash",
+                                            ),
                                             None,
                                         ))
                                         .await;
@@ -2551,15 +2600,17 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     request_parsed @ (methods::MethodCall::transaction_v1_broadcast { .. }
-                    | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }) => {
+                    | methods::MethodCall::transactionWatch_v1_submitAndWatch {
+                        ..
+                    }) => {
                         let (transaction, watched) = match request_parsed {
                             methods::MethodCall::transaction_v1_broadcast {
                                 transaction: methods::HexString(transaction),
                             } => (transaction, false),
-                            methods::MethodCall::transactionWatch_unstable_submitAndWatch {
+                            methods::MethodCall::transactionWatch_v1_submitAndWatch {
                                 transaction: methods::HexString(transaction),
                             } => (transaction, true),
-                            _ => unreachable!()
+                            _ => unreachable!(),
                         };
 
                         let subscription_id = {
@@ -2573,8 +2624,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             TransactionWatch {
                                 included_block: None,
                                 num_broadcasted_peers: 0,
-                                ty: if watched { TransactionWatchTy::NewApiWatch } else {
-                                    TransactionWatchTy::NewApi { transaction_bytes: transaction.clone() }
+                                ty: if watched {
+                                    TransactionWatchTy::NewApiWatch
+                                } else {
+                                    TransactionWatchTy::NewApi {
+                                        transaction_bytes: transaction.clone(),
+                                    }
                                 },
                             },
                         );
@@ -2588,15 +2643,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                         let _ = me
                             .responses_tx
-                            .send(if watched {
-                                methods::Response::transactionWatch_unstable_submitAndWatch(
-                                    Cow::Borrowed(&subscription_id),
-                                )
-                            } else {
-                                methods::Response::transaction_v1_broadcast(
-                                    Cow::Borrowed(&subscription_id),
-                                )
-                            }
+                            .send(
+                                if watched {
+                                    methods::Response::transactionWatch_v1_submitAndWatch(
+                                        Cow::Borrowed(&subscription_id),
+                                    )
+                                } else {
+                                    methods::Response::transaction_v1_broadcast(Cow::Borrowed(
+                                        &subscription_id,
+                                    ))
+                                }
                                 .to_json_response(request_id_json),
                             )
                             .await;
@@ -2646,7 +2702,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         }
                     }
 
-                    methods::MethodCall::transactionWatch_unstable_unwatch { subscription } => {
+                    methods::MethodCall::transactionWatch_v1_unwatch { subscription } => {
                         let exists = me
                             .transactions_subscriptions
                             .get(&*subscription)
@@ -2659,7 +2715,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::transactionWatch_unstable_unwatch(())
+                                methods::Response::transactionWatch_v1_unwatch(())
                                     .to_json_response(request_id_json),
                             )
                             .await;
@@ -2749,7 +2805,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 let results_to_client = cache_entry
                                     .iter()
                                     .cloned()
-                                    .filter(|k| *k >= *start_key) // TODO: not sure if start should be in the set or not?
+                                    .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                                     .map(methods::HexString)
                                     .take(usize::try_from(*count).unwrap_or(usize::MAX))
                                     .collect::<Vec<_>>();
@@ -3555,7 +3611,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let results_to_client = final_results
                             .iter()
                             .cloned()
-                            .filter(|k| *k >= start_key) // TODO: not sure if start should be in the set or not?
+                            .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                             .map(methods::HexString)
                             .take(usize::try_from(count).unwrap_or(usize::MAX))
                             .collect::<Vec<_>>();
@@ -4957,7 +5013,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Dropped {
                                         error: "gap in chain of blocks".into(),
@@ -4975,7 +5031,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Dropped {
                                         error: "transactions pool full".into(),
@@ -4993,7 +5049,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Invalid {
                                         error: error.to_string().into(),
@@ -5010,7 +5066,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Error {
                                         error: error.to_string().into(),
@@ -5027,7 +5083,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Error {
                                         error: "transactions service has crashed".into(),
@@ -5062,7 +5118,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Finalized {
                                         block: methods::TransactionWatchEventBlock {
@@ -5123,7 +5179,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Broadcasted {
                                         num_peers: u32::try_from(
@@ -5150,7 +5206,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result: methods::TransactionWatchEvent::Validated {},
                                 }
@@ -5210,7 +5266,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result:
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {
@@ -5233,7 +5289,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                methods::ServerToClient::transactionWatch_v1_watchEvent {
                                     subscription: Cow::Borrowed(&subscription_id),
                                     result:
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {

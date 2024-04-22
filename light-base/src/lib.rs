@@ -929,16 +929,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             max_subscriptions,
         } = config.json_rpc
         {
-            // TODO: the JSON-RPC service splits between first creation and actual services starting because starting the service couldn't be done immediately, since this is now the case considering merging the two together again
-            let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
+            let frontend = json_rpc_service::service(json_rpc_service::Config {
                 platform: self.platform.clone(),
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests,
                 max_subscriptions,
-            });
-
-            service_starter.start(json_rpc_service::StartConfig {
-                platform: self.platform.clone(),
                 sync_service: services.sync_service.clone(),
                 network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),
@@ -950,7 +945,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 system_name: self.platform.client_name().into_owned(),
                 system_version: self.platform.client_version().into_owned(),
                 genesis_block_hash,
-                genesis_block_state_root,
             });
 
             Some(frontend)

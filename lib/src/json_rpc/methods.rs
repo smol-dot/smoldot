@@ -530,8 +530,8 @@ define_methods! {
     transaction_v1_broadcast(transaction: HexString) -> Cow<'a, str>,
     transaction_v1_stop(#[rename = "operationId"] operation_id: Cow<'a, str>) -> (),
 
-    transactionWatch_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
-    transactionWatch_unstable_unwatch(subscription: Cow<'a, str>) -> (),
+    transactionWatch_v1_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
+    transactionWatch_v1_unwatch(subscription: Cow<'a, str>) -> (),
 
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
@@ -553,7 +553,7 @@ define_methods! {
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    transactionWatch_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+    transactionWatch_v1_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
