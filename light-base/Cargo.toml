@@ -37,7 +37,7 @@ serde_json = { version = "1.0.104", default-features = false, features = ["alloc
 siphasher = { version = "1.0.1", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smoldot = { version = "0.17.0", path = "../lib", default-features = false }
-zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
+zeroize = { version = "1.8.0", default-features = false, features = ["alloc"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
