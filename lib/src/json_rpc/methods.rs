@@ -680,7 +680,7 @@ pub struct Block {
 pub enum FollowEvent<'a> {
     #[serde(rename = "initialized")]
     Initialized {
-        #[serde(rename = "finalizedBlockHash")]
+        #[serde(rename = "finalizedBlockHashes")]
         finalized_block_hashes: Vec<HashHexString>,
         #[serde(
             rename = "finalizedBlockRuntime",

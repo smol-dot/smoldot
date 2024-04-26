@@ -37,7 +37,7 @@ test('chainHead_v1_follow works', async t => {
     .then(async (chain) => {
       const parsed = JSON.parse(await chain.nextJsonRpcResponse());
       if (parsed.params.result.event == "initialized") {
-        if (parsed.params.result.finalizedBlockHash.toLowerCase() == "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158" && !parsed.params.result.finalizedBlockRuntime)
+        if (parsed.params.result.finalizedBlockHashes[0].toLowerCase() == "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158" && !parsed.params.result.finalizedBlockRuntime)
           t.pass();
         else
           t.fail(response);
@@ -90,7 +90,7 @@ test('chainHead_v1_body works', async t => {
       const parsed = JSON.parse(await chain.nextJsonRpcResponse());
       t.assert(parsed.method == "chainHead_v1_followEvent" && parsed.params.subscription == followSubscription);
       if (parsed.params.result.event == "initialized") {
-        if (parsed.params.result.finalizedBlockHash.toLowerCase() != "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158")
+        if (parsed.params.result.finalizedBlockHashes[0].toLowerCase() != "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158")
           t.fail(parsed);
         chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_v1_body", "params": [followSubscription, parsed.params.result.finalizedBlockHash] }));
       }
