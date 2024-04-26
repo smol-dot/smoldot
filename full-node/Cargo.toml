@@ -39,4 +39,4 @@ soketto = { version = "0.8.0", features = ["deflate"] }
 smol = "2.0.0"
 smoldot = { version = "0.17.0", path = "../lib", default-features = false, features = ["database-sqlite", "std", "wasmtime"] }
 terminal_size = "0.3.0"
-zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
+zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
