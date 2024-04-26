@@ -8,7 +8,7 @@
 
 ### Fix
 
-- Fix the wrong `parentBlockHash` value being sent in `chainHead_v1_followEvent` notifications.
+- Fix the wrong `parentBlockHash` value being sent in `chainHead_v1_followEvent` notifications. ([#1791](https://github.com/smol-dot/smoldot/pull/1791))
 
 ## 2.0.24 - 2024-04-16
 
