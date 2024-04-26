@@ -2740,9 +2740,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.11"
+version = "0.32.0-beta.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb43e9121322f80e67b60fb4763668c6a4cfdb63c43cecee4765f4d16064cb0c"
+checksum = "17bbbb60479dea0008e74b1b2dde8fbd2a724258b971782882b199cba627896e"
 dependencies = [
  "arrayvec 0.7.4",
  "multi-stash",
