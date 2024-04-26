@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix the `forbidWs` option being ignored when connecting to non-localhost addresses. Smoldot erroneously only took the value of `forbidNonLocalWs` in that situation. Connecting to a non-localhost address is now only done if both `forbidWs` and `forbidNonLocalWs` are `false`.
+- Fix the `forbidWs` option being ignored when connecting to non-localhost addresses. Smoldot erroneously only took the value of `forbidNonLocalWs` in that situation. Connecting to a non-localhost address is now only done if both `forbidWs` and `forbidNonLocalWs` are `false`. ([#1790](https://github.com/smol-dot/smoldot/pull/1790))
 
 ## 2.0.24 - 2024-04-16
 
