@@ -8,7 +8,7 @@
 
 ### Fix
 
-- The `finalizedBlockHash` field of the `initialized` event of `chainHead_v1_followEvent` notifications is now properly named `finalizedBlockHashes` and is now properly an array.
+- The `finalizedBlockHash` field of the `initialized` event of `chainHead_v1_followEvent` notifications is now properly named `finalizedBlockHashes` and is now properly an array. ([#1792](https://github.com/smol-dot/smoldot/pull/1792))
 
 ## 2.0.24 - 2024-04-16
 
