@@ -92,7 +92,7 @@ test('chainHead_v1_body works', async t => {
       if (parsed.params.result.event == "initialized") {
         if (parsed.params.result.finalizedBlockHashes[0].toLowerCase() != "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158")
           t.fail(parsed);
-        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_v1_body", "params": [followSubscription, parsed.params.result.finalizedBlockHash] }));
+        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_v1_body", "params": [followSubscription, parsed.params.result.finalizedBlockHashes[0]] }));
       }
       return chain;
     })
