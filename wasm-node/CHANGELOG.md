@@ -6,8 +6,9 @@
 
 - All `transactionWatch_unstable`-prefixed JSON-RPC functions have been renamed to `transactionWatch_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1771](https://github.com/smol-dot/smoldot/pull/1771))
 
-### Fixed
+### Fixed
 
+- Fix the wrong `parentBlockHash` value being sent in `chainHead_v1_followEvent` notifications. ([#1791](https://github.com/smol-dot/smoldot/pull/1791))
 - Fix the `forbidWs` option being ignored when connecting to non-localhost addresses. Smoldot erroneously only took the value of `forbidNonLocalWs` in that situation. Connecting to a non-localhost address is now only done if both `forbidWs` and `forbidNonLocalWs` are `false`. ([#1790](https://github.com/smol-dot/smoldot/pull/1790))
 
 ## 2.0.24 - 2024-04-16
