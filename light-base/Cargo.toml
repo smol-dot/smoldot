@@ -41,7 +41,7 @@ zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
-parking_lot = { version = "0.12.1", optional = true }
+parking_lot = { version = "0.12.2", optional = true }
 log = { version = "0.4.18", default-features = false, optional = true }
 smol = { version = "2.0.0", optional = true }
 
