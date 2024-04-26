@@ -6,6 +6,10 @@
 
 - All `transactionWatch_unstable`-prefixed JSON-RPC functions have been renamed to `transactionWatch_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1771](https://github.com/smol-dot/smoldot/pull/1771))
 
+### Fix
+
+- The `finalizedBlockHash` field of the `initialized` event of `chainHead_v1_followEvent` notifications is now properly named `finalizedBlockHashes` and is now properly an array.
+
 ## 2.0.24 - 2024-04-16
 
 ### Changed

@@ -681,7 +681,7 @@ pub enum FollowEvent<'a> {
     #[serde(rename = "initialized")]
     Initialized {
         #[serde(rename = "finalizedBlockHash")]
-        finalized_block_hash: HashHexString,
+        finalized_block_hashes: Vec<HashHexString>,
         #[serde(
             rename = "finalizedBlockRuntime",
             skip_serializing_if = "Option::is_none"

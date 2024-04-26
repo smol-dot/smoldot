@@ -3804,7 +3804,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Initialized {
-                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
+                                finalized_block_hashes: vec![methods::HashHexString(
+                                    finalized_block_hash,
+                                )],
                                 finalized_block_runtime: finalized_block_runtime.as_ref().map(
                                     |runtime| match runtime {
                                         Ok(rt) => methods::MaybeRuntimeSpec::Valid {
