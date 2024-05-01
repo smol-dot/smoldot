@@ -291,9 +291,9 @@ checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9475866fec1451be56a3c2400fd081ff546538961565ccb5b7142cbd22bc7a51"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bincode"
@@ -2255,7 +2255,7 @@ dependencies = [
  "arrayvec 0.7.4",
  "async-lock",
  "atomic-take",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bip39",
  "blake2-rfc",
  "bs58",
@@ -2345,7 +2345,7 @@ version = "0.15.0"
 dependencies = [
  "async-channel",
  "async-lock",
- "base64 0.22.0",
+ "base64 0.22.1",
  "blake2-rfc",
  "bs58",
  "derive_more",
@@ -2401,7 +2401,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37468c595637c10857701c990f93a40ce0e357cedb0953d1c26c8d8027f9bb53"
 dependencies = [
- "base64 0.22.0",
+ "base64 0.22.1",
  "bytes",
  "flate2",
  "futures",
