@@ -1225,23 +1225,44 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         block_number,
                         block_hash,
                     }),
-                    _,
+                    runtime_subscription,
                 ) => {
-                    // If `block_number` is over the finalized block, then which source knows which
-                    // block is precisely tracked. Otherwise, it is assumed that all sources are on
-                    // the finalized chain and thus that all sources whose best block is superior
-                    // to `block_number` have it.
-                    let list = if block_number > self.sync_sources.finalized_block_height() {
-                        self.sync_sources
-                            .knows_non_finalized_block(block_number, &block_hash)
-                            .map(|local_id| self.sync_sources[local_id].0.clone())
-                            .collect()
-                    } else {
+                    // If `block_number` is inferior or equal to the finalized block, or that
+                    // it is a parahead of the relay chain, then we assume that all parachain
+                    // nodes know this block.
+                    // Otherwise, which source knows which block is precisely tracked.
+                    let any_source_goes =
+                        if block_number > self.sync_sources.finalized_block_height() {
+                            if let ParachainBackgroundState::Subscribed(runtime_subscription) =
+                                runtime_subscription
+                            {
+                                runtime_subscription
+                                    .async_tree
+                                    .input_output_iter_unordered()
+                                    .filter_map(|item| item.async_op_user_data)
+                                    .filter_map(|block| block.as_ref())
+                                    .any(|item| {
+                                        // TODO: CPU-expensive
+                                        header::hash_from_scale_encoded_header(item) == block_hash
+                                    })
+                            } else {
+                                false
+                            }
+                        } else {
+                            true
+                        };
+
+                    let list = if any_source_goes {
                         self.sync_sources
                             .keys()
                             .filter(|local_id| {
                                 self.sync_sources.best_block(*local_id).0 >= block_number
                             })
+                            .map(|local_id| self.sync_sources[local_id].0.clone())
+                            .collect()
+                    } else {
+                        self.sync_sources
+                            .knows_non_finalized_block(block_number, &block_hash)
                             .map(|local_id| self.sync_sources[local_id].0.clone())
                             .collect()
                     };
