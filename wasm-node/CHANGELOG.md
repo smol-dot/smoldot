@@ -4,7 +4,20 @@
 
 ### Changed
 
+- When it comes to determining which peers know which block, smoldot now assumes that all parachain nodes know all paraheads found in the relay chain. This solves some issues when. ([#1812](https://github.com/smol-dot/smoldot/pull/1812))
+
+## 2.0.25 - 2024-04-29
+
+### Changed
+
 - All `transactionWatch_unstable`-prefixed JSON-RPC functions have been renamed to `transactionWatch_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#1771](https://github.com/smol-dot/smoldot/pull/1771))
+
+### Fixed
+
+- Fix the wrong `parentBlockHash` value being sent in `chainHead_v1_followEvent` notifications. ([#1791](https://github.com/smol-dot/smoldot/pull/1791))
+- Fix the `forbidWs` option being ignored when connecting to non-localhost addresses. Smoldot erroneously only took the value of `forbidNonLocalWs` in that situation. Connecting to a non-localhost address is now only done if both `forbidWs` and `forbidNonLocalWs` are `false`. ([#1790](https://github.com/smol-dot/smoldot/pull/1790))
+- The `finalizedBlockHash` field of the `initialized` event of `chainHead_v1_followEvent` notifications is now properly named `finalizedBlockHashes` and is now properly an array. ([#1792](https://github.com/smol-dot/smoldot/pull/1792))
+- Fix panic when calling the `system_health` JSON-RPC function when the finalized block is equal to the best block. ([#1798](https://github.com/smol-dot/smoldot/pull/1798))
 
 ## 2.0.24 - 2024-04-16
 

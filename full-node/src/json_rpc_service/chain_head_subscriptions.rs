@@ -96,9 +96,9 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
             .send_notification(methods::ServerToClient::chainHead_v1_followEvent {
                 subscription: (&json_rpc_subscription_id).into(),
                 result: methods::FollowEvent::Initialized {
-                    finalized_block_hash: methods::HashHexString(
+                    finalized_block_hashes: vec![methods::HashHexString(
                         consensus_service_subscription.finalized_block_hash,
-                    ),
+                    )],
                     finalized_block_runtime: if config.with_runtime {
                         Some(convert_runtime_spec(
                             consensus_service_subscription

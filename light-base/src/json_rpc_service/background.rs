@@ -3804,7 +3804,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         methods::ServerToClient::chainHead_v1_followEvent {
                             subscription: Cow::Borrowed(&subscription_id),
                             result: methods::FollowEvent::Initialized {
-                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
+                                finalized_block_hashes: vec![methods::HashHexString(
+                                    finalized_block_hash,
+                                )],
                                 finalized_block_runtime: finalized_block_runtime.as_ref().map(
                                     |runtime| match runtime {
                                         Ok(rt) => methods::MaybeRuntimeSpec::Valid {
@@ -3826,10 +3828,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
                 // Send an event for each non-finalized block.
                 for block in non_finalized_blocks_ancestry_order {
-                    let parent_block_hash = header::hash_from_scale_encoded_header(match &block {
+                    let parent_block_hash = match &block {
                         either::Left(b) => b.parent_hash,
                         either::Right(b) => b.parent_hash,
-                    }); // TODO: indicate hash in subscription?
+                    };
                     let hash = header::hash_from_scale_encoded_header(match &block {
                         either::Left(b) => &b.scale_encoded_header,
                         either::Right(b) => &b.scale_encoded_header,

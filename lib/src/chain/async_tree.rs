@@ -811,7 +811,10 @@ where
         assert!(match (self.input_finalized_index, new_best_block) {
             (Some(f), Some(b)) => self.non_finalized_blocks.is_ancestor(f, b),
             (Some(_), None) => false,
-            (None, Some(_)) => true,
+            (None, Some(b)) => {
+                assert!(self.non_finalized_blocks.contains(b));
+                true
+            }
             (None, None) => true,
         });
 
@@ -898,9 +901,12 @@ where
             };
 
             if let Some(new_finalized) = new_finalized {
-                // Update `input_finalized_index`.
+                // Update `input_finalized_index` and `input_best_block_index`.
                 if self.input_finalized_index == Some(new_finalized) {
                     self.input_finalized_index = None;
+                }
+                if self.input_best_block_index == Some(new_finalized) {
+                    self.input_best_block_index = None;
                 }
 
                 let mut pruned_blocks = Vec::new();

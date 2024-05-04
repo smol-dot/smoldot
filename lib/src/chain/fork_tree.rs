@@ -162,6 +162,11 @@ impl<T> ForkTree<T> {
         return_value.map(NodeIndex)
     }
 
+    /// Returns `true` if the given [`NodeIndex`] is valid.
+    pub fn contains(&self, index: NodeIndex) -> bool {
+        self.nodes.contains(index.0)
+    }
+
     /// Returns the value of the node with the given index.
     pub fn get(&self, index: NodeIndex) -> Option<&T> {
         self.nodes.get(index.0).map(|n| &n.data)

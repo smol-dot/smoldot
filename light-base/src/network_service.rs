@@ -1836,7 +1836,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "block-announce-received",
                     chain = &task.network[chain_id].log_name,
                     peer_id,
-                    best_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                    block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                         announce.decode().scale_encoded_header
                     )),
                     is_best = announce.decode().is_best
