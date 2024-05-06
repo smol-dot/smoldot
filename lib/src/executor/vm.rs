@@ -1062,9 +1062,9 @@ impl<'a> From<&'a Signature> for wasmi::FuncType {
             sig.params
                 .iter()
                 .copied()
-                .map(wasmi::core::ValueType::from)
+                .map(wasmi::core::ValType::from)
                 .collect::<Vec<_>>(),
-            sig.ret_ty.map(wasmi::core::ValueType::from),
+            sig.ret_ty.map(wasmi::core::ValType::from),
         )
     }
 }
@@ -1189,35 +1189,35 @@ impl WasmValue {
     }
 }
 
-impl TryFrom<wasmi::Value> for WasmValue {
+impl TryFrom<wasmi::Val> for WasmValue {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: wasmi::Value) -> Result<Self, Self::Error> {
+    fn try_from(val: wasmi::Val) -> Result<Self, Self::Error> {
         match val {
-            wasmi::Value::I32(v) => Ok(WasmValue::I32(v)),
-            wasmi::Value::I64(v) => Ok(WasmValue::I64(v)),
+            wasmi::Val::I32(v) => Ok(WasmValue::I32(v)),
+            wasmi::Val::I64(v) => Ok(WasmValue::I64(v)),
             _ => Err(UnsupportedTypeError),
         }
     }
 }
 
-impl<'a> TryFrom<&'a wasmi::Value> for WasmValue {
+impl<'a> TryFrom<&'a wasmi::Val> for WasmValue {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: &'a wasmi::Value) -> Result<Self, Self::Error> {
+    fn try_from(val: &'a wasmi::Val) -> Result<Self, Self::Error> {
         match val {
-            wasmi::Value::I32(v) => Ok(WasmValue::I32(*v)),
-            wasmi::Value::I64(v) => Ok(WasmValue::I64(*v)),
+            wasmi::Val::I32(v) => Ok(WasmValue::I32(*v)),
+            wasmi::Val::I64(v) => Ok(WasmValue::I64(*v)),
             _ => Err(UnsupportedTypeError),
         }
     }
 }
 
-impl From<WasmValue> for wasmi::Value {
+impl From<WasmValue> for wasmi::Val {
     fn from(val: WasmValue) -> Self {
         match val {
-            WasmValue::I32(v) => wasmi::Value::I32(v),
-            WasmValue::I64(v) => wasmi::Value::I64(v),
+            WasmValue::I32(v) => wasmi::Val::I32(v),
+            WasmValue::I64(v) => wasmi::Val::I64(v),
         }
     }
 }
@@ -1273,22 +1273,22 @@ impl<'a> TryFrom<&'a wasmtime::Val> for WasmValue {
     }
 }
 
-impl From<ValueType> for wasmi::core::ValueType {
-    fn from(ty: ValueType) -> wasmi::core::ValueType {
+impl From<ValueType> for wasmi::core::ValType {
+    fn from(ty: ValueType) -> wasmi::core::ValType {
         match ty {
-            ValueType::I32 => wasmi::core::ValueType::I32,
-            ValueType::I64 => wasmi::core::ValueType::I64,
+            ValueType::I32 => wasmi::core::ValType::I32,
+            ValueType::I64 => wasmi::core::ValType::I64,
         }
     }
 }
 
-impl TryFrom<wasmi::core::ValueType> for ValueType {
+impl TryFrom<wasmi::core::ValType> for ValueType {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: wasmi::core::ValueType) -> Result<Self, Self::Error> {
+    fn try_from(val: wasmi::core::ValType) -> Result<Self, Self::Error> {
         match val {
-            wasmi::core::ValueType::I32 => Ok(ValueType::I32),
-            wasmi::core::ValueType::I64 => Ok(ValueType::I64),
+            wasmi::core::ValType::I32 => Ok(ValueType::I32),
+            wasmi::core::ValType::I64 => Ok(ValueType::I64),
             _ => Err(UnsupportedTypeError),
         }
     }

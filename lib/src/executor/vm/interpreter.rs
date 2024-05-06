@@ -217,7 +217,7 @@ impl InterpreterPrototype {
             .get(&self.store);
 
         match value {
-            wasmi::Value::I32(v) => Ok(u32::from_ne_bytes(v.to_ne_bytes())),
+            wasmi::Val::I32(v) => Ok(u32::from_ne_bytes(v.to_ne_bytes())),
             _ => Err(GlobalValueErr::Invalid),
         }
     }
@@ -385,10 +385,10 @@ impl Prepare {
             // function signature above.
             debug_assert!(list.len() <= 1);
             list.first().map(|item| match *item {
-                wasmi::core::ValueType::I32 => wasmi::Value::I32(0),
-                wasmi::core::ValueType::I64 => wasmi::Value::I64(0),
-                wasmi::core::ValueType::F32 => wasmi::Value::F32(0.0f32.into()),
-                wasmi::core::ValueType::F64 => wasmi::Value::F64(0.0.into()),
+                wasmi::core::ValType::I32 => wasmi::Val::I32(0),
+                wasmi::core::ValType::I64 => wasmi::Val::I64(0),
+                wasmi::core::ValType::F32 => wasmi::Val::F32(0.0f32.into()),
+                wasmi::core::ValType::F64 => wasmi::Val::F64(0.0.into()),
                 _ => unreachable!(),
             })
         };
@@ -402,7 +402,7 @@ impl Prepare {
                 func_to_call,
                 params
                     .iter()
-                    .map(|v| wasmi::Value::from(*v))
+                    .map(|v| wasmi::Val::from(*v))
                     .collect::<Vec<_>>(),
             )),
         })
@@ -452,11 +452,11 @@ pub struct Interpreter {
     /// Where the return value of the execution will be stored.
     /// While this could be regenerated every time `run` is called, it is instead kept in the
     /// `Interpreter` struct for convenience.
-    dummy_output_value: Option<wasmi::Value>,
+    dummy_output_value: Option<wasmi::Val>,
 }
 
 enum Execution {
-    NotStarted(wasmi::Func, Vec<wasmi::Value>),
+    NotStarted(wasmi::Func, Vec<wasmi::Val>),
     Started(wasmi::ResumableInvocation),
 }
 
@@ -497,7 +497,7 @@ impl Interpreter {
                     return Err(RunErr::BadValueTy { expected, obtained });
                 }
 
-                let value = value.map(wasmi::Value::from);
+                let value = value.map(wasmi::Val::from);
                 let inputs = match value.as_ref() {
                     Some(v) => &core::array::from_ref(v)[..],
                     None => &[],
