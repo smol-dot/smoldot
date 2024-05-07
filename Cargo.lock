@@ -25,6 +25,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e89da841a80418a9b391ebaea17f5c112ffaaa96f621d2c285b5174da76b9011"
 dependencies = [
  "cfg-if",
+ "const-random",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -519,6 +520,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "const-random"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
+dependencies = [
+ "const-random-macro",
+]
+
+[[package]]
+name = "const-random-macro"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
+dependencies = [
+ "getrandom",
+ "once_cell",
+ "tiny-keccak",
 ]
 
 [[package]]
@@ -2436,6 +2457,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "string-interner"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c6a0d765f5807e98a091107bae0a56ea3799f66a5de47b2c84c94a39c09974e"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2537,6 +2568,15 @@ dependencies = [
  "log",
  "ordered-float",
  "threadpool",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]
@@ -2732,9 +2772,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.12"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17bbbb60479dea0008e74b1b2dde8fbd2a724258b971782882b199cba627896e"
+checksum = "c4e9acf86bad96b88fd3072c264720927dbac2245a3a6c2c2f9f467d7fb38a28"
 dependencies = [
  "arrayvec 0.7.4",
  "multi-stash",
@@ -2742,22 +2782,27 @@ dependencies = [
  "num-traits",
  "smallvec",
  "spin",
- "wasmi_arena",
+ "wasmi_collections",
  "wasmi_core",
  "wasmparser-nostd",
 ]
 
 [[package]]
-name = "wasmi_arena"
-version = "0.5.0"
+name = "wasmi_collections"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f686876d8f92a573a9a1e005b78ec1e893158bbdc3ac75a1270384ca86d6c6b"
+checksum = "25f949a764c06a915e1d2d2434786e12079c4cc10d4455596fb0b91d7518f875"
+dependencies = [
+ "ahash",
+ "hashbrown 0.14.5",
+ "string-interner",
+]
 
 [[package]]
 name = "wasmi_core"
-version = "0.19.0"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "783d04e557f951438da2c96c42432fe56fcb10267c8163b493c145dffdebe4f6"
+checksum = "1c2cefa1a84fe547a3f886e7d1f41a6733edb8e6dcb2832f4b4f56649bf42f82"
 dependencies = [
  "downcast-rs",
  "libm",
