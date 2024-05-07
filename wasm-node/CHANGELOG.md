@@ -4,6 +4,8 @@
 
 ### Changed
 
+## 2.0.26 - 2024-05-07
+
 - When it comes to determining which peers know which block, smoldot now assumes that all parachain nodes know all paraheads found in the relay chain. This solves some issues when. ([#1812](https://github.com/smol-dot/smoldot/pull/1812))
 
 ## 2.0.25 - 2024-04-29
