@@ -25,6 +25,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e89da841a80418a9b391ebaea17f5c112ffaaa96f621d2c285b5174da76b9011"
 dependencies = [
  "cfg-if",
+ "const-random",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -519,6 +520,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "const-random"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
+dependencies = [
+ "const-random-macro",
+]
+
+[[package]]
+name = "const-random-macro"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
+dependencies = [
+ "getrandom",
+ "once_cell",
+ "tiny-keccak",
 ]
 
 [[package]]
@@ -2550,6 +2571,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
+]
+
+[[package]]
 name = "tinytemplate"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2742,9 +2772,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.13"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0af4e112c3ba7041f28b5180d42a53c19390f737f2f855813e2f11805dd7d7e6"
+checksum = "c4e9acf86bad96b88fd3072c264720927dbac2245a3a6c2c2f9f467d7fb38a28"
 dependencies = [
  "arrayvec 0.7.4",
  "multi-stash",
@@ -2759,9 +2789,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi_collections"
-version = "0.1.0"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "940a5198807d9e7b3317f62dcae2745ba35699720d4600cb79c1cd652c8318b7"
+checksum = "25f949a764c06a915e1d2d2434786e12079c4cc10d4455596fb0b91d7518f875"
 dependencies = [
  "ahash",
  "hashbrown 0.14.5",
@@ -2770,9 +2800,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi_core"
-version = "0.20.0"
+version = "0.32.0-beta.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea739aa7763d2f2b86e6731eaa72193de51cb97a9a5a0d06ac35b181d36d0f54"
+checksum = "1c2cefa1a84fe547a3f886e7d1f41a6733edb8e6dcb2832f4b4f56649bf42f82"
 dependencies = [
  "downcast-rs",
  "libm",
