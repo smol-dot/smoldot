@@ -135,9 +135,9 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
 name = "async-channel"
-version = "2.2.1"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "136d4d23bcc79e27423727b36823d86233aad06dfea531837b038394d11e9928"
+checksum = "9f2776ead772134d55b62dd45e59a79e21612d85d0af729b8b7d3967d601a62a"
 dependencies = [
  "concurrent-queue",
  "event-listener 5.3.0",
@@ -1007,9 +1007,9 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 
 [[package]]
 name = "fiat-crypto"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38793c55593b33412e3ae40c2c9781ffaa6f438f6f8c10f24e71846fbd7ae01e"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "flate2"
@@ -1791,9 +1791,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "piper"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "668d31b1c4eba19242f2088b2bf3316b82ca31082a8335764db4e083db7485d4"
+checksum = "464db0c665917b13ebb5d453ccdec4add5658ee1adc7affc7677615356a8afaf"
 dependencies = [
  "atomic-waker",
  "fastrand",
@@ -2747,9 +2747,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.15"
+version = "0.32.0-beta.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b670151e546caf388234426e40eab5fda910e2c3d5d2a54d763d251156da15ab"
+checksum = "89197c624ff57b954a57779b670f43709a023b1e365285af4bf14db37c9bed8b"
 dependencies = [
  "arrayvec 0.7.4",
  "multi-stash",
@@ -2764,9 +2764,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi_collections"
-version = "0.32.0-beta.15"
+version = "0.32.0-beta.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c02941d3d2c7f7ce621d74885b5c5b8426300ca0424ba9a1ffb0e1ad1bef85b"
+checksum = "3eefbe690421d1957bba7ced57b427263ff66885f6772b7e995806327e1086bf"
 dependencies = [
  "ahash",
  "hashbrown 0.14.5",
@@ -2775,9 +2775,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi_core"
-version = "0.32.0-beta.15"
+version = "0.32.0-beta.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0dc1ce370d6e9a8c4c27675aa6ac3cd4df7790f0ed562f3c332f056749ca90e"
+checksum = "1f873c298a7a5581318f6e7e604f90b2c6fc682ba032592126a0e71017f68cc0"
 dependencies = [
  "downcast-rs",
  "libm",
