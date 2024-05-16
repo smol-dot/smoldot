@@ -79,15 +79,7 @@ pub struct Config<'a, TParams> {
     /// Behavior if the `ext_storage_proof_size_storage_proof_size_version_1` host function is
     /// called.
     ///
-    /// When authoring a block or executing a block, this host function is expected to return the
-    /// current size of the proof. Smoldot unfortunately can't implement this due to the fact that
-    /// the proof generation algorithm is completely unspecified. For this reason, you should
-    /// use [`StorageProofSizeBehavior::Unimplemented`]. However, for testing purposes, using
-    /// `StorageProofSizeBehavior::ConstantReturnValue(0)` is acceptable.
-    ///
-    /// In situations other than authoring or executing a block, use the value returned by
-    /// [`StorageProofSizeBehavior::proof_recording_disabled`].
-    ///
+    /// See the documentation of [`StorageProofSizeBehavior`].
     pub storage_proof_size_behavior: StorageProofSizeBehavior,
 
     /// Maximum log level of the runtime.

@@ -234,7 +234,17 @@ pub struct Config<TModule> {
     pub allow_unresolved_imports: bool,
 }
 
-/// See [`Config::storage_proof_size_behavior`].
+/// Behavior if the `ext_storage_proof_size_storage_proof_size_version_1` host function is called.
+///
+/// When authoring a block or executing a block, this host function is expected to return the
+/// current size of the proof. Smoldot unfortunately can't implement this due to the fact that
+/// the proof generation algorithm is completely unspecified. For this reason, you should
+/// use [`StorageProofSizeBehavior::Unimplemented`]. However, for testing purposes, using
+/// `StorageProofSizeBehavior::ConstantReturnValue(0)` is acceptable.
+///
+/// In situations other than authoring or executing a block, use the value returned by
+/// [`StorageProofSizeBehavior::proof_recording_disabled`].
+///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageProofSizeBehavior {
     /// The host function is unimplemented. An error is returned if it is called.
@@ -458,6 +468,9 @@ impl HostVmPrototype {
     }
 
     /// Starts the VM, calling the function passed as parameter.
+    ///
+    /// See the documentation of [`StorageProofSizeBehavior`] for an explanation of
+    /// the `storage_proof_size_behavior` parameter.
     pub fn run(
         self,
         function_to_call: &str,
@@ -472,6 +485,9 @@ impl HostVmPrototype {
     }
 
     /// Same as [`HostVmPrototype::run`], except that the function doesn't need any parameter.
+    ///
+    /// See the documentation of [`StorageProofSizeBehavior`] for an explanation of
+    /// the `storage_proof_size_behavior` parameter.
     pub fn run_no_param(
         self,
         function_to_call: &str,
@@ -487,20 +503,8 @@ impl HostVmPrototype {
     /// Same as [`HostVmPrototype::run`], except that the function parameter can be passed as
     /// a list of buffers. All the buffers will be concatenated in memory.
     ///
-    /// # Storage proof size behavior
-    ///
-    /// The `storage_proof_size_behavior` parameter indicates the behavior if the
-    /// `ext_storage_proof_size_storage_proof_size_version_1` host function is called.
-    ///
-    /// When authoring a block or executing a block, this host function is expected to return the
-    /// current size of the proof. Smoldot unfortunately can't implement this due to the fact that
-    /// the proof generation algorithm is completely unspecified. For this reason, you should
-    /// use [`StorageProofSizeBehavior::Unimplemented`]. However, for testing purposes, using
-    /// `StorageProofSizeBehavior::ConstantReturnValue(0)` is acceptable.
-    ///
-    /// In situations other than authoring or executing a block, use the value returned by
-    /// [`StorageProofSizeBehavior::proof_recording_disabled`].
-    ///
+    /// See the documentation of [`StorageProofSizeBehavior`] for an explanation of
+    /// the `storage_proof_size_behavior` parameter.
     pub fn run_vectored(
         mut self,
         function_to_call: &str,
