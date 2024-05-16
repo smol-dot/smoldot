@@ -3015,6 +3015,7 @@ pub async fn execute_block_and_insert(
             parent_runtime,
             call_function,
             &call_parameter,
+            runtime_call::StorageProofSizeBehavior::Unimplemented,
             storage_changes,
         )
         .await
@@ -3352,12 +3353,14 @@ pub async fn runtime_call(
     runtime: host::HostVmPrototype,
     function_to_call: &str,
     parameter: &[u8],
+    storage_proof_size_behavior: runtime_call::StorageProofSizeBehavior,
     initial_storage_changes: runtime_call::StorageChanges,
 ) -> Result<RuntimeCallSuccess, RuntimeCallError> {
     let mut call = runtime_call::run(runtime_call::Config {
         virtual_machine: runtime,
         function_to_call,
         parameter: iter::once(&parameter),
+        storage_proof_size_behavior,
         storage_main_trie_changes: initial_storage_changes.into_main_trie_diff(),
         max_log_level: 0,
         calculate_trie_changes: true,

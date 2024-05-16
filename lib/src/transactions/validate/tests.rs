@@ -55,6 +55,8 @@ fn validate_from_proof() {
             super::TransactionSource::External,
             &header::hash_from_scale_encoded_header(&scale_encoded_header),
         ),
+        storage_proof_size_behavior:
+            runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
         storage_main_trie_changes: Default::default(),
         max_log_level: 0,
         calculate_trie_changes: false,

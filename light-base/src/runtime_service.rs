@@ -3085,6 +3085,8 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         virtual_machine: runtime,
         function_to_call: function_name,
         parameter: iter::once(parameters_vectored),
+        storage_proof_size_behavior:
+            executor::runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
         storage_main_trie_changes: Default::default(),
         max_log_level: 0,
         calculate_trie_changes: false,

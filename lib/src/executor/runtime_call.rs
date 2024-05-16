@@ -51,7 +51,9 @@ use alloc::{
 };
 use core::{fmt, iter, ops};
 
-pub use host::{Error as ErrorDetail, LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr};
+pub use host::{
+    Error as ErrorDetail, LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr, StorageProofSizeBehavior,
+};
 pub use trie::{Nibble, TrieEntryVersion};
 
 mod tests;
@@ -73,6 +75,12 @@ pub struct Config<'a, TParams> {
     // TODO: consider accepting a different type
     // TODO: accept also child trie modifications
     pub storage_main_trie_changes: storage_diff::TrieDiff,
+
+    /// Behavior if the `ext_storage_proof_size_storage_proof_size_version_1` host function is
+    /// called.
+    ///
+    /// See the documentation of [`StorageProofSizeBehavior`].
+    pub storage_proof_size_behavior: StorageProofSizeBehavior,
 
     /// Maximum log level of the runtime.
     ///
@@ -101,7 +109,11 @@ pub fn run(
     Ok(Inner {
         vm: config
             .virtual_machine
-            .run_vectored(config.function_to_call, config.parameter)?
+            .run_vectored(
+                config.function_to_call,
+                config.storage_proof_size_behavior,
+                config.parameter,
+            )?
             .into(),
         pending_storage_changes: PendingStorageChanges {
             trie_diffs: {

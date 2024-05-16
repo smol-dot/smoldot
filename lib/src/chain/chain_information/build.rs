@@ -494,6 +494,8 @@ impl ChainInformationBuild {
                 parameter: call.parameter_vectored(),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
                 max_log_level: 0,
+                storage_proof_size_behavior:
+                    runtime_call::StorageProofSizeBehavior::proof_recording_disabled(),
                 storage_main_trie_changes: Default::default(),
                 calculate_trie_changes: false,
             });

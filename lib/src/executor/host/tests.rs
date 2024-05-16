@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
+use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior};
 
 mod hash_algorithms;
 mod initialization;
@@ -97,7 +97,13 @@ fn basic_core_version() {
         })
         .unwrap();
 
-        let mut vm = proto.run_no_param("Core_version").unwrap().run();
+        let mut vm = proto
+            .run_no_param(
+                "Core_version",
+                StorageProofSizeBehavior::proof_recording_disabled(),
+            )
+            .unwrap()
+            .run();
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
