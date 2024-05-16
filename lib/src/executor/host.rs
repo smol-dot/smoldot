@@ -3776,7 +3776,7 @@ struct Inner {
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
 
-    /// See [`Config::storage_proof_size_behavior`].
+    /// Value passed as parameter.
     storage_proof_size_behavior: StorageProofSizeBehavior,
 
     /// Fields that are kept as is even during the execution.
