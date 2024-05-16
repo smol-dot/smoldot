@@ -234,6 +234,23 @@ pub struct Config<TModule> {
     pub allow_unresolved_imports: bool,
 }
 
+/// See [`Config::storage_proof_size_behavior`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageProofSizeBehavior {
+    /// The host function is unimplemented. An error is returned if it is called.
+    Unimplemented,
+    /// The host function returns the given value.
+    ConstantReturnValue(u64),
+}
+
+impl StorageProofSizeBehavior {
+    /// Returns the behavior to employ when proof recording is disabled, as defined in the
+    /// specification.
+    pub fn proof_recording_disabled() -> Self {
+        StorageProofSizeBehavior::ConstantReturnValue(u64::MAX)
+    }
+}
+
 /// Prototype for an [`HostVm`].
 ///
 /// > **Note**: This struct implements `Clone`. Cloning a [`HostVmPrototype`] allocates memory
@@ -380,7 +397,10 @@ impl HostVmPrototype {
 
         // Call `Core_version` if no runtime version is known yet.
         if host_vm_prototype.common.runtime_version.is_none() {
-            let mut vm: HostVm = match host_vm_prototype.run_no_param("Core_version") {
+            let mut vm: HostVm = match host_vm_prototype.run_no_param(
+                "Core_version",
+                StorageProofSizeBehavior::proof_recording_disabled(),
+            ) {
                 Ok(vm) => vm.into(),
                 Err((err, _)) => return Err(NewErr::CoreVersion(CoreVersionError::Start(err))),
             };
@@ -438,20 +458,53 @@ impl HostVmPrototype {
     }
 
     /// Starts the VM, calling the function passed as parameter.
-    pub fn run(self, function_to_call: &str, data: &[u8]) -> Result<ReadyToRun, (StartErr, Self)> {
-        self.run_vectored(function_to_call, iter::once(data))
+    pub fn run(
+        self,
+        function_to_call: &str,
+        storage_proof_size_behavior: StorageProofSizeBehavior,
+        data: &[u8],
+    ) -> Result<ReadyToRun, (StartErr, Self)> {
+        self.run_vectored(
+            function_to_call,
+            storage_proof_size_behavior,
+            iter::once(data),
+        )
     }
 
     /// Same as [`HostVmPrototype::run`], except that the function doesn't need any parameter.
-    pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, (StartErr, Self)> {
-        self.run_vectored(function_to_call, iter::empty::<Vec<u8>>())
+    pub fn run_no_param(
+        self,
+        function_to_call: &str,
+        storage_proof_size_behavior: StorageProofSizeBehavior,
+    ) -> Result<ReadyToRun, (StartErr, Self)> {
+        self.run_vectored(
+            function_to_call,
+            storage_proof_size_behavior,
+            iter::empty::<Vec<u8>>(),
+        )
     }
 
     /// Same as [`HostVmPrototype::run`], except that the function parameter can be passed as
     /// a list of buffers. All the buffers will be concatenated in memory.
+    ///
+    /// # Storage proof size behavior
+    ///
+    /// The `storage_proof_size_behavior` parameter indicates the behavior if the
+    /// `ext_storage_proof_size_storage_proof_size_version_1` host function is called.
+    ///
+    /// When authoring a block or executing a block, this host function is expected to return the
+    /// current size of the proof. Smoldot unfortunately can't implement this due to the fact that
+    /// the proof generation algorithm is completely unspecified. For this reason, you should
+    /// use [`StorageProofSizeBehavior::Unimplemented`]. However, for testing purposes, using
+    /// `StorageProofSizeBehavior::ConstantReturnValue(0)` is acceptable.
+    ///
+    /// In situations other than authoring or executing a block, use the value returned by
+    /// [`StorageProofSizeBehavior::proof_recording_disabled`].
+    ///
     pub fn run_vectored(
         mut self,
         function_to_call: &str,
+        storage_proof_size_behavior: StorageProofSizeBehavior,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> Result<ReadyToRun, (StartErr, Self)> {
         // Determine the total length of `data`.
@@ -535,6 +588,7 @@ impl HostVmPrototype {
                 storage_transaction_depth: 0,
                 signatures_batch_verification: None,
                 allocator,
+                storage_proof_size_behavior,
             }),
         })
     }
@@ -1182,7 +1236,22 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_storage_proof_size_storage_proof_size_version_1 => {
-                host_fn_not_implemented!()
+                match self.inner.storage_proof_size_behavior {
+                    StorageProofSizeBehavior::ConstantReturnValue(value) => {
+                        HostVm::ReadyToRun(ReadyToRun {
+                            inner: self.inner,
+                            resume_value: Some(vm::WasmValue::I64(i64::from_ne_bytes(
+                                value.to_ne_bytes(),
+                            ))),
+                        })
+                    }
+                    StorageProofSizeBehavior::Unimplemented => HostVm::Error {
+                        error: Error::HostFunctionNotImplemented {
+                            function: host_fn.name(),
+                        },
+                        prototype: self.inner.into_prototype(),
+                    },
+                }
             }
             HostFunction::ext_default_child_storage_get_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
@@ -3702,6 +3771,9 @@ struct Inner {
 
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
+
+    /// See [`Config::storage_proof_size_behavior`].
+    storage_proof_size_behavior: StorageProofSizeBehavior,
 
     /// Fields that are kept as is even during the execution.
     common: Box<VmCommon>,

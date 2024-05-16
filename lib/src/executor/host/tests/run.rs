@@ -17,6 +17,7 @@
 
 use super::super::{
     vm, vm::ExecHint, Config, Error, HeapPages, HostVm, HostVmPrototype, NewErr, StartErr,
+    StorageProofSizeBehavior,
 };
 use super::with_core_version_custom_sections;
 
@@ -43,7 +44,10 @@ fn function_to_run_doesnt_exist() {
         })
         .unwrap();
 
-        match host_vm.run_no_param("functiondoesntexist") {
+        match host_vm.run_no_param(
+            "functiondoesntexist",
+            StorageProofSizeBehavior::proof_recording_disabled(),
+        ) {
             Err((StartErr::VirtualMachine(vm::StartErr::FunctionNotFound), _)) => {}
             _ => unreachable!(),
         }
@@ -74,7 +78,10 @@ fn function_to_run_invalid_params() {
         })
         .unwrap();
 
-        match host_vm.run_no_param("hello") {
+        match host_vm.run_no_param(
+            "hello",
+            StorageProofSizeBehavior::proof_recording_disabled(),
+        ) {
             Err((StartErr::VirtualMachine(vm::StartErr::InvalidParameters), _)) => {}
             _ => unreachable!(),
         }
@@ -203,7 +210,15 @@ fn input_provided_correctly() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", b"hello world").unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    b"hello world",
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -227,7 +242,11 @@ fn input_provided_correctly() {
 
         let mut vm = HostVm::from(
             proto
-                .run_vectored("test", [&b"hello "[..], &b"world"[..]].into_iter())
+                .run_vectored(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    [&b"hello "[..], &b"world"[..]].into_iter(),
+                )
                 .unwrap(),
         );
 
@@ -252,7 +271,15 @@ fn input_provided_correctly() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", b"unexpected input").unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    b"unexpected input",
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -358,7 +385,15 @@ fn large_input_provided_correctly() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &input_data).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &input_data,
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -421,7 +456,15 @@ fn return_value_works() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &[],
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -475,7 +518,15 @@ fn bad_return_value() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &[],
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -534,7 +585,15 @@ fn returned_ptr_out_of_range() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &[],
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -593,7 +652,15 @@ fn returned_size_out_of_range() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &[],
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
@@ -669,7 +736,15 @@ fn unresolved_host_function_called() {
         })
         .unwrap();
 
-        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        let mut vm = HostVm::from(
+            proto
+                .run(
+                    "test",
+                    StorageProofSizeBehavior::proof_recording_disabled(),
+                    &[],
+                )
+                .unwrap(),
+        );
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),

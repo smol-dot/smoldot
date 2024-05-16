@@ -25,7 +25,7 @@
 
 use core::{iter, ops};
 
-use super::{run, Config, RuntimeCall};
+use super::{run, Config, RuntimeCall, StorageProofSizeBehavior};
 use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 
@@ -95,6 +95,7 @@ fn execute_blocks() {
             virtual_machine,
             function_to_call: "Core_execute_block",
             max_log_level: 3,
+            storage_proof_size_behavior: StorageProofSizeBehavior::Unimplemented,
             storage_main_trie_changes: Default::default(),
             calculate_trie_changes: false,
             parameter: {

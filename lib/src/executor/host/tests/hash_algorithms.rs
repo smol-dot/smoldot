@@ -15,7 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
+use super::super::{
+    vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior,
+};
 use super::with_core_version_custom_sections;
 
 /*
@@ -221,7 +223,15 @@ macro_rules! gen_test {
                 })
                 .unwrap();
 
-                let mut vm = HostVm::from(proto.run("test", &$expected_out).unwrap());
+                let mut vm = HostVm::from(
+                    proto
+                        .run(
+                            "test",
+                            StorageProofSizeBehavior::proof_recording_disabled(),
+                            &$expected_out,
+                        )
+                        .unwrap(),
+                );
                 loop {
                     match vm {
                         HostVm::ReadyToRun(r) => vm = r.run(),
