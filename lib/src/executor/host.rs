@@ -143,7 +143,9 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::host::{Config, HeapPages, HostVm, HostVmPrototype};
+//! use smoldot::executor::host::{
+//!     Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior
+//! };
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
@@ -155,7 +157,10 @@
 //!         exec_hint: smoldot::executor::vm::ExecHint::ValidateAndExecuteOnce,
 //!         allow_unresolved_imports: false
 //!     }).unwrap();
-//!     prototype.run_no_param("Core_version").unwrap().into()
+//!     prototype.run_no_param(
+//!         "Core_version",
+//!         StorageProofSizeBehavior::proof_recording_disabled()
+//!     ).unwrap().into()
 //! };
 //!
 //! // We need to answer the calls that the runtime might perform.
