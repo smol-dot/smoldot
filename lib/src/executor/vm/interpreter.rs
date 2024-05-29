@@ -45,9 +45,8 @@ pub struct InterpreterPrototype {
 struct BaseComponents {
     module: Arc<wasmi::Module>,
 
-    /// For each import of the module, either `None` if not a function, or `Some` containing the
-    /// `usize` of that function.
-    resolved_imports: Vec<Option<usize>>,
+    /// All function imports of a module are stored here.
+    linker_builder: wasmi::LinkerBuilder<wasmi::state::Ready, ()>,
 }
 
 impl InterpreterPrototype {
@@ -77,7 +76,8 @@ impl InterpreterPrototype {
         let module = wasmi::Module::new(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
-        let mut resolved_imports = Vec::with_capacity(module.imports().len());
+        let mut linker_builder = wasmi::Linker::<()>::build();
+
         for import in module.imports() {
             match import.ty() {
                 wasmi::ExternType::Func(func_type) => {
@@ -99,9 +99,26 @@ impl InterpreterPrototype {
                             }
                         };
 
-                    resolved_imports.push(Some(function_index));
+                    // `func_new` returns an error in case of duplicate definition. Since we
+                    // enumerate over the imports, this can't happen.
+                    linker_builder
+                        .func_new(
+                            import.module(),
+                            import.name(),
+                            func_type.clone(),
+                            move |_caller, parameters, _ret| {
+                                Err(wasmi::Error::host(InterruptedTrap {
+                                    function_index,
+                                    parameters: parameters
+                                        .iter()
+                                        .map(|v| WasmValue::try_from(v).unwrap())
+                                        .collect(),
+                                }))
+                            },
+                        )
+                        .unwrap();
                 }
-                wasmi::ExternType::Memory(_) => resolved_imports.push(None),
+                wasmi::ExternType::Memory(_) => {}
                 wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
                     return Err(NewErr::ImportTypeNotSupported)
                 }
@@ -110,45 +127,21 @@ impl InterpreterPrototype {
 
         Self::from_base_components(BaseComponents {
             module: Arc::new(module),
-            resolved_imports,
+            linker_builder: linker_builder.finish(),
         })
     }
 
     fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
         let mut store = wasmi::Store::new(base_components.module.engine(), ());
 
-        let mut linker = wasmi::Linker::<()>::new(base_components.module.engine());
+        let mut linker = base_components
+            .linker_builder
+            .create(base_components.module.engine());
         let mut import_memory = None;
 
-        for (module_import, resolved_function) in base_components
-            .module
-            .imports()
-            .zip(base_components.resolved_imports.iter())
-        {
+        for module_import in base_components.module.imports() {
             match module_import.ty() {
-                wasmi::ExternType::Func(func_type) => {
-                    let function_index = resolved_function.unwrap();
-
-                    let func = wasmi::Func::new(
-                        &mut store,
-                        func_type.clone(),
-                        move |_caller, parameters, _ret| {
-                            Err(wasmi::Error::host(InterruptedTrap {
-                                function_index,
-                                parameters: parameters
-                                    .iter()
-                                    .map(|v| WasmValue::try_from(v).unwrap())
-                                    .collect(),
-                            }))
-                        },
-                    );
-
-                    // `define` returns an error in case of duplicate definition. Since we
-                    // enumerate over the imports, this can't happen.
-                    linker
-                        .define(module_import.module(), module_import.name(), func)
-                        .unwrap();
-                }
+                wasmi::ExternType::Func(_) => {}
                 wasmi::ExternType::Memory(memory_type) => {
                     if module_import.module() != "env" || module_import.name() != "memory" {
                         return Err(NewErr::MemoryNotNamedMemory);
@@ -245,7 +238,7 @@ impl Clone for InterpreterPrototype {
         // acceptable reason to panic.
         InterpreterPrototype::from_base_components(BaseComponents {
             module: self.base_components.module.clone(),
-            resolved_imports: self.base_components.resolved_imports.clone(),
+            linker_builder: self.base_components.linker_builder.clone(),
         })
         .unwrap()
     }
