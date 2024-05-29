@@ -313,8 +313,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     pub async fn subscribe(&self) -> async_channel::Receiver<Event> {
         let (tx, rx) = async_channel::bounded(128);
 
-        let _ = self
-            .messages_tx
+        self.messages_tx
             .send(ToBackgroundChain::Subscribe { sender: tx })
             .await
             .unwrap();
@@ -1537,7 +1536,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 for peer in &peers_to_send {
                     match task
                         .network
-                        .gossip_send_transaction(&peer, chain_id, &transaction)
+                        .gossip_send_transaction(peer, chain_id, &transaction)
                     {
                         Ok(()) => peers_sent.push(peer.to_base58()),
                         Err(QueueNotificationError::QueueFull) => {
@@ -1849,11 +1848,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .get_mut(&(chain_id, peer_id.clone()))
                         .unwrap();
                     if let Ok(decoded) = header::decode(
-                        &decoded_announce.scale_encoded_header,
+                        decoded_announce.scale_encoded_header,
                         task.network[chain_id].block_number_bytes,
                     ) {
                         link.best_block_hash = header::hash_from_scale_encoded_header(
-                            &decoded_announce.scale_encoded_header,
+                            decoded_announce.scale_encoded_header,
                         );
                         link.best_block_number = decoded.number;
                     }
@@ -2665,7 +2664,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .collect();
                         let remote_tls_certificate_multihash = [18u8, 32]
                             .into_iter()
-                            .chain(remote_certificate_sha256.into_iter().copied())
+                            .chain(remote_certificate_sha256.iter().copied())
                             .collect();
 
                         let (connection_id, connection_task) =

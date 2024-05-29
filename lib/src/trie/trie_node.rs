@@ -673,14 +673,12 @@ mod tests {
 
     #[test]
     fn no_children_no_storage_value() {
-        assert!(matches!(
-            super::encode(super::Decoded {
-                children: [None::<&'static [u8]>; 16],
-                storage_value: super::StorageValue::None,
-                partial_key: core::iter::empty()
-            }),
-            Ok(_)
-        ));
+        assert!(super::encode(super::Decoded {
+            children: [None::<&'static [u8]>; 16],
+            storage_value: super::StorageValue::None,
+            partial_key: core::iter::empty()
+        })
+        .is_ok());
 
         assert!(matches!(
             super::encode(super::Decoded {

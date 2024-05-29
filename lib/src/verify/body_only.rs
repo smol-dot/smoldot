@@ -33,7 +33,7 @@ use crate::{header, util, verify::inherents};
 use alloc::vec::Vec;
 use core::{iter, time::Duration};
 
-pub const EXECUTE_BLOCK_FUNCTION_NAME: &'static str = "Core_execute_block";
+pub const EXECUTE_BLOCK_FUNCTION_NAME: &str = "Core_execute_block";
 
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `Core_execute_block` function in order to verify the inherents of a block.
@@ -84,7 +84,7 @@ pub enum ExecuteBlockOutputError {
     NotEmpty,
 }
 
-pub const CHECK_INHERENTS_FUNCTION_NAME: &'static str = "BlockBuilder_check_inherents";
+pub const CHECK_INHERENTS_FUNCTION_NAME: &str = "BlockBuilder_check_inherents";
 
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `BlockBuilder_check_inherents` function in order to verify the inherents of a block.
@@ -127,7 +127,7 @@ pub fn check_inherents_parameter<'a>(
         )),
     ]
     .into_iter()
-    .flat_map(|i| i))
+    .flatten())
 }
 
 /// Checks the output of the `BlockBuilder_check_inherents` runtime call.

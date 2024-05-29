@@ -2030,7 +2030,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .decode()
                             .apis
                             .find_version(&api_name)
-                            .filter(|api_version| api_version_required.contains(&api_version));
+                            .filter(|api_version| api_version_required.contains(api_version));
 
                         let Some(api_version) = api_version_if_fulfilled else {
                             // API version required by caller isn't fulfilled.
@@ -2889,7 +2889,7 @@ fn compile_runtime<TPlat: PlatformRef>(
         exec_hint,
         allow_unresolved_imports: false,
     }) {
-        Ok(vm) => return Ok(vm),
+        Ok(vm) => Ok(vm),
         Err(executor::host::NewErr::VirtualMachine(
             executor::vm::NewErr::UnresolvedFunctionImport {
                 function,
@@ -3189,7 +3189,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
             let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
             key.extend_from_slice(PREFIX);
             key.extend_from_slice(child_trie.as_ref());
-            match call_proof.storage_value(&block_state_trie_root_hash, &key) {
+            match call_proof.storage_value(block_state_trie_root_hash, &key) {
                 Err(_) => {
                     return (
                         timing,
@@ -3218,7 +3218,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
         match call {
             executor::runtime_call::RuntimeCall::StorageGet(get) => {
                 let storage_value = if let Some(trie_root) = trie_root {
-                    call_proof.storage_value(&trie_root, get.key().as_ref())
+                    call_proof.storage_value(trie_root, get.key().as_ref())
                 } else {
                     Ok(None)
                 };
@@ -3239,7 +3239,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
             }
             executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                 let merkle_value = if let Some(trie_root) = trie_root {
-                    call_proof.closest_descendant_merkle_value(&trie_root, mv.key())
+                    call_proof.closest_descendant_merkle_value(trie_root, mv.key())
                 } else {
                     Ok(None)
                 };
@@ -3261,7 +3261,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
             executor::runtime_call::RuntimeCall::NextKey(nk) => {
                 let next_key = if let Some(trie_root) = trie_root {
                     call_proof.next_key(
-                        &trie_root,
+                        trie_root,
                         nk.key(),
                         nk.or_equal(),
                         nk.prefix(),

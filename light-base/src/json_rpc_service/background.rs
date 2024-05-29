@@ -2804,8 +2804,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 // Filter by start key and count.
                                 let results_to_client = cache_entry
                                     .iter()
+                                    .filter(|&k| start_key.as_ref().map_or(true, |s| *k > *s))
                                     .cloned()
-                                    .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                                     .map(methods::HexString)
                                     .take(usize::try_from(*count).unwrap_or(usize::MAX))
                                     .collect::<Vec<_>>();
@@ -3404,7 +3404,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         &request_id_json,
                                         parse::ErrorResponse::ServerError(
                                             -32000,
-                                            &format!("Failed to decode runtime output"),
+                                            &"Failed to decode runtime output".to_string(),
                                         ),
                                         None,
                                     ))
@@ -3610,8 +3610,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         // Filter by start key and count.
                         let results_to_client = final_results
                             .iter()
+                            .filter(|&k| start_key.as_ref().map_or(true, |s| *k > *s))
                             .cloned()
-                            .filter(|k| start_key.as_ref().map_or(true, |s| *k > *s))
                             .map(methods::HexString)
                             .take(usize::try_from(count).unwrap_or(usize::MAX))
                             .collect::<Vec<_>>();
@@ -3810,7 +3810,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 finalized_block_runtime: finalized_block_runtime.as_ref().map(
                                     |runtime| match runtime {
                                         Ok(rt) => methods::MaybeRuntimeSpec::Valid {
-                                            spec: convert_runtime_version(&rt),
+                                            spec: convert_runtime_version(rt),
                                         },
                                         Err(error) => methods::MaybeRuntimeSpec::Invalid {
                                             error: error.to_string(),
@@ -4012,7 +4012,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         new_runtime: match &block.new_runtime {
                                             Some(Ok(rt)) => {
                                                 Some(methods::MaybeRuntimeSpec::Valid {
-                                                    spec: convert_runtime_version(&rt),
+                                                    spec: convert_runtime_version(rt),
                                                 })
                                             }
                                             Some(Err(error)) => {
@@ -4831,7 +4831,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .block_headers_pending
                     .remove(&block_hash)
                     .into_iter()
-                    .flat_map(|l| l)
+                    .flatten()
                 {
                     // Note that we push_front in order to guarantee that the information is
                     // not removed from cache before the request is processed.
@@ -4853,7 +4853,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .block_headers_pending
                     .remove(&block_hash)
                     .into_iter()
-                    .flat_map(|l| l)
+                    .flatten()
                 {
                     let _ = me
                         .responses_tx
@@ -4882,7 +4882,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .block_runtimes_pending
                     .remove(&block_hash)
                     .into_iter()
-                    .flat_map(|l| l)
+                    .flatten()
                 {
                     // Note that we push_front in order to guarantee that the information is
                     // not removed from cache before the request is processed.
@@ -4904,7 +4904,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     .block_runtimes_pending
                     .remove(&block_hash)
                     .into_iter()
-                    .flat_map(|l| l)
+                    .flatten()
                 {
                     let _ = me
                         .responses_tx

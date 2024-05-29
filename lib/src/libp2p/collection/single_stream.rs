@@ -745,8 +745,7 @@ where
                     self.connection = SingleStreamConnectionTaskInner::Established {
                         established: connection,
                         outbound_substreams_map,
-                        notifications_in_close_acknowledgments:
-                            notifications_in_close_acknowledgments,
+                        notifications_in_close_acknowledgments,
                         inbound_negotiated_cancel_acknowledgments,
                     };
                 }

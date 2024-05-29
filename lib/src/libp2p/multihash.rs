@@ -35,12 +35,12 @@ pub struct Multihash<T = Vec<u8>>(T);
 impl<T: AsRef<[u8]>> Multihash<T> {
     /// Returns the code stored in this multihash.
     pub fn hash_algorithm_code(&self) -> u32 {
-        decode(&self.0.as_ref()).unwrap().0
+        decode(self.0.as_ref()).unwrap().0
     }
 
     /// Returns the data stored in this multihash.
     pub fn data(&self) -> &[u8] {
-        decode(&self.0.as_ref()).unwrap().1
+        decode(self.0.as_ref()).unwrap().1
     }
 
     /// Checks whether `input` is a valid multihash.
@@ -61,7 +61,7 @@ impl<T: AsRef<[u8]>> Multihash<T> {
 impl<'a> Multihash<&'a [u8]> {
     /// Returns the data stored in this multihash.
     pub fn data_ref(&self) -> &'a [u8] {
-        decode(&self.0.as_ref()).unwrap().1
+        decode(self.0).unwrap().1
     }
 
     /// Checks whether `input` is a valid multihash.
@@ -72,7 +72,7 @@ impl<'a> Multihash<&'a [u8]> {
         input: &'a [u8],
     ) -> Result<(Multihash<&'a [u8]>, &'a [u8]), FromBytesError> {
         match multihash::<nom::error::Error<&[u8]>>(input) {
-            Ok((rest, _)) => Ok((Multihash(&input.as_ref()[..rest.len()]), rest)),
+            Ok((rest, _)) => Ok((Multihash(&input[..rest.len()]), rest)),
             Err(_) => Err(FromBytesError::DecodeError),
         }
     }
@@ -83,7 +83,7 @@ impl Multihash<Vec<u8>> {
     ///
     /// Calling [`Multihash::data`] on the returned value will always yield back the same data
     /// as was passed as parameter.
-    pub fn identity<'a>(data: &'a [u8]) -> Self {
+    pub fn identity(data: &[u8]) -> Self {
         let mut out = Vec::with_capacity(data.len() + 8);
         out.extend(util::leb128::encode(0u32));
         out.extend(util::leb128::encode_usize(data.len()));
@@ -118,7 +118,7 @@ impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
     }
 }
 
-fn decode<'a>(bytes: &'a [u8]) -> Result<(u32, &'a [u8]), FromBytesError> {
+fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), FromBytesError> {
     match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(bytes) {
         Ok((_rest, multihash)) => {
             debug_assert!(_rest.is_empty());

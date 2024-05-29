@@ -17,14 +17,7 @@
 
 use alloc::borrow::Cow;
 use core::{
-    fmt,
-    future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops,
-    panic::UnwindSafe,
-    pin::Pin,
-    str,
-    time::Duration,
+    fmt, future::Future, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration,
 };
 use futures_util::future;
 
@@ -381,12 +374,12 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
             Address::WebSocketIp {
                 ip: IpAddr::V4(ip), ..
             } => ConnectionType::WebSocketIpv4 {
-                remote_is_localhost: Ipv4Addr::from(*ip).is_loopback(),
+                remote_is_localhost: ip.is_loopback(),
             },
             Address::WebSocketIp {
                 ip: IpAddr::V6(ip), ..
             } => ConnectionType::WebSocketIpv6 {
-                remote_is_localhost: Ipv6Addr::from(*ip).is_loopback(),
+                remote_is_localhost: ip.is_loopback(),
             },
             Address::WebSocketDns {
                 hostname, secure, ..

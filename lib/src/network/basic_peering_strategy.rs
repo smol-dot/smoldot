@@ -951,52 +951,43 @@ where
     type Item = (&'a TChainId, UnassignSlotsAndBan<TInstant>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(inner_iter) = self.inner_iter.as_mut() else {
-            return None;
+        let inner_iter = self.inner_iter.as_mut()?;
+        let (&(_, chain_index), state) = inner_iter.next()?;
+
+        let return_value = match state {
+            PeerChainState::Banned { expires } if *expires >= self.when_unban => {
+                // Ban is already long enough. Nothing to do.
+                return Some((
+                    &self.chains[chain_index],
+                    UnassignSlotsAndBan::AlreadyBanned {
+                        when_unban: expires.clone(),
+                        ban_extended: false,
+                    },
+                ));
+            }
+            PeerChainState::Banned { .. } => UnassignSlotsAndBan::AlreadyBanned {
+                when_unban: self.when_unban.clone(),
+                ban_extended: true,
+            },
+            PeerChainState::Assignable => UnassignSlotsAndBan::Banned { had_slot: false },
+            PeerChainState::Slot => UnassignSlotsAndBan::Banned { had_slot: true },
         };
 
-        loop {
-            let Some((&(_, chain_index), state)) = inner_iter.next() else {
-                return None;
-            };
+        let _was_in =
+            self.peers_chains_by_state
+                .remove(&(chain_index, state.clone(), self.peer_id_index));
+        debug_assert!(_was_in);
 
-            let return_value = match state {
-                PeerChainState::Banned { expires } if *expires >= self.when_unban => {
-                    // Ban is already long enough. Nothing to do.
-                    return Some((
-                        &self.chains[chain_index],
-                        UnassignSlotsAndBan::AlreadyBanned {
-                            when_unban: expires.clone(),
-                            ban_extended: false,
-                        },
-                    ));
-                }
-                PeerChainState::Banned { .. } => UnassignSlotsAndBan::AlreadyBanned {
-                    when_unban: self.when_unban.clone(),
-                    ban_extended: true,
-                },
-                PeerChainState::Assignable => UnassignSlotsAndBan::Banned { had_slot: false },
-                PeerChainState::Slot => UnassignSlotsAndBan::Banned { had_slot: true },
-            };
+        *state = PeerChainState::Banned {
+            expires: self.when_unban.clone(),
+        };
 
-            let _was_in = self.peers_chains_by_state.remove(&(
-                chain_index,
-                state.clone(),
-                self.peer_id_index,
-            ));
-            debug_assert!(_was_in);
+        let _was_inserted =
+            self.peers_chains_by_state
+                .insert((chain_index, state.clone(), self.peer_id_index));
+        debug_assert!(_was_inserted);
 
-            *state = PeerChainState::Banned {
-                expires: self.when_unban.clone(),
-            };
-
-            let _was_inserted =
-                self.peers_chains_by_state
-                    .insert((chain_index, state.clone(), self.peer_id_index));
-            debug_assert!(_was_inserted);
-
-            break Some((&self.chains[chain_index], return_value));
-        }
+        Some((&self.chains[chain_index], return_value))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
