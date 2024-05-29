@@ -49,18 +49,16 @@ fn basic_seems_to_work() {
             )
             .unwrap();
 
-        loop {
-            match vm.run(None) {
-                Ok(super::ExecOutcome::Finished {
-                    return_value: Ok(_),
-                }) => break,
-                Ok(super::ExecOutcome::Finished {
-                    return_value: Err(_),
-                }) => panic!(),
-                Ok(super::ExecOutcome::Interrupted { id: 0, .. }) => break,
-                Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
-                Err(_) => panic!(),
-            }
+        match vm.run(None) {
+            Ok(super::ExecOutcome::Finished {
+                return_value: Ok(_),
+            }) => {}
+            Ok(super::ExecOutcome::Finished {
+                return_value: Err(_),
+            }) => panic!(),
+            Ok(super::ExecOutcome::Interrupted { id: 0, .. }) => {}
+            Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
+            Err(_) => panic!(),
         }
     }
 }

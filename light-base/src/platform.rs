@@ -381,12 +381,12 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
             Address::WebSocketIp {
                 ip: IpAddr::V4(ip), ..
             } => ConnectionType::WebSocketIpv4 {
-                remote_is_localhost: Ipv4Addr::from(*ip).is_loopback(),
+                remote_is_localhost: ip.is_loopback(),
             },
             Address::WebSocketIp {
                 ip: IpAddr::V6(ip), ..
             } => ConnectionType::WebSocketIpv6 {
-                remote_is_localhost: Ipv6Addr::from(*ip).is_loopback(),
+                remote_is_localhost: ip.is_loopback(),
             },
             Address::WebSocketDns {
                 hostname, secure, ..

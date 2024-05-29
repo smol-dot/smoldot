@@ -2050,7 +2050,6 @@ where
                         // Because the number of queuable bytes is capped by the value in
                         // `Config::max_out_data_frame_size`, we are guaranteed that the length
                         // to write out fits in a `u32`.
-                        debug_assert!(self.yamux.inner.max_out_data_frame_size.get() <= u32::MAX);
                         u32::try_from(self.inner_read_write.write_bytes_queued).unwrap()
                     },
                 },
