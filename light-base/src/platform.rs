@@ -17,14 +17,7 @@
 
 use alloc::borrow::Cow;
 use core::{
-    fmt,
-    future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops,
-    panic::UnwindSafe,
-    pin::Pin,
-    str,
-    time::Duration,
+    fmt, future::Future, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration,
 };
 use futures_util::future;
 
