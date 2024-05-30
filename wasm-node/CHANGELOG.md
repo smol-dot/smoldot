@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.28 - 2024-05-30
+
 ### Changed
 
 - For parachains, the `system_peers` legacy JSON-RPC function now always returns the best block that each peer gave in its initial block announce handshake. In the past, smoldot tried to track the best block of each peer through its block announce handshakes. This has been removed in order to simplify the code. In practice, however, parachain peers always announce blocks that are not their best block, and this tracking didn't have any effect. ([#1855](https://github.com/smol-dot/smoldot/pull/1855))
