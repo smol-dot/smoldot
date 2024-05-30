@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- For parachains, the `system_peers` legacy JSON-RPC function now always returns the best block that each peer gave in its initial block announce handshake. In the past, smoldot tried to track the best block of each peer through its block announce handshakes. This has been removed in order to simplify the code. In practice, however, parachain peers always announce blocks that are not their best block, and this tracking didn't have any effect.
+
+### Fixed
+
+- Fix storage queries not working on parachains a few seconds after initialization.
+
 ## 2.0.27 - 2024-05-29
 
 Maintenance release with no significant changes.

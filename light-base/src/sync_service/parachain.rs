@@ -30,12 +30,7 @@ use futures_util::{future, stream, StreamExt as _};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
-    chain::async_tree,
-    header,
-    informant::HashDisplay,
-    libp2p::PeerId,
-    network::codec,
-    sync::{all_forks::sources, para},
+    chain::async_tree, header, informant::HashDisplay, libp2p::PeerId, network::codec, sync::para,
 };
 
 /// Starts a sync service background task to synchronize a parachain.
@@ -56,14 +51,8 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         parachain_id,
         from_network_service: None,
         network_service,
-        sync_sources: sources::AllForksSources::new(
-            40,
-            header::decode(&finalized_block_header, block_number_bytes)
-                .unwrap()
-                .number,
-        ),
         obsolete_finalized_parahead: finalized_block_header,
-        sync_sources_map: HashMap::with_capacity_and_hasher(
+        sync_sources: HashMap::with_capacity_and_hasher(
             0,
             util::SipHasherBuild::new({
                 let mut seed = [0; 16];
@@ -121,11 +110,17 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     /// Initialized to the parachain genesis block header.
     obsolete_finalized_parahead: Vec<u8>,
 
-    /// State machine that tracks the list of parachain network sources and their known blocks.
-    sync_sources: sources::AllForksSources<(PeerId, codec::Role)>,
-
-    /// Maps `PeerId`s to their indices within `sync_sources`.
-    sync_sources_map: HashMap<PeerId, sources::SourceId, util::SipHasherBuild>,
+    /// List of parachain network sources.
+    ///
+    /// Values are their role, and self-reported best block when we connected to them. This best
+    /// block is never updated.
+    ///
+    /// > **Note**: In the past, smoldot used to track exactly which peer knows which block
+    /// >           based on block announces. This, however, caused issues due to the fact that
+    /// >           there's a disconnect between the parachain best block on the relay chain
+    /// >           and the parachain best block on the network. We currently simply assume that
+    /// >           all parachain nodes know about all parachain blocks from the relay chain.
+    sync_sources: HashMap<PeerId, (codec::Role, u64, [u8; 32]), util::SipHasherBuild>,
 
     /// Extra fields that are set after the subscription to the runtime service events has
     /// succeeded.
@@ -444,22 +439,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                                 self.obsolete_finalized_parahead =
                                     new_finalized_parahead.clone().unwrap();
-
-                                if let Ok(header) = header::decode(
-                                    &self.obsolete_finalized_parahead,
-                                    self.block_number_bytes,
-                                ) {
-                                    debug_assert!(
-                                        former_finalized_parahead.is_none()
-                                            || header.number
-                                                == self.sync_sources.finalized_block_height()
-                                            || header.number
-                                                == self.sync_sources.finalized_block_height() + 1
-                                    );
-
-                                    self.sync_sources.set_finalized_block_height(header.number);
-                                    // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
-                                }
 
                                 // Must unpin the pruned blocks if they haven't already been unpinned.
                                 let mut pruned_blocks_hashes =
@@ -1222,62 +1201,29 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (
                     WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
                         send_back,
-                        block_number,
-                        block_hash,
+                        ..
                     }),
-                    runtime_subscription,
+                    _,
                 ) => {
-                    // If `block_number` is inferior or equal to the finalized block, or that
-                    // it is a parahead of the relay chain, then we assume that all parachain
-                    // nodes know this block.
-                    // Otherwise, which source knows which block is precisely tracked.
-                    let any_source_goes =
-                        if block_number > self.sync_sources.finalized_block_height() {
-                            if let ParachainBackgroundState::Subscribed(runtime_subscription) =
-                                runtime_subscription
-                            {
-                                runtime_subscription
-                                    .async_tree
-                                    .input_output_iter_unordered()
-                                    .filter_map(|item| item.async_op_user_data)
-                                    .filter_map(|block| block.as_ref())
-                                    .any(|item| {
-                                        // TODO: CPU-expensive
-                                        header::hash_from_scale_encoded_header(item) == block_hash
-                                    })
-                            } else {
-                                false
-                            }
-                        } else {
-                            true
-                        };
-
-                    let list = if any_source_goes {
-                        self.sync_sources
-                            .keys()
-                            .filter(|local_id| {
-                                self.sync_sources.best_block(*local_id).0 >= block_number
-                            })
-                            .map(|local_id| self.sync_sources[local_id].0.clone())
-                            .collect()
-                    } else {
-                        self.sync_sources
-                            .knows_non_finalized_block(block_number, &block_hash)
-                            .map(|local_id| self.sync_sources[local_id].0.clone())
-                            .collect()
-                    };
-
-                    let _ = send_back.send(list);
+                    // Simply assume that all peers know about all blocks.
+                    //
+                    // We could in principle check whether the block is higher than the current
+                    // finalized block, and if not if it is in the list of paraheads found in the
+                    // relay chain. But because parachain blocks might not be decodable, we can't
+                    // know their number, and thus we can't know if the requested block is a
+                    // descendant of the finalized block.
+                    // Assuming that all peers know all blocks is the only sane way of
+                    // implementing this.
+                    let _ = send_back.send(self.sync_sources.keys().cloned().collect());
                 }
 
                 (WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }), _) => {
                     let _ = send_back.send(
                         self.sync_sources
-                            .keys()
-                            .map(|local_id| {
-                                let (height, hash) = self.sync_sources.best_block(local_id);
-                                let (peer_id, role) = self.sync_sources[local_id].clone();
-                                (peer_id, role, height, *hash)
+                            .iter()
+                            .map(|(peer_id, (role, best_height, best_hash))| {
+                                //let (height, hash) = self.sync_sources.best_block(local_id);
+                                (peer_id.clone(), *role, *best_height, *best_hash)
                             })
                             .collect(),
                     );
@@ -1295,7 +1241,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (WakeUpReason::MustSubscribeNetworkEvents, _) => {
                     debug_assert!(self.from_network_service.is_none());
                     self.sync_sources.clear();
-                    self.sync_sources_map.clear();
                     self.from_network_service = Some(Box::pin(
                         // As documented, `subscribe().await` is expected to return quickly.
                         self.network_service.subscribe().await,
@@ -1311,50 +1256,28 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     _,
                 ) => {
-                    let local_id = self.sync_sources.add_source(
-                        best_block_number,
-                        best_block_hash,
-                        (peer_id.clone(), role),
-                    );
-                    self.sync_sources_map.insert(peer_id, local_id);
+                    let _former_value = self
+                        .sync_sources
+                        .insert(peer_id, (role, best_block_number, best_block_hash));
+                    debug_assert!(_former_value.is_none());
                 }
 
                 (
                     WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }),
                     _,
                 ) => {
-                    let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
-                    let (_peer_id, _role) = self.sync_sources.remove(local_id);
-                    debug_assert_eq!(peer_id, _peer_id);
+                    let _role = self.sync_sources.remove(&peer_id);
+                    debug_assert!(_role.is_some());
                 }
 
                 (
                     WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
-                        peer_id,
-                        announce,
+                        peer_id: _peer_id,
+                        ..
                     }),
                     _,
                 ) => {
-                    let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
-                    let decoded = announce.decode();
-                    if let Ok(decoded_header) =
-                        header::decode(decoded.scale_encoded_header, self.block_number_bytes)
-                    {
-                        let decoded_header_hash =
-                            header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
-                        self.sync_sources.add_known_block(
-                            local_id,
-                            decoded_header.number,
-                            decoded_header_hash,
-                        );
-                        if decoded.is_best {
-                            self.sync_sources.add_known_block_and_set_best(
-                                local_id,
-                                decoded_header.number,
-                                decoded_header_hash,
-                            );
-                        }
-                    }
+                    debug_assert!(self.sync_sources.contains_key(&_peer_id));
                 }
 
                 (WakeUpReason::NetworkEvent(_), _) => {
