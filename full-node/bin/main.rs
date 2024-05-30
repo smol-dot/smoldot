@@ -408,7 +408,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             smoldot_full_node::LogLevel::Info,
             format!(
                 "JSON-RPC server listening on {addr}. Visit \
-                <https://cloudflare-ipfs.com/ipns/dotapps.io/?rpc=ws%3A%2F%2F{addr}> in order to \
+                <https://ipfs.io/ipns/dotapps.io/?rpc=ws%3A%2F%2F{addr}> in order to \
                 interact with the node."
             ),
         );
