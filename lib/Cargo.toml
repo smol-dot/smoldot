@@ -36,7 +36,7 @@ wasmtime = [
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
 arrayvec = { version = "0.7.3", default-features = false }
-async-lock = { version = "3.0.0", default-features = false }
+async-lock = { version = "3.4.0", default-features = false }
 atomic-take = { version = "1.1.0" }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }

@@ -14,7 +14,7 @@ required-features = ["std"]
 
 [dependencies]
 async-channel = { version = "2.3.0", default-features = false }
-async-lock = { version = "3.0.0", default-features = false }
+async-lock = { version = "3.4.0", default-features = false }
 base64 = { version = "0.22.0", default-features = false, features = ["alloc"] }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.5.1", default-features = false, features = ["alloc"] }
