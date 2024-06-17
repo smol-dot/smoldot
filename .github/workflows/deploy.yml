@@ -44,7 +44,7 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v5.3.0
+    - uses: docker/build-push-action@v5.4.0
       with:
         context: .
         file: ./full-node/Dockerfile
