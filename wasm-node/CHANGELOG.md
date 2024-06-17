@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix runtime service getting stuck if it was subscribed to before the GrandPa warp sync finishes, and that the runtime of the finalized block in the chain specification is available on the peer-to-peer network.
+- Fix runtime service getting stuck if it was subscribed to before the GrandPa warp sync finishes, and that the runtime of the finalized block in the chain specification is available on the peer-to-peer network. ([#1874](https://github.com/smol-dot/smoldot/pull/1874))
 
 ## 2.0.28 - 2024-05-30
 
