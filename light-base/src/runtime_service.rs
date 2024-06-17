@@ -894,9 +894,12 @@ async fn run_background<TPlat: PlatformRef>(
                             WakeUpReason::Notification,
                         )
                     }
-                } else if any_pending_subscription {
+                } else if any_subscription || any_pending_subscription {
                     // Only start subscribing to the sync service if there is any pending
-                    // runtime service subscription.
+                    // or active runtime service subscription.
+                    // Note that subscriptions to the runtime service aren't destroyed when the
+                    // sync service subscriptions is lost but when the sync service is
+                    // resubscribed.
                     WakeUpReason::MustSubscribe
                 } else {
                     future::pending().await
