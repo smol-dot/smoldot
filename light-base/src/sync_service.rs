@@ -501,24 +501,18 @@ pub enum StorageRequestItemTy {
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned where the
-    /// [`StorageResultItem::DescendantValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned.
     DescendantsValues,
 
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned where the
-    /// [`StorageResultItem::DescendantHash::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned.
     DescendantsHashes,
 
     /// The Merkle value of the trie node that is the closest ancestor to
     /// [`StorageRequestItem::key`] is requested.
-    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned where
-    /// [`StorageResultItem::ClosestDescendantMerkleValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned.
     ClosestDescendantMerkleValue,
 }
 
@@ -543,18 +537,14 @@ pub enum StorageResultItem {
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
-        /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
         value: Vec<u8>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
     DescendantHash {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
-        /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
@@ -567,8 +557,7 @@ pub enum StorageResultItem {
         /// [`StorageResultItem::ClosestDescendantMerkleValue::closest_descendant_merkle_value`]
         /// is `Some`, then this is always the parent of the requested key.
         found_closest_ancestor_excluding: Option<Vec<Nibble>>,
-        /// Merkle value of the closest descendant of
-        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// Merkle value of the closest descendant of the requested key. The key that corresponds
         /// to this Merkle value is not included. `None` if the key has no descendant.
         closest_descendant_merkle_value: Option<Vec<u8>>,
     },
@@ -820,11 +809,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                             debug_assert!(!full_storage_values_required);
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantHash {
-                                                    key,
-                                                    hash,
-                                                    requested_key: requested_key.clone(),
-                                                },
+                                                StorageResultItem::DescendantHash { key, hash },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value)
@@ -832,11 +817,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                         {
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantValue {
-                                                    requested_key: requested_key.clone(),
-                                                    key,
-                                                    value,
-                                                },
+                                                StorageResultItem::DescendantValue { key, value },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value) => {
@@ -850,7 +831,6 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                                         hashed_value.as_bytes(),
                                                     )
                                                     .unwrap(),
-                                                    requested_key: requested_key.clone(),
                                                 },
                                             ));
                                         }

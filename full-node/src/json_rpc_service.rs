@@ -154,7 +154,6 @@ impl JsonRpcService {
 
         spawn_client_main_task(
             config.tasks_executor.clone(),
-            config.log_callback.clone(),
             config.consensus_service.clone(),
             config.database.clone(),
             to_requests_handlers.clone(),
@@ -164,7 +163,6 @@ impl JsonRpcService {
         let runtime_caches_service = Arc::new(runtime_caches_service::RuntimeCachesService::new(
             runtime_caches_service::Config {
                 tasks_executor: config.tasks_executor.clone(),
-                log_callback: config.log_callback.clone(),
                 database: config.database.clone(),
                 num_cache_entries: NonZeroUsize::new(16).unwrap(), // TODO: configurable?
             },
@@ -363,7 +361,6 @@ impl JsonRpcBackground {
             );
             spawn_client_main_task(
                 self.tasks_executor.clone(),
-                self.log_callback.clone(),
                 self.consensus_service.clone(),
                 self.database.clone(),
                 self.to_requests_handlers.clone(),
@@ -547,7 +544,6 @@ fn spawn_client_io_task(
 
 fn spawn_client_main_task(
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
     consensus_service: Arc<consensus_service::ConsensusService>,
     database: Arc<database_thread::DatabaseThread>,
     to_requests_handlers: async_channel::Sender<requests_handler::Message>,
@@ -649,7 +645,6 @@ fn spawn_client_main_task(
                                 chain_head_subscriptions::spawn_chain_head_subscription_task(
                                     chain_head_subscriptions::Config {
                                         tasks_executor: tasks_executor.clone(),
-                                        log_callback: log_callback.clone(),
                                         receiver: rx,
                                         chain_head_follow_subscription: subscription_start,
                                         with_runtime,
