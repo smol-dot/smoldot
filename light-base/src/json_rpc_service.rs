@@ -71,7 +71,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     // TODO: unused at the moment
-    pub _max_pending_requests: NonZeroU32,
+    #[allow(unused)]
+    pub max_pending_requests: NonZeroU32,
 
     /// Maximum number of active subscriptions. Any additional subscription will be immediately
     /// rejected.
@@ -79,7 +80,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     // TODO: unused at the moment
-    pub _max_subscriptions: u32,
+    #[allow(unused)]
+    pub max_subscriptions: u32,
 
     /// Access to the network, and identifier of the chain from the point of view of the network
     /// service.

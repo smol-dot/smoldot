@@ -501,24 +501,18 @@ pub enum StorageRequestItemTy {
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned where the
-    /// [`StorageResultItem::DescendantValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned.
     DescendantsValues,
 
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
-    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned where the
-    /// [`StorageResultItem::DescendantHash::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned.
     DescendantsHashes,
 
     /// The Merkle value of the trie node that is the closest ancestor to
     /// [`StorageRequestItem::key`] is requested.
-    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned where
-    /// [`StorageResultItem::ClosestDescendantMerkleValue::requested_key`] is equal to
-    /// [`StorageRequestItem::key`].
+    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned.
     ClosestDescendantMerkleValue,
 }
 
