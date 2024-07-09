@@ -932,8 +932,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             let frontend = json_rpc_service::service(json_rpc_service::Config {
                 platform: self.platform.clone(),
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
-                max_pending_requests,
-                max_subscriptions,
+                _max_pending_requests: max_pending_requests,
+                _max_subscriptions: max_subscriptions,
                 sync_service: services.sync_service.clone(),
                 network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),

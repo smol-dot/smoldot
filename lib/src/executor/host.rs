@@ -4144,7 +4144,7 @@ enum MemAccessVm<'a> {
 impl<'a> allocator::Memory for MemAccess<'a> {
     fn read_le_u64(&self, ptr: u32) -> Result<u64, allocator::Error> {
         if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
-            return Err(allocator::Error::Other("out of bounds access"));
+            return Err(allocator::Error::Other);
         }
 
         // Note that this function (`read_le_u64`) really should take ̀`&mut self` but that is
@@ -4215,7 +4215,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
 
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), allocator::Error> {
         if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
-            return Err(allocator::Error::Other("out of bounds access"));
+            return Err(allocator::Error::Other);
         }
 
         let bytes = val.to_le_bytes();

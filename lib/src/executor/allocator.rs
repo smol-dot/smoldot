@@ -84,7 +84,7 @@ pub enum Error {
     /// The client passed a memory instance which is smaller than previously observed.
     MemoryShrinked,
     // TODO: wtf is "Other"?
-    Other(&'static str),
+    Other,
 }
 
 /// The maximum number of bytes that can be allocated at one time.
@@ -101,11 +101,6 @@ const ALIGNMENT: u32 = 8;
 // Each pointer is prefixed with 8 bytes, which identify the list index
 // to which it belongs.
 const HEADER_SIZE: u32 = 8;
-
-/// Create an allocator error.
-fn error(msg: &'static str) -> Error {
-    Error::Other(msg)
-}
 
 // The minimum possible allocation size is chosen to be 8 bytes because in that case we would have
 // easier time to provide the guaranteed alignment of 8.
@@ -144,7 +139,7 @@ impl Order {
         if order < N_ORDERS as u32 {
             Ok(Self(order))
         } else {
-            Err(error("invalid order"))
+            Err(Error::Other)
         }
     }
 
@@ -381,7 +376,7 @@ impl FreeingBumpHeapAllocator {
     /// - `size` - size in bytes of the allocation request
     pub fn allocate<M: Memory + ?Sized>(&mut self, mem: &mut M, size: u32) -> Result<u32, Error> {
         if self.poisoned {
-            return Err(error("the allocator has been poisoned"));
+            return Err(Error::Other);
         }
 
         let bomb = PoisonBomb {
@@ -402,7 +397,7 @@ impl FreeingBumpHeapAllocator {
                 // Remove this header from the free list.
                 let next_free = Header::read_from(mem, header_ptr)?
                     .into_free()
-                    .ok_or_else(|| error("free list points to a occupied header"))?;
+                    .ok_or_else(|| Error::Other)?;
                 self.free_lists[order] = next_free;
 
                 header_ptr
@@ -443,7 +438,7 @@ impl FreeingBumpHeapAllocator {
     /// - `ptr` - pointer to the allocated chunk
     pub fn deallocate<M: Memory + ?Sized>(&mut self, mem: &mut M, ptr: u32) -> Result<(), Error> {
         if self.poisoned {
-            return Err(error("the allocator has been poisoned"));
+            return Err(Error::Other);
         }
 
         let bomb = PoisonBomb {
@@ -454,11 +449,11 @@ impl FreeingBumpHeapAllocator {
 
         let header_ptr = u32::from(ptr)
             .checked_sub(HEADER_SIZE)
-            .ok_or_else(|| error("Invalid pointer for deallocation"))?;
+            .ok_or_else(|| Error::Other)?;
 
         let order = Header::read_from(mem, header_ptr)?
             .into_occupied()
-            .ok_or_else(|| error("the allocation points to an empty header"))?;
+            .ok_or_else(|| Error::Other)?;
 
         // Update the just freed header and knit it back to the free list.
         let prev_head = self.free_lists.replace(order, Link::Ptr(header_ptr));
@@ -468,7 +463,7 @@ impl FreeingBumpHeapAllocator {
         self.total_size = self
             .total_size
             .checked_sub(order.size() + HEADER_SIZE)
-            .ok_or_else(|| error("Unable to subtract from total heap size without overflow"))?;
+            .ok_or_else(|| Error::Other)?;
 
         bomb.disarm();
         Ok(())
@@ -520,16 +515,14 @@ pub trait Memory {
 
 impl Memory for [u8] {
     fn read_le_u64(&self, ptr: u32) -> Result<u64, Error> {
-        let range =
-            heap_range(ptr, 8, self.len()).ok_or_else(|| error("read out of heap bounds"))?;
+        let range = heap_range(ptr, 8, self.len()).ok_or_else(|| Error::Other)?;
         let bytes = self[range]
             .try_into()
             .expect("[u8] slice of length 8 must be convertible to [u8; 8]");
         Ok(u64::from_le_bytes(bytes))
     }
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), Error> {
-        let range =
-            heap_range(ptr, 8, self.len()).ok_or_else(|| error("write out of heap bounds"))?;
+        let range = heap_range(ptr, 8, self.len()).ok_or_else(|| Error::Other)?;
         let bytes = val.to_le_bytes();
         self[range].copy_from_slice(&bytes[..]);
         Ok(())
