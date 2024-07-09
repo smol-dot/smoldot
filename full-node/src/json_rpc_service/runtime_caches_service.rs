@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{database_thread, LogCallback};
+use crate::database_thread;
 
 use futures_channel::oneshot;
 use futures_lite::{Future, StreamExt as _};

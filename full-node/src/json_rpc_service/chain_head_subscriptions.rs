@@ -31,7 +31,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{consensus_service, database_thread, LogCallback};
+use crate::{consensus_service, database_thread};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
