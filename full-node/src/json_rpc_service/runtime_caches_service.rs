@@ -33,9 +33,6 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
-    /// Function called in order to notify of something.
-    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
-
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 

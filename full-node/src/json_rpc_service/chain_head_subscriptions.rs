@@ -39,9 +39,6 @@ pub struct Config {
     /// The tasks passed as parameter must be executed until they shut down.
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
-    /// Function called in order to notify of something.
-    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
-
     /// Receiver for actions that the JSON-RPC client wants to perform.
     pub receiver: async_channel::Receiver<Message>,
 

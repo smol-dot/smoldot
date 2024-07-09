@@ -164,7 +164,6 @@ impl JsonRpcService {
         let runtime_caches_service = Arc::new(runtime_caches_service::RuntimeCachesService::new(
             runtime_caches_service::Config {
                 tasks_executor: config.tasks_executor.clone(),
-                log_callback: config.log_callback.clone(),
                 database: config.database.clone(),
                 num_cache_entries: NonZeroUsize::new(16).unwrap(), // TODO: configurable?
             },
@@ -649,7 +648,6 @@ fn spawn_client_main_task(
                                 chain_head_subscriptions::spawn_chain_head_subscription_task(
                                     chain_head_subscriptions::Config {
                                         tasks_executor: tasks_executor.clone(),
-                                        log_callback: log_callback.clone(),
                                         receiver: rx,
                                         chain_head_follow_subscription: subscription_start,
                                         with_runtime,
