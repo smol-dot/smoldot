@@ -264,9 +264,7 @@ impl Prepare {
 
     /// See [`super::Prepare::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
-        HeapPages(u32::from(
-            self.inner.memory.current_pages(&self.inner.store),
-        ))
+        HeapPages(self.inner.memory.size(&self.inner.store))
     }
 
     /// See [`super::Prepare::read_memory`].
@@ -327,10 +325,7 @@ impl Prepare {
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         self.inner
             .memory
-            .grow(
-                &mut self.inner.store,
-                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
-            )
+            .grow(&mut self.inner.store, additional.0)
             .map_err(|_| OutOfBoundsError)?;
         Ok(())
     }
@@ -531,7 +526,7 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
-        HeapPages(u32::from(self.memory.current_pages(&self.store)))
+        HeapPages(self.memory.size(&self.store))
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -591,10 +586,7 @@ impl Interpreter {
     /// See [`super::VirtualMachine::write_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         self.memory
-            .grow(
-                &mut self.store,
-                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
-            )
+            .grow(&mut self.store, additional.0)
             .map_err(|_| OutOfBoundsError)?;
         Ok(())
     }
