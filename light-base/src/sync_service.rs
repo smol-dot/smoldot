@@ -537,14 +537,14 @@ pub enum StorageResultItem {
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
-        /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
         value: Vec<u8>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
     DescendantHash {
-        /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
+        /// Equal or a descendant of the requested key.
         key: Vec<u8>,
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
@@ -557,8 +557,7 @@ pub enum StorageResultItem {
         /// [`StorageResultItem::ClosestDescendantMerkleValue::closest_descendant_merkle_value`]
         /// is `Some`, then this is always the parent of the requested key.
         found_closest_ancestor_excluding: Option<Vec<Nibble>>,
-        /// Merkle value of the closest descendant of
-        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// Merkle value of the closest descendant of the requested key. The key that corresponds
         /// to this Merkle value is not included. `None` if the key has no descendant.
         closest_descendant_merkle_value: Option<Vec<u8>>,
     },
