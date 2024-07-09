@@ -62,7 +62,7 @@ jobs:
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.0.2
+      - uses: actions/setup-node@v4.0.3
         with:
           node-version: current
       - run: npm install
@@ -178,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.0.2
+      - uses: actions/setup-node@v4.0.3
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
@@ -207,7 +207,7 @@ jobs:
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v4.0.2
+      - uses: actions/setup-node@v4.0.3
         with:
           node-version: 16
       - uses: denoland/setup-deno@v1
