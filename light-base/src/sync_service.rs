@@ -543,8 +543,6 @@ pub enum StorageResultItem {
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
         /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
         key: Vec<u8>,
         /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
@@ -552,8 +550,6 @@ pub enum StorageResultItem {
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
     DescendantHash {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        requested_key: Vec<u8>,
         /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
         key: Vec<u8>,
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
@@ -820,11 +816,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                             debug_assert!(!full_storage_values_required);
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantHash {
-                                                    key,
-                                                    hash,
-                                                    requested_key: requested_key.clone(),
-                                                },
+                                                StorageResultItem::DescendantHash { key, hash },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value)
@@ -832,11 +824,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                         {
                                             self.available_results.push_back((
                                                 request_index,
-                                                StorageResultItem::DescendantValue {
-                                                    requested_key: requested_key.clone(),
-                                                    key,
-                                                    value,
-                                                },
+                                                StorageResultItem::DescendantValue { key, value },
                                             ));
                                         }
                                         prefix_proof::StorageValue::Value(value) => {
@@ -850,7 +838,6 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                                         hashed_value.as_bytes(),
                                                     )
                                                     .unwrap(),
-                                                    requested_key: requested_key.clone(),
                                                 },
                                             ));
                                         }
