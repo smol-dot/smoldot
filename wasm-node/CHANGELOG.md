@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix potential panic in parachain syncing code.
+
 ## 2.0.29 - 2024-06-17
 
 ### Fixed
