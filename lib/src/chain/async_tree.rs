@@ -788,7 +788,9 @@ where
             },
         );
 
-        self.input_best_block_index = Some(new_index);
+        if is_new_best {
+            self.input_best_block_index = Some(new_index);
+        }
 
         new_index
     }
