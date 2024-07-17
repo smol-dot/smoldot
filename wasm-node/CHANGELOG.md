@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix potential panic in parachain syncing code.
+- Fix potential panic in parachain syncing code. ([#1912](https://github.com/smol-dot/smoldot/pull/1912))
 
 ## 2.0.29 - 2024-06-17
 
