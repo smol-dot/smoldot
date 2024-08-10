@@ -178,6 +178,20 @@ export interface Chain {
     nextJsonRpcResponse(): Promise<string>;
 
     /**
+     * JSON-RPC responses or notifications async iterable.
+     *
+     * Each chain contains a buffer of the responses waiting to be sent out. Iterating over this
+     * pulls one element from the buffer. If the iteration happen at a slower rate than
+     * responses are generated, then the buffer will eventually become full, at which point calling
+     * {@link Chain.sendJsonRpc} will throw an exception. The size of this buffer can be configured
+     * through {@link AddChainOptions.jsonRpcMaxPendingRequests}.
+     *
+     * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
+     * @throws {@link CrashError} If the background client has crashed.
+     */
+    readonly jsonRpcResponses: AsyncIterableIterator<string>
+
+    /**
      * Disconnects from the blockchain.
      *
      * Any on-going call to {@link Chain.nextJsonRpcResponse} is instantaneously aborted and will
