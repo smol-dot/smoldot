@@ -69,8 +69,7 @@ while(true) {
 
     (async () => {
         try {
-            while(true) {
-                const response = await chain.nextJsonRpcResponse();
+            for await (const response of chain.jsonRpcResponses) {
                 socket.send(response);
             }
         } catch(_error) {}

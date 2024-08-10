@@ -162,8 +162,7 @@ wsServer.on('connection', function (connection, request) {
 
             (async () => {
                 try {
-                    while(true) {
-                        const response = await para.nextJsonRpcResponse();
+                    for await (const response of para.jsonRpcResponses) {
                         connection.send(response);
                     }
                 } catch(_error) {}
@@ -177,8 +176,7 @@ wsServer.on('connection', function (connection, request) {
 
             (async () => {
                 try {
-                    while(true) {
-                        const response = await relay.nextJsonRpcResponse();
+                    for await (const response of relay.jsonRpcResponses) {
                         connection.send(response);
                     }
                 } catch(_error) {}
