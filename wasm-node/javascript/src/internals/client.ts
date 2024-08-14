@@ -552,27 +552,41 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                         default: throw new Error("Internal error: unknown json_rpc_send error code: " + retVal)
                     }
                 },
-                nextJsonRpcResponse: async () => {
-                    while (true) {
-                        if (!state.chains.has(chainId))
-                            throw new AlreadyDestroyedError();
-                        if (options.disableJsonRpc)
-                            return Promise.reject(new JsonRpcDisabledError());
-                        if (state.instance.status === "destroyed")
-                            throw state.instance.error;
-                        if (state.instance.status !== "ready")
-                            throw new Error(); // Internal error. Never supposed to happen.
-
-                        // Try to pop a message from the queue.
-                        const message = state.instance.instance.peekJsonRpcResponse(chainId);
-                        if (message)
-                            return message;
-
-                        // If no message is available, wait for one to be.
-                        await new Promise<void>((resolve) => {
-                            state.chains.get(chainId)!.jsonRpcResponsesPromises.push(resolve)
-                        });
+                jsonRpcResponses: {
+                    next: async () => {
+                        while (true) {
+                            if (!state.chains.has(chainId))
+                                return { done: true, value: undefined };
+                            if (options.disableJsonRpc)
+                                throw new JsonRpcDisabledError();
+                            if (state.instance.status === "destroyed")
+                                throw state.instance.error;
+                            if (state.instance.status !== "ready")
+                                throw new Error(); // Internal error. Never supposed to happen.
+    
+                            // Try to pop a message from the queue.
+                            const message = state.instance.instance.peekJsonRpcResponse(chainId);
+                            if (message)
+                                return { done: false, value: message };
+    
+                            // If no message is available, wait for one to be.
+                            await new Promise<void>((resolve) => {
+                                state.chains.get(chainId)!.jsonRpcResponsesPromises.push(resolve)
+                            });
+                        }
+                    },
+                    [Symbol.asyncIterator]() {
+                        return this
                     }
+                },
+                nextJsonRpcResponse: async () => {
+                    const result = await newChain.jsonRpcResponses.next();
+
+                    if (result.done) {
+                        throw new AlreadyDestroyedError();
+                    }
+
+                    return result.value;
                 },
                 remove: () => {
                     if (state.instance.status === "destroyed")

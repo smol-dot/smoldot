@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add `jsonRpcResponses` async iterable iterator to `Chain`, as a more convenient alternative to the `nextJsonRpcResponse` function. ([#1937](https://github.com/smol-dot/smoldot/pull/1937))
+
 ### Fixed
 
 - Fix potential panic in parachain syncing code. ([#1912](https://github.com/smol-dot/smoldot/pull/1912))
