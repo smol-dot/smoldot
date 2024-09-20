@@ -81,12 +81,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, vec::Vec};
-use core::{
-    cmp, mem,
-    num::{NonZeroU32, NonZeroU64},
-    ops,
-    time::Duration,
-};
+use core::{cmp, mem, num::NonZero, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -160,7 +155,7 @@ pub struct Config {
     /// because of malicious sources.
     ///
     /// The higher the value, the more bandwidth is potentially wasted.
-    pub max_requests_per_block: NonZeroU32,
+    pub max_requests_per_block: NonZero<u32>,
 
     /// If true, the body of a block is downloaded (if necessary) before a
     /// [`ProcessOne::BlockVerify`] is generated.
@@ -696,7 +691,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                                 RequestParams {
                                     first_block_hash: *block_hash,
                                     first_block_height: block_height,
-                                    num_blocks: NonZeroU64::new(1).unwrap(),
+                                    num_blocks: NonZero::<u64>::new(1).unwrap(),
                                 },
                             )
                         })

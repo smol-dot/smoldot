@@ -23,7 +23,7 @@ use smol::lock::Mutex;
 use smoldot::{executor, trie};
 use std::{
     iter,
-    num::NonZeroUsize,
+    num::NonZero,
     pin::{self, Pin},
     sync::Arc,
 };
@@ -37,7 +37,7 @@ pub struct Config {
     pub database: Arc<database_thread::DatabaseThread>,
 
     /// Number of entries in the cache of runtimes.
-    pub num_cache_entries: NonZeroUsize,
+    pub num_cache_entries: NonZero<usize>,
 }
 
 /// A running runtime caches service.

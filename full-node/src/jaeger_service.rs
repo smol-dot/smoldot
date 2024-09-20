@@ -37,8 +37,7 @@
 use smol::{future, net::UdpSocket};
 use smoldot::libp2p::PeerId;
 use std::{
-    convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
-    sync::Arc,
+    convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZero, pin::Pin, sync::Arc,
 };
 
 /// Configuration for a [`JaegerService`].
@@ -200,10 +199,10 @@ impl JaegerService {
         block_hash: &[u8; 32],
         operation_name: impl Into<String>,
     ) -> mick_jaeger::Span {
-        let trace_id = NonZeroU128::new(u128::from_be_bytes(
+        let trace_id = NonZero::<u128>::new(u128::from_be_bytes(
             <[u8; 16]>::try_from(&block_hash[16..]).unwrap(),
         ))
-        .unwrap_or_else(|| NonZeroU128::new(1u128).unwrap());
+        .unwrap_or_else(|| NonZero::<u128>::new(1u128).unwrap());
         self.traces_in.span(trace_id, operation_name)
     }
 
@@ -230,7 +229,7 @@ impl JaegerService {
             buf[8..].copy_from_slice(&local_peer_id[local_peer_id.len() - 8..]);
         };
 
-        let trace_id = NonZeroU128::new(u128::from_be_bytes(buf)).unwrap();
+        let trace_id = NonZero::<u128>::new(u128::from_be_bytes(buf)).unwrap();
         self.traces_in.span(trace_id, operation_name)
     }
 }

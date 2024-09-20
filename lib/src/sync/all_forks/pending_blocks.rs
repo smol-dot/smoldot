@@ -91,11 +91,7 @@
 use super::{disjoint, sources};
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::{
-    iter,
-    num::{NonZeroU32, NonZeroU64},
-    ops,
-};
+use core::{iter, num::NonZero, ops};
 
 pub use disjoint::TreeRoot;
 pub use sources::SourceId;
@@ -129,7 +125,7 @@ pub struct Config {
     /// because of malicious sources.
     ///
     /// The higher the value, the more bandwidth is potentially wasted.
-    pub max_requests_per_block: NonZeroU32,
+    pub max_requests_per_block: NonZero<u32>,
 }
 
 /// State of a block in the data structure.
@@ -1069,7 +1065,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                                 request_params: RequestParams {
                                     first_block_hash: *unknown_block_hash,
                                     first_block_height: unknown_block_height,
-                                    num_blocks: NonZeroU64::new(if download_many {
+                                    num_blocks: NonZero::<u64>::new(if download_many {
                                         unknown_block_height - self.sources.finalized_block_height()
                                     } else {
                                         1
@@ -1125,5 +1121,5 @@ pub struct RequestParams {
     ///
     /// Note that this is only an indication, and the source is free to give fewer blocks
     /// than requested.
-    pub num_blocks: NonZeroU64,
+    pub num_blocks: NonZero<u64>,
 }

@@ -22,7 +22,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for a block verification.
 pub struct Config<'a> {
@@ -73,7 +73,7 @@ pub enum ConfigConsensus<'a> {
 
         /// Duration of a slot in milliseconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
 
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
         /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -83,7 +83,7 @@ pub enum ConfigConsensus<'a> {
     /// Chain is using the Babe consensus engine.
     Babe {
         /// Number of slots per epoch in the Babe configuration.
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's
         /// number is 0, as block #0 doesn't belong to any epoch.

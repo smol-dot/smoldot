@@ -32,12 +32,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{
-    iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    time::Duration,
-};
+use core::{iter, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
 use rand_chacha::{
@@ -539,19 +534,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
         responses_tx,
         multistage_requests_to_advance: VecDeque::new(),
         block_headers_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            NonZero::<usize>::new(32).unwrap_or_else(|| unreachable!()),
             Default::default(),
         ),
         best_block_hash_pending: Vec::new(),
         pending_get_finalized_head: Vec::new(),
         block_headers_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         block_runtimes_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+            NonZero::<usize>::new(32).unwrap_or_else(|| unreachable!()),
             Default::default(),
         ),
         block_runtimes_pending: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
         state_get_keys_paged_cache: lru::LruCache::with_hasher(
-            NonZeroUsize::new(2).unwrap(),
+            NonZero::<usize>::new(2).unwrap(),
             util::SipHasherBuild::new({
                 let mut seed = [0; 16];
                 config.platform.fill_random_bytes(&mut seed);
@@ -1760,7 +1755,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             },
                             3,
                             Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
+                            NonZero::<u32>::new(2).unwrap(),
                         );
 
                         // Allocate an operation ID, update the local state, and notify the
@@ -1935,7 +1930,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         call_parameters,
                                         3,
                                         Duration::from_secs(20),
-                                        NonZeroU32::new(2).unwrap(),
+                                        NonZero::<u32>::new(2).unwrap(),
                                     )
                                     .await
                             }
@@ -2128,7 +2123,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             storage_operations.into_iter(),
                             3,
                             Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
+                            NonZero::<u32>::new(2).unwrap(),
                         );
 
                         let operation_id = {
@@ -2269,7 +2264,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     subscription: runtime_service
                                         .subscribe_all(
                                             32,
-                                            NonZeroUsize::new(32).unwrap_or_else(|| unreachable!()),
+                                            NonZero::<usize>::new(32)
+                                                .unwrap_or_else(|| unreachable!()),
                                         )
                                         .await,
                                 }
@@ -2883,7 +2879,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(8),
-                                    NonZeroU32::new(1).unwrap(),
+                                    NonZero::<u32>::new(1).unwrap(),
                                 )
                                 .await
                         } else {
@@ -2897,7 +2893,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(8),
-                                    NonZeroU32::new(1).unwrap(),
+                                    NonZero::<u32>::new(1).unwrap(),
                                 )
                                 .await
                         };
@@ -3002,7 +2998,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                     3,
                                     Duration::from_secs(5),
-                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                                 );
                             let block_number_bytes = me.runtime_service.block_number_bytes();
                             Box::pin(async move {
@@ -3162,7 +3158,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     parameters_vectored,
                                     3,
                                     Duration::from_secs(5),
-                                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                                 )
                                 .await,
                         }
@@ -3220,7 +3216,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                             .into_iter(),
                                             3,
                                             Duration::from_secs(20),
-                                            NonZeroU32::new(1).unwrap(),
+                                            NonZero::<u32>::new(1).unwrap(),
                                         )
                                         .advance()
                                         .await;
@@ -3509,7 +3505,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     storage_request,
                     3,
                     Duration::from_secs(10),
-                    NonZeroU32::new(1).unwrap_or_else(|| unreachable!()),
+                    NonZero::<u32>::new(1).unwrap_or_else(|| unreachable!()),
                 );
 
                 me.background_tasks.push(Box::pin(async move {
@@ -4576,7 +4572,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 let mut pinned_blocks =
                     hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
                 let mut finalized_and_pruned_lru = lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
+                    NonZero::<usize>::new(32).unwrap(),
                     fnv::FnvBuildHasher::default(),
                 );
 
@@ -4667,7 +4663,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         runtime_service
                             .subscribe_all(
                                 32,
-                                NonZeroUsize::new(usize::MAX).unwrap_or_else(|| unreachable!()),
+                                NonZero::<usize>::new(usize::MAX).unwrap_or_else(|| unreachable!()),
                             )
                             .await
                     }));
@@ -5464,7 +5460,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     }),
                                 4,
                                 Duration::from_secs(12),
-                                NonZeroU32::new(2).unwrap(),
+                                NonZero::<u32>::new(2).unwrap(),
                             )
                             .advance()
                             .await;

@@ -32,7 +32,7 @@ use alloc::{
     borrow::ToOwned as _, boxed::Box, collections::VecDeque, format, string::String, sync::Arc,
     vec::Vec,
 };
-use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{cmp, fmt, future::Future, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -316,12 +316,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
-            desired_count: NonZeroU32::new(1).unwrap(),
+            desired_count: NonZero::<u32>::new(1).unwrap(),
             direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
@@ -365,12 +365,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
         let request_config = codec::BlocksRequestConfig {
             start: codec::BlocksRequestConfigStart::Hash(hash),
-            desired_count: NonZeroU32::new(1).unwrap(),
+            desired_count: NonZero::<u32>::new(1).unwrap(),
             direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
@@ -424,7 +424,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         requests: impl Iterator<Item = StorageRequestItem>,
         total_attempts: u32,
         timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
+        max_parallel: NonZero<u32>,
     ) -> StorageQuery<TPlat> {
         let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::MAX);
 
@@ -578,7 +578,7 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     /// How long to wait for a response to the request.
     timeout_per_request: Duration,
     // TODO: value presently ignored
-    _max_parallel: NonZeroU32,
+    _max_parallel: NonZero<u32>,
     /// Non-fatal errors that have happened in the network requests.
     outcome_errors: Vec<StorageQueryErrorDetail>,
     /// List of responses that are available to yield.

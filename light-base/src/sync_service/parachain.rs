@@ -19,12 +19,7 @@ use super::ToBackground;
 use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{
-    mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    time::Duration,
-};
+use core::{mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
 use hashbrown::HashMap;
@@ -66,7 +61,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let relay_chain_sync = relay_chain_sync.clone();
                 Box::pin(async move {
                     relay_chain_sync
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await
                 })
             },
@@ -878,7 +873,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -950,7 +945,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             let relay_chain_sync = self.relay_chain_sync.clone();
                             Box::pin(async move {
                                 relay_chain_sync
-                                    .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                                    .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                                     .await
                             })
                         },
@@ -1330,7 +1325,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
             }),
             6,
             Duration::from_secs(10),
-            NonZeroU32::new(2).unwrap(),
+            NonZero::<u32>::new(2).unwrap(),
         )
         .await
         .map_err(ParaheadError::RuntimeCall)?;

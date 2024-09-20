@@ -66,13 +66,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{
-    cmp, iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    ops,
-    pin::Pin,
-    time::Duration,
-};
+use core::{cmp, iter, mem, num::NonZero, ops, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, Stream, StreamExt as _};
@@ -182,7 +176,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_pinned_blocks: NonZeroUsize,
+        max_pinned_blocks: NonZero<usize>,
     ) -> SubscribeAll<TPlat> {
         loop {
             let (result_tx, result_rx) = oneshot::channel();
@@ -313,7 +307,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
+        max_parallel: NonZero<u32>,
     ) -> Result<RuntimeCallSuccess, RuntimeCallError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -721,14 +715,14 @@ enum ToBackground<TPlat: PlatformRef> {
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
+        _max_parallel: NonZero<u32>,
     },
 }
 
 struct ToBackgroundSubscribeAll<TPlat: PlatformRef> {
     result_tx: oneshot::Sender<SubscribeAll<TPlat>>,
     buffer_size: usize,
-    max_pinned_blocks: NonZeroUsize,
+    max_pinned_blocks: NonZero<usize>,
 }
 
 #[derive(Clone)]
@@ -2997,7 +2991,7 @@ fn download_runtime<TPlat: PlatformRef>(
                 .into_iter(),
                 3,
                 Duration::from_secs(20),
-                NonZeroU32::new(3).unwrap(),
+                NonZero::<u32>::new(3).unwrap(),
             )
             .advance()
             .await;

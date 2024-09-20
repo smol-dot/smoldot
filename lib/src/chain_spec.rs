@@ -47,7 +47,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::{iter, num::NonZeroU64, ops::Bound};
+use core::{iter, num::NonZero, ops::Bound};
 
 mod light_sync_state;
 mod structs;
@@ -504,7 +504,7 @@ impl LightSyncState {
         ChainInformation {
             finalized_block_header: Box::new(self.inner.finalized_block_header.clone()),
             consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(next_epoch.duration)
+                slots_per_epoch: NonZero::<u64>::new(next_epoch.duration)
                     .ok_or(CheckpointToChainInformationError::InvalidBabeSlotsPerEpoch)?,
                 finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
                 finalized_next_epoch_transition: convert_epoch(next_epoch),
@@ -519,7 +519,7 @@ impl LightSyncState {
                         .map(|authority| {
                             Ok(crate::header::GrandpaAuthority {
                                 public_key: authority.public_key,
-                                weight: NonZeroU64::new(authority.weight)
+                                weight: NonZero::<u64>::new(authority.weight)
                                     .ok_or(CheckpointToChainInformationError::InvalidGrandpaAuthorityWeight)?,
                             })
                         })

@@ -21,7 +21,7 @@
 //! process of building the chain information of a certain finalized point of a chain.
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, iter, num::NonZeroU64};
+use core::{fmt, iter, num::NonZero};
 
 use crate::{
     chain::chain_information,
@@ -883,7 +883,7 @@ struct ChainInformationBuildInner {
     runtime_grandpa_supports_currentsetid: Option<bool>,
 
     /// Output of the call to `AuraApi_slot_duration`, if it was already made.
-    aura_slot_duration_call_output: Option<NonZeroU64>,
+    aura_slot_duration_call_output: Option<NonZero<u64>>,
     /// Output of the call to `AuraApi_authorities`, if it was already made.
     aura_autorities_call_output: Option<Vec<header::AuraAuthority>>,
     /// Output of the call to `BabeApi_current_epoch`, if it was already made.
@@ -899,10 +899,10 @@ struct ChainInformationBuildInner {
 }
 
 /// Decodes the output of a call to `AuraApi_slot_duration`.
-fn decode_aura_slot_duration_output(bytes: &[u8]) -> Result<NonZeroU64, Error> {
+fn decode_aura_slot_duration_output(bytes: &[u8]) -> Result<NonZero<u64>, Error> {
     <[u8; 8]>::try_from(bytes)
         .ok()
-        .and_then(|b| NonZeroU64::new(u64::from_le_bytes(b)))
+        .and_then(|b| NonZero::<u64>::new(u64::from_le_bytes(b)))
         .ok_or(Error::AuraSlotDurationOutputDecode)
 }
 
@@ -918,7 +918,7 @@ fn decode_aura_authorities_output(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BabeGenesisConfiguration {
-    slots_per_epoch: NonZeroU64,
+    slots_per_epoch: NonZero<u64>,
     epoch0_configuration: header::BabeNextConfig,
     epoch0_information: header::BabeNextEpoch,
 }
@@ -932,7 +932,7 @@ fn decode_babe_configuration_output(
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
                 nom::number::streaming::le_u64,
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
                 nom::number::streaming::le_u64,
                 nom::number::streaming::le_u64,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
@@ -1094,7 +1094,7 @@ fn decode_grandpa_authorities_output(
                 num_elems,
                 nom::sequence::tuple((
                     nom::bytes::streaming::take(32u32),
-                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
                 )),
                 move || Vec::with_capacity(num_elems),
                 |mut acc, (public_key, weight)| {
@@ -1128,7 +1128,7 @@ fn decode_grandpa_current_set_id_output(bytes: &[u8]) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use crate::header;
-    use core::num::NonZeroU64;
+    use core::num::NonZero;
 
     #[test]
     fn decode_babe_epoch_output_sample_decode() {
@@ -1174,7 +1174,7 @@ mod tests {
         assert_eq!(
             super::decode_babe_configuration_output(&data, true).unwrap(),
             super::BabeGenesisConfiguration {
-                slots_per_epoch: NonZeroU64::new(600).unwrap(),
+                slots_per_epoch: NonZero::<u64>::new(600).unwrap(),
                 epoch0_configuration: header::BabeNextConfig {
                     allowed_slots: header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
                     c: (1, 4),

@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use core::num::NonZeroU64;
+use core::num::NonZero;
 
 use super::{Config, Pool, ValidTransaction};
 
@@ -38,7 +38,7 @@ fn basic_includable() {
         tx_id,
         1,
         ValidTransaction {
-            longevity: NonZeroU64::new(16).unwrap(),
+            longevity: NonZero::<u64>::new(16).unwrap(),
             priority: 0,
             propagate: true,
             provides: Vec::new(),

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::{iter, num::NonZeroU32};
+use core::{iter, num::NonZero};
 use futures_lite::FutureExt as _;
 
 fn main() {
@@ -54,7 +54,7 @@ fn main() {
                 // This parameter is necessary for situations where the JSON-RPC clients aren't
                 // trusted. If you control all the requests that are sent out and don't want them
                 // to fail, feel free to pass `u32::MAX`.
-                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                 // Maximum number of active subscriptions before new ones are automatically
                 // rejected. Any JSON-RPC request that causes the server to generate notifications
                 // counts as a subscription.
@@ -97,7 +97,7 @@ fn main() {
             // These options are the same as above.
             specification: include_str!("../../demo-chain-specs/polkadot-asset-hub.json"),
             json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
-                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(128).unwrap(),
                 max_subscriptions: 1024,
             },
             database_content: "",

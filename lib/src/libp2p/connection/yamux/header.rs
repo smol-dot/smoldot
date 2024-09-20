@@ -19,7 +19,7 @@
 //!
 //! See <https://github.com/hashicorp/yamux/blob/master/spec.md>
 
-use core::num::NonZeroU32;
+use core::num::NonZero;
 
 /// A Yamux header in its decoded form.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub enum DecodedYamuxHeader {
         fin: bool,
         /// Value of the RST flag.
         rst: bool,
-        stream_id: NonZeroU32,
+        stream_id: NonZero<u32>,
         length: u32,
     },
     Window {
@@ -45,7 +45,7 @@ pub enum DecodedYamuxHeader {
         fin: bool,
         /// Value of the RST flag.
         rst: bool,
-        stream_id: NonZeroU32,
+        stream_id: NonZero<u32>,
         length: u32,
     },
     PingRequest {
@@ -186,7 +186,7 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
                 nom::sequence::tuple((
                     nom::bytes::streaming::tag(&[0]),
                     flags,
-                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZeroU32::new),
+                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZero::<u32>::new),
                     nom::number::streaming::be_u32,
                 )),
                 |(_, (syn, ack, fin, rst), stream_id, length)| DecodedYamuxHeader::Data {
@@ -202,7 +202,7 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
                 nom::sequence::tuple((
                     nom::bytes::streaming::tag(&[1]),
                     flags,
-                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZeroU32::new),
+                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZero::<u32>::new),
                     nom::number::streaming::be_u32,
                 )),
                 |(_, (syn, ack, fin, rst), stream_id, length)| DecodedYamuxHeader::Window {
@@ -273,7 +273,7 @@ fn flags(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], (bool, bool, bool, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
+    use core::num::NonZero;
 
     #[test]
     fn decode_data_frame() {
@@ -284,7 +284,7 @@ mod tests {
                 ack: false,
                 fin: false,
                 rst: false,
-                stream_id: NonZeroU32::new(15).unwrap(),
+                stream_id: NonZero::<u32>::new(15).unwrap(),
                 length: 577
             }
         );
