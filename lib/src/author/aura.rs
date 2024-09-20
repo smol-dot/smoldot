@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::header;
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for [`next_slot_claim`].
 pub struct Config<'a, TLocAuth> {
@@ -25,7 +25,7 @@ pub struct Config<'a, TLocAuth> {
     pub now_from_unix_epoch: Duration,
 
     /// Duration, in milliseconds, of an Aura slot.
-    pub slot_duration: NonZeroU64,
+    pub slot_duration: NonZero<u64>,
 
     /// List of the Aura authorities allowed to produce a block. This is either the same as the
     /// ones of the current best block, or a new list if the current best block contains an

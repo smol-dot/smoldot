@@ -28,7 +28,7 @@ use alloc::{
 use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
-    num::NonZeroU32,
+    num::NonZero,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use futures_lite::FutureExt as _;
@@ -95,7 +95,7 @@ struct SerializedIo {
 
     /// Maximum value that [`SerializedIo::num_requests_in_fly`] is allowed to reach.
     /// Beyond this, no more request should be added to [`SerializedIo::requests_queue`].
-    max_requests_in_fly: NonZeroU32,
+    max_requests_in_fly: NonZero<u32>,
 
     /// Queue of responses.
     responses_queue: Mutex<SerializedIoResponses>,
@@ -149,7 +149,7 @@ pub struct Config {
     ///
     /// If this limit is reached, it is not possible to send further requests without pulling
     /// responses first.
-    pub max_pending_requests: NonZeroU32,
+    pub max_pending_requests: NonZero<u32>,
 
     /// Maximum number of simultaneous subscriptions allowed. Trying to create a subscription will
     /// be automatically rejected if this limit is reached.

@@ -31,7 +31,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{num::NonZeroU32, pin::Pin, str, task};
+use core::{num::NonZero, pin::Pin, str, task};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::{platform::PlatformRef, HandleRpcError};
 
@@ -126,7 +126,7 @@ fn add_chain(
                     database_content: str::from_utf8(&database_content)
                         .unwrap_or_else(|_| panic!("non-utf8 database content")),
                     json_rpc: if let Some(json_rpc_max_pending_requests) =
-                        NonZeroU32::new(json_rpc_max_pending_requests)
+                        NonZero::<u32>::new(json_rpc_max_pending_requests)
                     {
                         smoldot_light::AddChainConfigJsonRpc::Enabled {
                             max_pending_requests: json_rpc_max_pending_requests,

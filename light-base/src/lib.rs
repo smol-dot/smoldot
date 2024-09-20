@@ -86,7 +86,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, time::Duration};
+use core::{num::NonZero, ops, time::Duration};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use platform::PlatformRef;
@@ -162,7 +162,7 @@ pub enum AddChainConfigJsonRpc {
         /// completely reasonable.
         ///
         /// A typical value is 128.
-        max_pending_requests: NonZeroU32,
+        max_pending_requests: NonZero<u32>,
 
         /// Maximum number of active subscriptions that can be started through JSON-RPC functions.
         /// Any request that causes the JSON-RPC server to generate notifications counts as a
@@ -278,7 +278,7 @@ struct RunningChain<TPlat: platform::PlatformRef> {
 
     /// Number of elements in [`Client::public_api_chains`] that reference this chain. If this
     /// number reaches `0`, the [`RunningChain`] should be destroyed.
-    num_references: NonZeroU32,
+    num_references: NonZero<u32>,
 }
 
 struct ChainServices<TPlat: platform::PlatformRef> {
@@ -866,7 +866,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 let entry = entry.insert(RunningChain {
                     services,
                     log_name,
-                    num_references: NonZeroU32::new(1).unwrap(),
+                    num_references: NonZero::<u32>::new(1).unwrap(),
                 });
 
                 (&mut entry.services, &entry.log_name)
@@ -1010,7 +1010,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             chains_by_key.remove(&removed_chain.key);
         } else {
             running_chain.num_references =
-                NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
+                NonZero::<u32>::new(running_chain.num_references.get() - 1).unwrap();
         }
 
         self.public_api_chains.shrink_to_fit();
@@ -1288,9 +1288,9 @@ fn start_services<TPlat: platform::PlatformRef>(
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: network_service_chain.clone(),
-            max_pending_transactions: NonZeroU32::new(64).unwrap(),
-            max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
-            max_concurrent_validations: NonZeroU32::new(2).unwrap(),
+            max_pending_transactions: NonZero::<u32>::new(64).unwrap(),
+            max_concurrent_downloads: NonZero::<u32>::new(3).unwrap(),
+            max_concurrent_validations: NonZero::<u32>::new(2).unwrap(),
         },
     ));
 

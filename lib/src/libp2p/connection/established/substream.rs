@@ -29,7 +29,7 @@ use crate::util::leb128;
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt, mem,
-    num::NonZeroUsize,
+    num::NonZero,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -1013,7 +1013,7 @@ where
                     (
                         Some(SubstreamInner::PingOutFailed { queued_pings }),
                         Some(Event::PingOutError {
-                            num_pings: NonZeroUsize::new(1).unwrap(),
+                            num_pings: NonZero::<usize>::new(1).unwrap(),
                         }),
                     )
                 } else {
@@ -1070,7 +1070,7 @@ where
                                 queued_pings,
                             }),
                             Some(Event::PingOutError {
-                                num_pings: NonZeroUsize::new(1).unwrap(),
+                                num_pings: NonZero::<usize>::new(1).unwrap(),
                             }),
                         );
                     }
@@ -1149,7 +1149,7 @@ where
             SubstreamInner::RequestInRespond { .. } => None,
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutFailed { queued_pings, .. } => {
-                NonZeroUsize::new(queued_pings.len())
+                NonZero::<usize>::new(queued_pings.len())
                     .map(|num_pings| Event::PingOutError { num_pings })
             }
         }
@@ -1502,7 +1502,7 @@ pub enum Event {
     /// Remote has failed to answer one or more pings.
     PingOutError {
         /// Number of pings that the remote has failed to answer.
-        num_pings: NonZeroUsize,
+        num_pings: NonZero<usize>,
     },
 }
 

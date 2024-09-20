@@ -59,7 +59,7 @@ use super::{
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
     fmt,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZero,
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
@@ -854,9 +854,9 @@ impl ConnectionPrototype {
                 randomness.fill_bytes(&mut seed);
                 seed
             },
-            max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
-            max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
-            max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+            max_out_data_frame_size: NonZero::<u32>::new(8192).unwrap(), // TODO: make configurable?
+            max_simultaneous_queued_pongs: NonZero::<usize>::new(4).unwrap(),
+            max_simultaneous_rst_substreams: NonZero::<usize>::new(1024).unwrap(),
         });
 
         let outgoing_pings = yamux

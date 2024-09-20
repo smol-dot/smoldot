@@ -54,7 +54,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
@@ -245,7 +245,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log_name: config.log_name,
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
-                    num_references: NonZeroUsize::new(1).unwrap(),
+                    num_references: NonZero::<usize>::new(1).unwrap(),
                     next_discovery_period: Duration::from_secs(2),
                     next_discovery_when: self.platform.now(),
                 },
@@ -842,7 +842,7 @@ struct Chain<TPlat: PlatformRef> {
     log_name: String,
 
     // TODO: this field is a hack due to the fact that `add_chain` can't be `async`; should eventually be fixed after a lib.rs refactor
-    num_references: NonZeroUsize,
+    num_references: NonZero<usize>,
 
     /// See [`ConfigChain::block_number_bytes`].
     // TODO: redundant with ChainNetwork? since we might not need to know this in the future i'm reluctant to add a getter to ChainNetwork
@@ -1167,7 +1167,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::RemoveChain) => {
                 if let Some(new_ref) =
-                    NonZeroUsize::new(task.network[chain_id].num_references.get() - 1)
+                    NonZero::<usize>::new(task.network[chain_id].num_references.get() - 1)
                 {
                     task.network[chain_id].num_references = new_ref;
                     continue;

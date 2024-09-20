@@ -51,7 +51,7 @@ use alloc::{
     string::{String, ToString as _},
     sync::Arc,
 };
-use core::{num::NonZeroU32, pin::Pin};
+use core::{num::NonZero, pin::Pin};
 use futures_lite::StreamExt as _;
 
 /// Configuration for [`service()`].
@@ -72,7 +72,7 @@ pub struct Config<TPlat: PlatformRef> {
     /// the client.
     // TODO: unused at the moment
     #[allow(unused)]
-    pub max_pending_requests: NonZeroU32,
+    pub max_pending_requests: NonZero<u32>,
 
     /// Maximum number of active subscriptions. Any additional subscription will be immediately
     /// rejected.

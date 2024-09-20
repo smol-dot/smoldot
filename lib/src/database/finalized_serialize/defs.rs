@@ -20,7 +20,7 @@
 use crate::{chain::chain_information, header};
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, num::NonZeroU64};
+use core::{fmt, num::NonZero};
 use hashbrown::HashMap;
 
 /// Error that can happen when deserializing the data.
@@ -64,11 +64,11 @@ pub(super) struct SerializedChainInformationV1 {
     )]
     finalized_block_header: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    aura_slot_duration: Option<NonZeroU64>,
+    aura_slot_duration: Option<NonZero<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     aura_finalized_authorities: Option<Vec<SerializedAuraAuthorityV1>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    babe_slots_per_epoch: Option<NonZeroU64>,
+    babe_slots_per_epoch: Option<NonZero<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     babe_finalized_block_epoch_information: Option<SerializedBabeEpochInformationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -372,7 +372,7 @@ struct SerializedBabeAuthorityV1 {
         deserialize_with = "deserialize_hash32"
     )]
     public_key: [u8; 32],
-    weight: u64, // TODO: should be NonZeroU64; requires changing crate::header first
+    weight: u64, // TODO: should be NonZero<u64>; requires changing crate::header first
 }
 
 impl<'a> From<header::BabeAuthorityRef<'a>> for SerializedBabeAuthorityV1 {
@@ -452,7 +452,7 @@ struct SerializedGrandpaAuthorityV1 {
         deserialize_with = "deserialize_hash32"
     )]
     public_key: [u8; 32],
-    weight: NonZeroU64,
+    weight: NonZero<u64>,
 }
 
 impl<'a> From<header::GrandpaAuthorityRef<'a>> for SerializedGrandpaAuthorityV1 {

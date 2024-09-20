@@ -27,7 +27,7 @@ use std::{
     future::Future,
     io, mem,
     net::SocketAddr,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZero,
     pin::Pin,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -149,7 +149,7 @@ impl JsonRpcService {
         let (virtual_client_main_task, virtual_client_io) =
             service::client_main_task(service::Config {
                 max_active_subscriptions: u32::MAX,
-                max_pending_requests: NonZeroU32::new(u32::MAX).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(u32::MAX).unwrap(),
             });
 
         spawn_client_main_task(
@@ -164,7 +164,7 @@ impl JsonRpcService {
             runtime_caches_service::Config {
                 tasks_executor: config.tasks_executor.clone(),
                 database: config.database.clone(),
-                num_cache_entries: NonZeroUsize::new(16).unwrap(), // TODO: configurable?
+                num_cache_entries: NonZero::<usize>::new(16).unwrap(), // TODO: configurable?
             },
         ));
 
@@ -349,7 +349,7 @@ impl JsonRpcBackground {
             );
             let (client_main_task, io) = service::client_main_task(service::Config {
                 max_active_subscriptions: 128,
-                max_pending_requests: NonZeroU32::new(64).unwrap(),
+                max_pending_requests: NonZero::<u32>::new(64).unwrap(),
             });
             spawn_client_io_task(
                 &self.tasks_executor,

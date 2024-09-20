@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use core::num::NonZeroU64;
+use core::num::NonZero;
 
 use super::super::validate;
 use super::{Config, LightPool};
@@ -166,7 +166,7 @@ fn longevity_works_non_finalized() {
         tx_id,
         &[1; 32],
         Ok(validate::ValidTransaction {
-            longevity: NonZeroU64::new(2).unwrap(),
+            longevity: NonZero::<u64>::new(2).unwrap(),
             priority: 1,
             propagate: true,
             provides: Vec::new(),
@@ -226,7 +226,7 @@ fn longevity_works_finalized() {
         tx_id,
         &[1; 32],
         Ok(validate::ValidTransaction {
-            longevity: NonZeroU64::new(2).unwrap(),
+            longevity: NonZero::<u64>::new(2).unwrap(),
             priority: 1,
             propagate: true,
             provides: Vec::new(),
@@ -279,7 +279,7 @@ fn longevity_works_finalized_base() {
         tx_id,
         &[0; 32],
         Ok(validate::ValidTransaction {
-            longevity: NonZeroU64::new(2).unwrap(),
+            longevity: NonZero::<u64>::new(2).unwrap(),
             priority: 1,
             propagate: true,
             provides: Vec::new(),

@@ -26,7 +26,6 @@
 
 use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLevel};
 
-use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
 use futures_util::{
@@ -56,7 +55,7 @@ use std::{
     cmp,
     future::Future,
     iter,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZero,
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -145,7 +144,7 @@ enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
         // TODO: unused field
-        _max_finalized_pinned_blocks: NonZeroUsize,
+        _max_finalized_pinned_blocks: NonZero<usize>,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
@@ -302,14 +301,14 @@ impl ConsensusService {
                 1024
             },
             max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            max_requests_per_block: NonZero::<u32>::new(3).unwrap(),
             download_ahead_blocks: {
                 // Assuming a verification speed of 1k blocks/sec and a 99th download time
                 // percentile of two second, the number of blocks to download ahead of time
                 // in order to not block is 2000.
                 // In practice, however, the verification speed and download speed depend on
                 // the chain and the machine of the user.
-                NonZeroU32::new(2000).unwrap()
+                NonZero::<u32>::new(2000).unwrap()
             },
             download_bodies: true,
             // We ask for all the chain-information-related storage proofs and call proofs to be
@@ -416,7 +415,7 @@ impl ConsensusService {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_finalized_pinned_blocks: NonZeroUsize,
+        max_finalized_pinned_blocks: NonZero<usize>,
     ) -> SubscribeAll {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
@@ -1500,7 +1499,7 @@ impl SyncBackground {
                 } => {
                     // Before notifying the syncing of the request, clamp the number of blocks to
                     // the number of blocks we expect to receive.
-                    let num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), 64)).unwrap();
+                    let num_blocks = NonZero::<u64>::new(cmp::min(num_blocks.get(), 64)).unwrap();
 
                     let peer_id = {
                         let info = self.sync[source_id].clone().unwrap();
@@ -1516,7 +1515,7 @@ impl SyncBackground {
                         self.network_chain_id,
                         network::codec::BlocksRequestConfig {
                             start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
-                            desired_count: NonZeroU32::new(
+                            desired_count: NonZero::<u32>::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::MAX),
                             )
                             .unwrap(),

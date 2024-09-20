@@ -77,12 +77,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{
-    cmp, iter,
-    num::{NonZeroU32, NonZeroUsize},
-    pin,
-    time::Duration,
-};
+use core::{cmp, iter, num::NonZero, pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
@@ -120,16 +115,16 @@ pub struct Config<TPlat: PlatformRef> {
     /// Maximum number of pending transactions allowed in the service.
     ///
     /// Any extra transaction will lead to [`DropReason::MaxPendingTransactionsReached`].
-    pub max_pending_transactions: NonZeroU32,
+    pub max_pending_transactions: NonZero<u32>,
 
     /// Maximum number of block body downloads that can be performed in parallel.
     ///
     /// > **Note**: This is the maximum number of *blocks* whose body is being download, not the
     /// >           number of block requests emitted on the network.
-    pub max_concurrent_downloads: NonZeroU32,
+    pub max_concurrent_downloads: NonZero<u32>,
 
     /// Maximum number of transaction validations that can be performed in parallel.
-    pub max_concurrent_validations: NonZeroU32,
+    pub max_concurrent_validations: NonZero<u32>,
 }
 
 /// See [the module-level documentation](..).
@@ -459,7 +454,7 @@ async fn background_task<TPlat: PlatformRef>(
                     // malicious.
                     worker
                         .runtime_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::MAX).unwrap())
+                        .subscribe_all(32, NonZero::<usize>::new(usize::MAX).unwrap())
                         .await,
                 )
             };
@@ -728,7 +723,7 @@ async fn background_task<TPlat: PlatformRef>(
                         },
                         3,
                         Duration::from_secs(8),
-                        NonZeroU32::new(3).unwrap(),
+                        NonZero::<u32>::new(3).unwrap(),
                     );
 
                     Box::pin(async move {
@@ -1497,7 +1492,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         }),
         3,
         Duration::from_secs(8),
-        NonZeroU32::new(1).unwrap(),
+        NonZero::<u32>::new(1).unwrap(),
     );
 
     let success = match runtime_call_future.await {

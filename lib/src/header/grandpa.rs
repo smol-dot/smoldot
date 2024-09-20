@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, fmt, iter, num::NonZeroU64, slice};
+use core::{cmp, fmt, iter, num::NonZero, slice};
 
 /// A consensus log item for GrandPa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,7 +369,7 @@ pub struct GrandpaAuthorityRef<'a> {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    pub weight: NonZeroU64,
+    pub weight: NonZero<u64>,
 }
 
 impl<'a> GrandpaAuthorityRef<'a> {
@@ -400,7 +400,7 @@ pub struct GrandpaAuthority {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    pub weight: NonZeroU64,
+    pub weight: NonZero<u64>,
 }
 
 impl GrandpaAuthority {
@@ -523,7 +523,7 @@ fn grandpa_authority_ref<
         nom::combinator::map(
             nom::sequence::tuple((
                 nom::bytes::streaming::take(32u32),
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
             )),
             |(public_key, weight)| GrandpaAuthorityRef {
                 public_key: TryFrom::try_from(public_key).unwrap(),

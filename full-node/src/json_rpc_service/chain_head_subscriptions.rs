@@ -26,7 +26,7 @@ use smoldot::{
 };
 use std::{
     future::Future,
-    num::NonZeroUsize,
+    num::NonZero,
     pin::{self, Pin},
     sync::Arc,
 };
@@ -77,7 +77,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     tasks_executor(Box::pin(async move {
         let consensus_service_subscription = config
             .consensus_service
-            .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+            .subscribe_all(32, NonZero::<usize>::new(32).unwrap())
             .await;
         let mut consensus_service_subscription_new_blocks =
             pin::pin!(consensus_service_subscription.new_blocks);

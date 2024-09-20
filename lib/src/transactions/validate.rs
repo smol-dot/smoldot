@@ -20,7 +20,7 @@
 use crate::util;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{iter, num::NonZeroU64};
+use core::{iter, num::NonZero};
 
 mod tests;
 
@@ -93,7 +93,7 @@ pub struct ValidTransaction {
     /// >           after a certain number of blocks. In that case, the longevity returned by the
     /// >           validation function will be at most this number of blocks. The concept of
     /// >           mortal transactions, however, is not relevant from the client's perspective.
-    pub longevity: NonZeroU64,
+    pub longevity: NonZero<u64>,
 
     /// A flag indicating whether the transaction should be propagated to other peers.
     ///
@@ -258,7 +258,7 @@ fn valid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], ValidTransaction> {
                 tags,
                 // TODO: maybe show by strong typing the fact that the provide tags are never empty
                 nom::combinator::verify(tags, |provides: &Vec<Vec<u8>>| !provides.is_empty()),
-                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
                 util::nom_bool_decode,
             )),
             |(priority, requires, provides, longevity, propagate)| ValidTransaction {

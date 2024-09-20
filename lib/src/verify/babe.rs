@@ -131,7 +131,7 @@
 
 use crate::{chain::chain_information, header};
 
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a> {
@@ -154,7 +154,7 @@ pub struct VerifyConfig<'a> {
     pub now_from_unix_epoch: Duration,
 
     /// Number of slots per epoch in the Babe configuration.
-    pub slots_per_epoch: NonZeroU64,
+    pub slots_per_epoch: NonZero<u64>,
 
     /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's number
     /// is 0, as block #0 doesn't belong to any epoch.
@@ -558,7 +558,7 @@ macro_rules! gen_calculate_primary_threshold {
         fn $name(
             c: (u64, u64),
             authorities_weights: impl Iterator<Item = u64>,
-            authority_weight: u64, // TODO: use a NonZeroU64 once crate::header also has weights that use NonZeroU64
+            authority_weight: u64, // TODO: use a NonZero<u64> once crate::header also has weights that use NonZero<u64>
         ) -> u128 {
             // We import `libm` no matter what, so that there's no warning about an unused
             // dependency.

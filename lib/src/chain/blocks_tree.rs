@@ -71,7 +71,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{cmp, fmt, mem, num::NonZeroU64, ops, time::Duration};
+use core::{cmp, fmt, mem, num::NonZero, ops, time::Duration};
 use hashbrown::HashMap;
 
 mod finality;
@@ -549,7 +549,7 @@ enum FinalizedConsensus {
         authorities_list: Arc<Vec<header::AuraAuthority>>,
 
         /// Duration, in milliseconds, of a slot.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
     },
     Babe {
         /// See [`chain_information::ChainInformationConsensus::Babe::finalized_block_epoch_information`].
@@ -559,7 +559,7 @@ enum FinalizedConsensus {
         next_epoch_transition: Arc<chain_information::BabeEpochInformation>,
 
         /// See [`chain_information::ChainInformationConsensus::Babe::slots_per_epoch`].
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
     },
 }
 

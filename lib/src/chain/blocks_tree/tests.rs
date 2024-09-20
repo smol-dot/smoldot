@@ -19,7 +19,7 @@
 
 #![cfg(test)]
 
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 use super::{Config, HeaderVerifySuccess, NonFinalizedTree};
 use crate::{chain::chain_information, header};
@@ -45,7 +45,7 @@ fn polkadot_blocks_0_to_2() {
                 digest: header::Digest::from(header::DigestRef::empty()),
             }),
             consensus: chain_information::ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(2400).unwrap(),
+                slots_per_epoch: NonZero::<u64>::new(2400).unwrap(),
                 finalized_block_epoch_information: None,
                 finalized_next_epoch_transition: Box::new(
                     chain_information::BabeEpochInformation {
@@ -119,7 +119,7 @@ fn polkadot_blocks_0_to_2() {
                             31, 16, 89, 116, 113, 220, 29, 39, 241, 68, 41, 90, 214, 251, 147, 60,
                             122,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -127,7 +127,7 @@ fn polkadot_blocks_0_to_2() {
                             200, 83, 247, 119, 25, 36, 152, 192, 146, 46, 171, 30, 157, 244, 240,
                             97,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -135,14 +135,14 @@ fn polkadot_blocks_0_to_2() {
                             238, 133, 10, 171, 35, 143, 208, 20, 193, 120, 118, 158, 126, 58, 155,
                             132,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
                             28, 21, 28, 17, 203, 114, 51, 77, 38, 215, 7, 105, 227, 175, 123, 191,
                             243, 128, 26, 78, 45, 202, 43, 9, 183, 204, 224, 175, 141, 216, 19, 7,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -150,7 +150,7 @@ fn polkadot_blocks_0_to_2() {
                             25, 126, 143, 182, 250, 187, 94, 98, 34, 10, 123, 215, 95, 134, 12,
                             171,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -158,7 +158,7 @@ fn polkadot_blocks_0_to_2() {
                             214, 101, 29, 28, 104, 154, 13, 87, 129, 63, 151, 104, 219, 170, 222,
                             207, 113,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                 ],
                 finalized_scheduled_change: None,
@@ -258,7 +258,7 @@ fn kusama_blocks_0_to_2() {
                 digest: header::Digest::from(header::DigestRef::empty()),
             }),
             consensus: chain_information::ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(600).unwrap(),
+                slots_per_epoch: NonZero::<u64>::new(600).unwrap(),
                 finalized_block_epoch_information: None,
                 finalized_next_epoch_transition: Box::new(
                     chain_information::BabeEpochInformation {
@@ -332,7 +332,7 @@ fn kusama_blocks_0_to_2() {
                             175, 210, 16, 101, 97, 184, 25, 44, 61, 130, 24, 17, 237, 220, 133,
                             190, 18,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -340,7 +340,7 @@ fn kusama_blocks_0_to_2() {
                             131, 207, 56, 243, 172, 45, 253, 156, 81, 104, 213, 215, 235, 186, 216,
                             53, 68,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -348,7 +348,7 @@ fn kusama_blocks_0_to_2() {
                             107, 44, 125, 4, 199, 114, 119, 251, 136, 177, 195, 199, 137, 250, 100,
                             23, 55,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -356,14 +356,14 @@ fn kusama_blocks_0_to_2() {
                             250, 50, 20, 190, 158, 118, 105, 255, 125, 192, 150, 209, 125, 40, 107,
                             210,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
                             92, 227, 13, 140, 0, 125, 10, 67, 140, 146, 195, 122, 102, 11, 119, 9,
                             253, 31, 243, 187, 167, 156, 108, 72, 50, 234, 65, 7, 210, 102, 224, 1,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                     header::GrandpaAuthority {
                         public_key: [
@@ -371,7 +371,7 @@ fn kusama_blocks_0_to_2() {
                             227, 98, 247, 250, 68, 41, 214, 101, 206, 16, 169, 218, 42, 206, 37,
                             76,
                         ],
-                        weight: NonZeroU64::new(1).unwrap(),
+                        weight: NonZero::<u64>::new(1).unwrap(),
                     },
                 ],
                 finalized_scheduled_change: None,

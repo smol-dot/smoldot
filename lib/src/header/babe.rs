@@ -280,7 +280,7 @@ pub struct BabeAuthorityRef<'a> {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    // TODO: should be NonZeroU64; requires deep changes in decoding code though
+    // TODO: should be NonZero<u64>; requires deep changes in decoding code though
     pub weight: u64,
 }
 
@@ -311,7 +311,7 @@ pub struct BabeAuthority {
     /// Arbitrary number indicating the weight of the authority.
     ///
     /// This value can only be compared to other weight values.
-    // TODO: should be NonZeroU64; requires deep changes in decoding code though
+    // TODO: should be NonZero<u64>; requires deep changes in decoding code though
     pub weight: u64,
 }
 

@@ -41,7 +41,7 @@
 use crate::header;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::num::NonZeroU64;
+use core::num::NonZero;
 
 pub mod build;
 
@@ -178,13 +178,13 @@ pub enum ChainInformationConsensus {
         finalized_authorities_list: Vec<header::AuraAuthority>,
 
         /// Duration, in milliseconds, of an Aura slot.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
     },
 
     /// Chain is using the Babe consensus engine.
     Babe {
         /// Number of slots per epoch. Configured at the genesis block and never touched later.
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// Babe epoch information about the epoch the finalized block belongs to.
         ///
@@ -498,13 +498,13 @@ pub enum ChainInformationConsensusRef<'a> {
         finalized_authorities_list: header::AuraAuthoritiesIter<'a>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
     },
 
     /// Chain is using the Babe consensus engine.
     Babe {
         /// See equivalent field in [`ChainInformationConsensus`].
-        slots_per_epoch: NonZeroU64,
+        slots_per_epoch: NonZero<u64>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
         finalized_block_epoch_information: Option<BabeEpochInformationRef<'a>>,

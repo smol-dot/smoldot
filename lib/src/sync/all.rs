@@ -40,13 +40,7 @@ use crate::{
 };
 
 use alloc::{borrow::Cow, vec::Vec};
-use core::{
-    iter,
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64},
-    ops,
-    time::Duration,
-};
+use core::{iter, marker::PhantomData, num::NonZero, ops, time::Duration};
 
 pub use crate::executor::vm::ExecHint;
 pub use blocks_tree::{CommitVerifyError, JustificationVerifyError};
@@ -101,7 +95,7 @@ pub struct Config {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// See [`all_forks::Config::max_requests_per_block`] for more information.
-    pub max_requests_per_block: NonZeroU32,
+    pub max_requests_per_block: NonZero<u32>,
 
     /// Number of blocks to download ahead of the best verified block.
     ///
@@ -112,7 +106,7 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
-    pub download_ahead_blocks: NonZeroU32,
+    pub download_ahead_blocks: NonZero<u32>,
 
     /// If true, the body of a block is downloaded (if necessary) before a
     /// [`ProcessOne::VerifyBlock`] is generated.
@@ -670,7 +664,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             } => DesiredRequest::BlocksRequest {
                                 first_block_height: block_number,
                                 first_block_hash: block_hash,
-                                num_blocks: NonZeroU64::new(1).unwrap(),
+                                num_blocks: NonZero::<u64>::new(1).unwrap(),
                                 request_headers: false,
                                 request_bodies: true,
                                 request_justification: false,
@@ -1643,7 +1637,7 @@ pub enum DesiredRequest {
         ///
         /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
-        num_blocks: NonZeroU64,
+        num_blocks: NonZero<u64>,
         /// `True` if headers should be included in the response.
         request_headers: bool,
         /// `True` if bodies should be included in the response.
@@ -1696,7 +1690,7 @@ pub enum RequestDetail {
         ///
         /// This might be equal to `u64::MAX` in case no upper bound is required. The API
         /// user is responsible for clamping this value to a reasonable limit.
-        num_blocks: NonZeroU64,
+        num_blocks: NonZero<u64>,
         /// `True` if headers should be included in the response.
         request_headers: bool,
         /// `True` if bodies should be included in the response.
@@ -2448,7 +2442,7 @@ struct Shared<TRq, TSrc> {
     /// Value passed through [`Config::max_disjoint_headers`].
     max_disjoint_headers: usize,
     /// Value passed through [`Config::max_requests_per_block`].
-    max_requests_per_block: NonZeroU32,
+    max_requests_per_block: NonZero<u32>,
     /// Value passed through [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].

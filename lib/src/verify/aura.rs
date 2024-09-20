@@ -48,7 +48,7 @@
 use crate::header;
 
 use alloc::vec::Vec;
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a, TAuthList> {
@@ -77,7 +77,7 @@ pub struct VerifyConfig<'a, TAuthList> {
 
     /// Duration of a slot in milliseconds.
     /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-    pub slot_duration: NonZeroU64,
+    pub slot_duration: NonZero<u64>,
 }
 
 /// Information yielded back after successfully verifying a block.

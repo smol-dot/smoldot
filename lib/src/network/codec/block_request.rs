@@ -18,7 +18,7 @@
 use crate::util::protobuf;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::num::NonZeroU32;
+use core::num::NonZero;
 
 /// Description of a block request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct BlocksRequestConfig {
     /// First block that the remote must return.
     pub start: BlocksRequestConfigStart,
     /// Number of blocks to request. The remote is free to return fewer blocks than requested.
-    pub desired_count: NonZeroU32,
+    pub desired_count: NonZero<u32>,
     /// Whether the first block should be the one with the highest number, of the one with the
     /// lowest number.
     pub direction: BlocksRequestDirection,
@@ -190,8 +190,8 @@ pub fn decode_block_request(
         },
         desired_count: {
             // A missing field or a `0` field are both interpreted as "no limit".
-            NonZeroU32::new(decoded.max_blocks.unwrap_or(u32::MAX))
-                .unwrap_or(NonZeroU32::new(u32::MAX).unwrap())
+            NonZero::<u32>::new(decoded.max_blocks.unwrap_or(u32::MAX))
+                .unwrap_or(NonZero::<u32>::new(u32::MAX).unwrap())
         },
         direction: match decoded.direction {
             None | Some(0) => BlocksRequestDirection::Ascending,

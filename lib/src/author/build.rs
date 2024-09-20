@@ -25,7 +25,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{num::NonZeroU64, time::Duration};
+use core::{num::NonZero, time::Duration};
 
 pub use runtime::{Nibble, StorageChanges, TrieEntryVersion};
 
@@ -44,7 +44,7 @@ pub enum ConfigConsensus<'a, TLocAuth> {
         now_from_unix_epoch: Duration,
 
         /// Duration, in milliseconds, of an Aura slot.
-        slot_duration: NonZeroU64,
+        slot_duration: NonZero<u64>,
 
         /// List of the Aura authorities allowed to produce a block. This is either the same as
         /// the ones of the current best block, or a new list if the current best block contains
