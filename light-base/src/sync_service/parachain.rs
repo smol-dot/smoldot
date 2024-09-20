@@ -643,14 +643,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     continue;
                                 }
 
-                                log!(
-                                    &self.platform,
-                                    Debug,
-                                    &self.log_target,
-                                    "subscriptions-notify-new-parablock",
-                                    hash = HashDisplay(&parahash)
-                                );
-
                                 if is_new_best {
                                     runtime_subscription.reported_best_parahead_hash =
                                         Some(parahash);
@@ -669,6 +661,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                                 .unwrap()
                                         })
                                         .unwrap_or(finalized_parahead),
+                                );
+
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-new-parablock",
+                                    hash = HashDisplay(&parahash),
+                                    parent_hash = HashDisplay(&parent_hash),
+                                    ?is_new_best
                                 );
 
                                 // Elements in `all_subscriptions` are removed one by one and
