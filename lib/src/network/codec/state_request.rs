@@ -126,8 +126,8 @@ pub fn decode_state_response(response_bytes: &[u8]) -> Result<&[u8], DecodeState
 }
 
 /// Error potentially returned by [`decode_state_response`].
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "Failed to decode response")]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+#[display("Failed to decode response")]
 pub enum DecodeStateResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

@@ -149,7 +149,7 @@ impl core::str::FromStr for ColorChoice {
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
-#[display(fmt = "Color must be one of: always, auto, never")]
+#[display("Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
 
 #[derive(Debug, Clone)]
@@ -185,7 +185,7 @@ impl core::str::FromStr for LogLevel {
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
-#[display(fmt = "Log level must be one of: off, error, warn, info, debug, trace")]
+#[display("Log level must be one of: off, error, warn, info, debug, trace")]
 pub struct LogLevelParseError;
 
 #[derive(Debug, Clone, clap::ValueEnum)]

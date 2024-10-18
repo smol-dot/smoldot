@@ -301,14 +301,14 @@ impl<TNow> ReadWrite<TNow> {
 }
 
 /// Error potentially returned by [`ReadWrite::incoming_bytes_take`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum IncomingBytesTakeError {
     /// Reading side of the stream is closed.
     ReadClosed,
 }
 
 /// Error potentially returned by [`ReadWrite::incoming_bytes_take_leb128`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum IncomingBytesTakeLeb128Error {
     /// Invalid LEB128 number.
     InvalidLeb128,

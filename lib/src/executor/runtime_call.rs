@@ -489,10 +489,11 @@ impl fmt::Debug for SuccessVirtualMachine {
 }
 
 /// Error that can happen during the execution.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{detail}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{detail}")]
 pub struct Error {
     /// Exact error that happened.
+    #[error(source)]
     pub detail: ErrorDetail,
     /// Prototype of the virtual machine that was passed through [`Config::virtual_machine`].
     pub prototype: host::HostVmPrototype,

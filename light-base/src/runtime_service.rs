@@ -67,6 +67,7 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{cmp, iter, mem, num::NonZero, ops, pin::Pin, time::Duration};
+use derive_more::derive;
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, Stream, StreamExt as _};
@@ -586,7 +587,7 @@ pub struct RuntimeCallSuccess {
 }
 
 /// See [`RuntimeService::pin_pinned_block_runtime`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum PinPinnedBlockRuntimeError {
     /// Subscription is dead.
     ObsoleteSubscription,
@@ -596,14 +597,14 @@ pub enum PinPinnedBlockRuntimeError {
 }
 
 /// See [`RuntimeService::pinned_runtime_specification`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum PinnedRuntimeSpecificationError {
     /// The runtime is invalid.
     InvalidRuntime(RuntimeError),
 }
 
 /// See [`RuntimeService::runtime_call`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RuntimeCallError {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(RuntimeError),
@@ -619,7 +620,7 @@ pub enum RuntimeCallError {
     /// Error during the execution of the runtime.
     ///
     /// There is no point in trying the same call again, as it would result in the same error.
-    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    #[display("Error during the execution of the runtime: {_0}")]
     Execution(RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
@@ -628,13 +629,13 @@ pub enum RuntimeCallError {
     /// there can be multiple errors.
     ///
     /// Trying the same call again might succeed.
-    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    #[display("Error trying to access the storage required for the runtime call")]
     // TODO: better display?
-    Inaccessible(Vec<RuntimeCallInaccessibleError>),
+    Inaccessible(#[error(not(source))] Vec<RuntimeCallInaccessibleError>),
 }
 
 /// See [`RuntimeCallError::Execution`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RuntimeCallExecutionError {
     /// Failed to initialize the virtual machine.
     Start(executor::host::StartErr),
@@ -645,7 +646,7 @@ pub enum RuntimeCallExecutionError {
 }
 
 /// See [`RuntimeCallError::Inaccessible`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RuntimeCallInaccessibleError {
     /// Failed to download the call proof from the network.
     Network(network_service::CallProofRequestError),
@@ -656,20 +657,20 @@ pub enum RuntimeCallInaccessibleError {
 }
 
 /// Error when analyzing the runtime.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RuntimeError {
     /// The `:code` key of the storage is empty.
     CodeNotFound,
     /// Error while parsing the `:heappages` storage value.
-    #[display(fmt = "Failed to parse `:heappages` storage value: {_0}")]
+    #[display("Failed to parse `:heappages` storage value: {_0}")]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error while compiling the runtime.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Build(executor::host::NewErr),
 }
 
 /// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum CompileAndPinRuntimeError {
     /// Background service has crashed while compiling this runtime. The crash might however not
     /// necessarily be caused by the runtime compilation.
@@ -2655,11 +2656,11 @@ async fn run_background<TPlat: PlatformRef>(
     }
 }
 
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 enum RuntimeDownloadError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     StorageQuery(sync_service::StorageQueryError),
-    #[display(fmt = "Couldn't decode header: {_0}")]
+    #[display("Couldn't decode header: {_0}")]
     InvalidHeader(header::Error),
 }
 
@@ -3297,17 +3298,17 @@ struct SingleRuntimeCallTiming {
 }
 
 /// See [`runtime_call_single_attempt`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive::Display, derive_more::Error, Clone)]
 enum SingleRuntimeCallAttemptError {
     /// Error during the execution of the runtime.
     ///
     /// There is no point in trying the same call again, as it would result in the same error.
-    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    #[display("Error during the execution of the runtime: {_0}")]
     Execution(RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
     ///
     /// Trying the same call again might succeed.
-    #[display(fmt = "Error trying to access the storage required for the runtime call: {_0}")]
+    #[display("Error trying to access the storage required for the runtime call: {_0}")]
     Inaccessible(RuntimeCallInaccessibleError),
 }

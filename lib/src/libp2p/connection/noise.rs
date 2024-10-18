@@ -1143,28 +1143,28 @@ impl fmt::Debug for HandshakeInProgress {
 }
 
 /// Potential error during the noise handshake.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HandshakeError {
     /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
     /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error in the decryption state machine.
-    #[display(fmt = "Cipher error: {_0}")]
+    #[display("Cipher error: {_0}")]
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
-    #[display(fmt = "Failed to decode payload as the libp2p-extension-to-noise payload: {_0}")]
+    #[display("Failed to decode payload as the libp2p-extension-to-noise payload: {_0}")]
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
     /// Signature of the noise public key by the libp2p key failed.
-    #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
+    #[display("Signature of the noise public key by the libp2p key failed.")]
     SignatureVerificationFailed(SignatureVerifyFailed),
 }
 
 /// Error while encrypting data.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error while encrypting the Noise payload")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error while encrypting the Noise payload")]
 pub enum EncryptError {
     /// The nonce has overflowed because too many messages have been exchanged. This error is a
     /// normal situation and will happen given sufficient time.
@@ -1172,8 +1172,8 @@ pub enum EncryptError {
 }
 
 /// Error while decoding data.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error while decrypting the Noise payload")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error while decrypting the Noise payload")]
 pub enum CipherError {
     /// Message is too small. This is likely caused by a bug either in this code or in the remote's
     /// code.
@@ -1186,7 +1186,7 @@ pub enum CipherError {
 }
 
 /// Error while decoding the handshake.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct PayloadDecodeError;
 
 struct CipherState {

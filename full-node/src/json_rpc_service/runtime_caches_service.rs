@@ -171,7 +171,7 @@ impl RuntimeCachesService {
 }
 
 /// Error potentially returned by [`RuntimeCachesService::get`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum GetError {
     /// Requested block couldn't be found in the database.
     UnknownBlock,

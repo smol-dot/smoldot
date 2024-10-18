@@ -365,7 +365,7 @@ pub struct Justification {
 }
 
 /// Error potentially returned by [`decode_block_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeBlockRequestError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
@@ -384,7 +384,7 @@ pub enum DecodeBlockRequestError {
 }
 
 /// Error potentially returned by [`decode_block_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeBlockResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

@@ -60,18 +60,19 @@ pub fn parse_jsonrpc_client_to_server(
 }
 
 /// Error produced by [`parse_jsonrpc_client_to_server`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParseClientToServerError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
     JsonRpcParse(parse::ParseError),
     /// Call concerns a notification that isn't recognized.
-    UnknownNotification(&'a str),
+    UnknownNotification(#[error(not(source))] &'a str),
     /// JSON-RPC request is valid, but there is a problem related to the method being called.
-    #[display(fmt = "{error}")]
+    #[display("{error}")]
     Method {
         /// Identifier of the request sent by the user.
         request_id: &'a str,
         /// Problem that happens.
+        // TODO: this can't be marked as error source because sources must have 'static lifetime; evaluate trade-offs
         error: MethodError<'a>,
     },
 }
@@ -85,14 +86,15 @@ pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotifica
 }
 
 /// Error produced by [`parse_notification`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParseNotificationError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     JsonRpcParse(parse::ParseError),
     /// JSON-RPC request is valid, but there is a problem related to the method being called.
-    #[display(fmt = "{_0}")]
-    Method(MethodError<'a>),
+    #[display("{_0}")]
+    // TODO: this can't be marked as error source because sources must have 'static lifetime; evaluate trade-offs
+    Method(#[error(not(source))] MethodError<'a>),
 }
 
 /// Builds a JSON call, to send it to a JSON-RPC server.
@@ -106,18 +108,18 @@ pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCa
 }
 
 /// See [`ParseClientToServerError::Method`] or [`ParseNotificationError::Method`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
-    UnknownMethod(&'a str),
+    UnknownMethod(#[error(not(source))] &'a str),
     /// Format the parameters is plain invalid.
-    #[display(fmt = "Invalid parameters format when calling {rpc_method}")]
+    #[display("Invalid parameters format when calling {rpc_method}")]
     InvalidParametersFormat {
         /// Name of the JSON-RPC method that was attempted to be called.
         rpc_method: &'static str,
     },
     /// Too many parameters have been passed to the function.
-    #[display(fmt = "{rpc_method} expects {expected} parameters, but got {actual}")]
+    #[display("{rpc_method} expects {expected} parameters, but got {actual}")]
     TooManyParameters {
         /// Name of the JSON-RPC method that was attempted to be called.
         rpc_method: &'static str,
@@ -128,7 +130,7 @@ pub enum MethodError<'a> {
     },
     /// One of the parameters of the function call is invalid.
     #[display(
-        fmt = "Parameter of index {parameter_index} is invalid when calling {rpc_method}: {error}"
+        "Parameter of index {parameter_index} is invalid when calling {rpc_method}: {error}"
     )]
     InvalidParameter {
         /// Name of the JSON-RPC method that was attempted to be called.
@@ -136,6 +138,7 @@ pub enum MethodError<'a> {
         /// 0-based index of the parameter whose format is invalid.
         parameter_index: usize,
         /// Reason why it failed.
+        #[error(source)]
         error: InvalidParameterError,
     },
     /// The parameters of the function call are missing.
@@ -171,7 +174,7 @@ impl<'a> MethodError<'a> {
 }
 
 /// The parameter of a function call is invalid.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct InvalidParameterError(serde_json::Error);
 
 /// Generates two enums, one for requests and one for responses, based on the list of supported
@@ -625,7 +628,7 @@ pub fn remove_metadata_length_prefix(
 }
 
 /// Error potentially returned by [`remove_metadata_length_prefix`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum RemoveMetadataLengthPrefixError {
     /// The length prefix at the beginning of the metadata is invalid.
     InvalidLengthPrefix,

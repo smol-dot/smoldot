@@ -915,8 +915,8 @@ impl Drop for MultiStreamWrapper {
     }
 }
 
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{message}")]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+#[display("{message}")]
 pub(crate) struct StreamError {
     message: String,
 }

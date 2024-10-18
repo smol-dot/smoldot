@@ -344,7 +344,7 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
 }
 
 /// Error while decoding data.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// The remote wants to reset the substream. This is a normal situation.
     RemoteResetDesired,

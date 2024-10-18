@@ -599,7 +599,7 @@ impl<'a> From<&'a ChainInformationFinality> for ChainInformationFinalityRef<'a> 
 }
 
 /// Error when turning a [`ChainInformation`] into a [`ValidChainInformation`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ValidityError {
     /// The finalized block doesn't use the same consensus algorithm as the one in the chain
     /// information.
@@ -623,12 +623,12 @@ pub enum ValidityError {
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
     FinalizedZeroButNonZeroAuthoritiesSetId,
     /// Error in a Babe epoch information.
-    #[display(fmt = "Error in a Babe epoch information: {_0}")]
+    #[display("Error in a Babe epoch information: {_0}")]
     InvalidBabe(BabeValidityError),
 }
 
 /// Error when checking the validity of a Babe epoch.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BabeValidityError {
     /// Babe constant should be a fraction where the numerator is inferior or equal to the
     /// denominator.

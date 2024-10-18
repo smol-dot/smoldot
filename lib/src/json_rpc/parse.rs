@@ -216,7 +216,7 @@ impl<'a> Response<'a> {
 }
 
 /// Error while parsing a request.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct ParseError(serde_json::Error);
 
 /// Builds a JSON response.

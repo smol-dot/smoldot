@@ -2141,7 +2141,7 @@ where
 }
 
 /// Error potentially returned by [`Yamux::open_substream`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum OpenSubstreamError {
     /// A `GoAway` frame has been received in the past.
     GoAwayReceived,
@@ -2150,7 +2150,7 @@ pub enum OpenSubstreamError {
 }
 
 /// Error potentially returned by [`Yamux::reset`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ResetError {
     /// Substream was already reset.
     AlreadyReset,
@@ -2159,7 +2159,7 @@ pub enum ResetError {
 }
 
 /// Error potentially returned by [`Yamux::send_goaway`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SendGoAwayError {
     /// A `GoAway` has already been sent.
     AlreadySent,
@@ -2167,22 +2167,22 @@ pub enum SendGoAwayError {
 
 /// Error potentially returned by [`Yamux::accept_pending_substream`] or
 /// [`Yamux::reject_pending_substream`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum PendingSubstreamError {
     /// No substream is pending.
     NoPendingSubstream,
 }
 
 /// Error while decoding the Yamux stream.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a substream ID that is of the same side as the local side.
-    InvalidInboundStreamId(NonZero<u32>),
+    InvalidInboundStreamId(#[error(not(source))] NonZero<u32>),
     /// Received a SYN flag with a known substream ID.
-    #[display(fmt = "Received a SYN flag with a known substream ID")]
-    UnexpectedSyn(NonZero<u32>),
+    #[display("Received a SYN flag with a known substream ID")]
+    UnexpectedSyn(#[error(not(source))] NonZero<u32>),
     /// Remote tried to send more data than it was allowed to.
     CreditsExceeded,
     /// Number of credits allocated to the local node has overflowed.

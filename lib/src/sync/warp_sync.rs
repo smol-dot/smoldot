@@ -267,7 +267,7 @@ pub fn start_warp_sync<TSrc, TRq>(
 }
 
 /// Error potentially returned by [`start_warp_sync()`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum WarpSyncInitError {
     /// Chain doesn't use the Grandpa finality algorithm.
     NotGrandpa,
@@ -1823,18 +1823,19 @@ impl fmt::Display for VerifyFragmentError {
 
 /// Problem encountered during a call to [`BuildRuntime::build`] or
 /// [`BuildChainInformation::build`] that can be attributed to the source sending invalid data.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{error}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{error}")]
 pub struct SourceMisbehavior {
     /// Source that committed the felony. `None` if the source has been removed between the moment
     /// when the request has succeeded and when it has been verified.
     pub source_id: Option<SourceId>,
     /// Error that the source made.
+    #[error(source)]
     pub error: SourceMisbehaviorTy,
 }
 
 /// See [`SourceMisbehavior::error`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SourceMisbehaviorTy {
     /// Failed to verify Merkle proof.
     InvalidMerkleProof(proof_decode::Error),
@@ -1845,16 +1846,16 @@ pub enum SourceMisbehaviorTy {
 }
 
 /// Problem encountered during a call to [`BuildRuntime::build`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BuildRuntimeError {
     /// The chain doesn't include any storage item at `:code`.
-    #[display(fmt = "The chain doesn't include any storage item at `:code`")]
+    #[display("The chain doesn't include any storage item at `:code`")]
     MissingCode,
     /// The storage item at `:heappages` is in an incorrect format.
-    #[display(fmt = "Invalid heap pages value: {_0}")]
+    #[display("Invalid heap pages value: {_0}")]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error building the runtime of the chain.
-    #[display(fmt = "Error building the runtime: {_0}")]
+    #[display("Error building the runtime: {_0}")]
     RuntimeBuild(executor::host::NewErr),
     /// Source that has sent a proof didn't behave properly.
     SourceMisbehavior(SourceMisbehavior),
@@ -2102,10 +2103,10 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 }
 
 /// Problem encountered during a call to [`BuildChainInformation::build`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BuildChainInformationError {
     /// Error building the chain information.
-    #[display(fmt = "Error building the chain information: {_0}")]
+    #[display("Error building the chain information: {_0}")]
     ChainInformationBuild(chain_information::build::Error),
     /// Source that has sent a proof didn't behave properly.
     SourceMisbehavior(SourceMisbehavior),

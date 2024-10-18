@@ -241,7 +241,7 @@ where
 }
 
 /// Error that can happen in [`Entry::or_insert`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 pub enum OrInsertError {
     /// K-bucket is full.
     Full,
@@ -345,7 +345,7 @@ where
 }
 
 /// Error that can happen in [`VacantEntry::insert`].
-#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 pub enum InsertError {
     /// K-bucket is full.
     Full,

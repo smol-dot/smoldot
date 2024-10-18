@@ -178,7 +178,7 @@ pub fn decode_partial(
 }
 
 /// Potential error when decoding a header.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum Error {
     /// Header is not long enough.
     TooShort,
@@ -193,8 +193,8 @@ pub enum Error {
     /// Error while decoding a digest item.
     DigestItemDecodeError,
     /// Digest log item with an unrecognized type.
-    #[display(fmt = "Digest log with an unrecognized type {_0}")]
-    UnknownDigestLogType(u8),
+    #[display("Digest log with an unrecognized type {_0}")]
+    UnknownDigestLogType(#[error(not(source))] u8),
     /// Found a seal that isn't the last item in the list.
     SealIsntLastItem,
     /// Bad length of an AURA seal.

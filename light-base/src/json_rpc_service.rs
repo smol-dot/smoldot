@@ -236,12 +236,12 @@ impl<TPlat: PlatformRef> Frontend<TPlat> {
 }
 
 /// Error potentially returned when queuing a JSON-RPC request.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as too many requests are already being
     /// processed.
     #[display(
-        fmt = "The JSON-RPC service cannot process this request, as too many requests are already being processed."
+        "The JSON-RPC service cannot process this request, as too many requests are already being processed."
     )]
     TooManyPendingRequests {
         /// Request that was being queued.

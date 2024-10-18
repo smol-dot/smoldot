@@ -124,7 +124,7 @@ pub fn decode_storage_or_call_proof_response(
 }
 
 /// Error potentially returned by [`decode_storage_or_call_proof_response`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum DecodeStorageCallProofResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

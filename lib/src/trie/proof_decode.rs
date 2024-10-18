@@ -1345,7 +1345,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 }
 
 /// Proof doesn't contain enough information to answer the request.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub struct IncompleteProofError();
 
 /// Storage value of the node.
@@ -1396,7 +1396,7 @@ impl<'a> fmt::Debug for StorageValue<'a> {
 }
 
 /// Possible error returned by [`decode_and_verify_proof`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Proof is in an invalid format.
     InvalidFormat,

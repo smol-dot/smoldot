@@ -296,16 +296,16 @@ impl fmt::Debug for HealthyHandshake {
 }
 
 /// Error during a connection handshake. The connection should be shut down.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HandshakeError {
     /// Protocol error during the multistream-select negotiation of the encryption protocol.
-    #[display(fmt = "Encryption protocol selection error: {_0}")]
+    #[display("Encryption protocol selection error: {_0}")]
     EncryptionMultistreamSelect(multistream_select::Error),
     /// Protocol error during the multistream-select negotiation of the multiplexing protocol.
-    #[display(fmt = "Multiplexing protocol selection error: {_0}")]
+    #[display("Multiplexing protocol selection error: {_0}")]
     MultiplexingMultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
-    #[display(fmt = "Noise handshake error: {_0}")]
+    #[display("Noise handshake error: {_0}")]
     NoiseHandshake(noise::HandshakeError),
     /// No encryption protocol in common with the remote.
     ///
@@ -316,6 +316,6 @@ pub enum HandshakeError {
     /// The remote is behaving correctly but isn't compatible with the local node.
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
-    #[display(fmt = "Noise cipher error: {_0}")]
+    #[display("Noise cipher error: {_0}")]
     Noise(noise::CipherError),
 }

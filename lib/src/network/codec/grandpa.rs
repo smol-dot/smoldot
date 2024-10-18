@@ -160,9 +160,10 @@ pub fn decode_grandpa_notification(
 }
 
 /// Error potentially returned by [`decode_grandpa_notification`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to decode a Grandpa notification")]
-pub struct DecodeGrandpaNotificationError(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode a Grandpa notification")]
+// TODO: nom doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct DecodeGrandpaNotificationError(#[error(not(source))] nom::error::ErrorKind);
 
 // Nom combinators below.
 

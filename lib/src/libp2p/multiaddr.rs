@@ -175,12 +175,12 @@ impl<T: AsRef<[u8]>> fmt::Display for Multiaddr<T> {
     }
 }
 
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
-#[display(fmt = "Unable to parse multiaddress")]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
+#[display("Unable to parse multiaddress")]
 pub struct FromBytesError;
 
 // TODO: more doc and properly derive Display
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum ParseError {
     /// A multiaddress must always start with `/`.
     InvalidMultiaddr,

@@ -24,9 +24,9 @@ use core::{fmt, num::NonZero};
 use hashbrown::HashMap;
 
 /// Error that can happen when deserializing the data.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub(super) enum DeserializeError {
-    #[display(fmt = "Failed to decode header: {_0}")]
+    #[display("Failed to decode header: {_0}")]
     Header(header::Error),
     ConsensusAlgorithmsMismatch,
     /// Some Babe-related information is missing.

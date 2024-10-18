@@ -140,9 +140,10 @@ pub fn decode_block_announce(
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to decode a block announcement")]
-pub struct DecodeBlockAnnounceError(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode a block announcement")]
+// TODO: nom doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct DecodeBlockAnnounceError(#[error(not(source))] nom::error::ErrorKind);
 
 /// Turns a block announces handshake into its SCALE-encoding ready to be sent over the wire.
 ///
@@ -198,6 +199,7 @@ pub fn decode_block_announces_handshake(
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
-#[derive(Debug, Clone, derive_more::Display)]
-#[display(fmt = "Failed to decode a block announces handshake")]
-pub struct BlockAnnouncesHandshakeDecodeError(nom::error::ErrorKind);
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+#[display("Failed to decode a block announces handshake")]
+// TODO: nom doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct BlockAnnouncesHandshakeDecodeError(#[error(not(source))] nom::error::ErrorKind);
