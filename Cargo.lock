@@ -1239,6 +1239,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "serde",
 ]
 
 [[package]]
@@ -2333,7 +2334,7 @@ dependencies = [
  "futures-executor",
  "futures-lite",
  "futures-util",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.0",
  "hex",
  "hmac 0.12.1",
  "itertools 0.13.0",
@@ -2386,7 +2387,7 @@ dependencies = [
  "futures-channel",
  "futures-lite",
  "futures-util",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.0",
  "hex",
  "humantime",
  "lru",
@@ -2419,7 +2420,7 @@ dependencies = [
  "futures-channel",
  "futures-lite",
  "futures-util",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.0",
  "hex",
  "itertools 0.13.0",
  "log",
@@ -2450,7 +2451,7 @@ dependencies = [
  "fnv",
  "futures-lite",
  "futures-util",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.0",
  "nom",
  "pin-project",
  "slab",
