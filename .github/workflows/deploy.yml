@@ -210,7 +210,7 @@ jobs:
       - uses: actions/setup-node@v4.0.3
         with:
           node-version: 16
-      - uses: denoland/setup-deno@v1
+      - uses: denoland/setup-deno@v2
         with:
           deno-version: v1.x
       # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors

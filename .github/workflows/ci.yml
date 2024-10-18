@@ -58,7 +58,7 @@ jobs:
     - uses: actions/setup-node@v4.0.3
       with:
         node-version: '16'  # An old version is used to ensure compatibility
-    - uses: denoland/setup-deno@v1
+    - uses: denoland/setup-deno@v2
       with:
         deno-version: v1.x
     - run: cd wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
