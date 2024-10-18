@@ -1033,7 +1033,7 @@ where
                             if (self.inner.next_outbound_substream.get() % 2)
                                 == (stream_id.get() % 2)
                             {
-                                return Err(Error::InvalidInboundStreamId(stream_id));
+                                return Err(Error::InvalidInboundStreamId { stream_id });
                             }
 
                             // Remote has sent a SYN flag. A new substream is to be opened.
@@ -1063,7 +1063,7 @@ where
                                     state: SubstreamState::Healthy { .. },
                                     ..
                                 }) => {
-                                    return Err(Error::UnexpectedSyn(stream_id));
+                                    return Err(Error::UnexpectedSyn { stream_id });
                                 }
                             }
 
@@ -2179,10 +2179,13 @@ pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a substream ID that is of the same side as the local side.
-    InvalidInboundStreamId(#[error(not(source))] NonZero<u32>),
+    #[display(
+        "Received a SYN flag with a substream ID that is of the same side as the local side"
+    )]
+    InvalidInboundStreamId { stream_id: NonZero<u32> },
     /// Received a SYN flag with a known substream ID.
     #[display("Received a SYN flag with a known substream ID")]
-    UnexpectedSyn(#[error(not(source))] NonZero<u32>),
+    UnexpectedSyn { stream_id: NonZero<u32> },
     /// Remote tried to send more data than it was allowed to.
     CreditsExceeded,
     /// Number of credits allocated to the local node has overflowed.

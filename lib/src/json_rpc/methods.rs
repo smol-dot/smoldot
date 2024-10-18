@@ -45,9 +45,9 @@ pub fn parse_jsonrpc_client_to_server(
     let request_id = match call_def.id_json {
         Some(id) => id,
         None => {
-            return Err(ParseClientToServerError::UnknownNotification(
-                call_def.method,
-            ))
+            return Err(ParseClientToServerError::UnknownNotification {
+                notification_name: call_def.method,
+            })
         }
     };
 
@@ -65,7 +65,11 @@ pub enum ParseClientToServerError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
     JsonRpcParse(parse::ParseError),
     /// Call concerns a notification that isn't recognized.
-    UnknownNotification(#[error(not(source))] &'a str),
+    #[display("Call concerns a notification that isn't recognized: {notification_name:?}.")]
+    UnknownNotification {
+        /// Unknown notification.
+        notification_name: &'a str,
+    },
     /// JSON-RPC request is valid, but there is a problem related to the method being called.
     #[display("{error}")]
     Method {
@@ -111,7 +115,11 @@ pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCa
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
-    UnknownMethod(#[error(not(source))] &'a str),
+    #[display("Call concerns a method that isn't recognized: {method_name:?}")]
+    UnknownMethod {
+        /// Name of the unrecognized method.
+        method_name: &'a str,
+    },
     /// Format the parameters is plain invalid.
     #[display("Invalid parameters format when calling {rpc_method}")]
     InvalidParametersFormat {
@@ -162,7 +170,7 @@ impl<'a> MethodError<'a> {
         parse::build_error_response(
             id_json,
             match self {
-                MethodError::UnknownMethod(_) => parse::ErrorResponse::MethodNotFound,
+                MethodError::UnknownMethod { .. } => parse::ErrorResponse::MethodNotFound,
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
                 | MethodError::InvalidParameter { .. }
@@ -337,7 +345,7 @@ macro_rules! define_methods {
                     }
                 )*
 
-                Err(MethodError::UnknownMethod(name))
+                Err(MethodError::UnknownMethod { method_name: name })
             }
         }
 

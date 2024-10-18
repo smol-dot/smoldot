@@ -359,7 +359,7 @@ impl ClientMainTask {
                             .notify(usize::MAX);
                         continue;
                     }
-                    Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
+                    Err(methods::ParseClientToServerError::UnknownNotification { .. }) => continue,
                     Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
                         let response = parse::build_parse_error_response();
                         let mut responses_queue =

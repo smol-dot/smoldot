@@ -459,7 +459,9 @@ impl NetworkService {
                     }
                 } else {
                     // TODO: support WebSocket server
-                    return Err(InitError::BadListenMultiaddr(listen_address));
+                    return Err(InitError::BadListenMultiaddr {
+                        address: listen_address,
+                    });
                 }
             };
 
@@ -807,8 +809,11 @@ pub enum InitError {
     #[display("I/O error when creating listener for {_0}: {_1}")]
     ListenerIo(Multiaddr, #[error(source)] io::Error),
     /// A listening address passed through the configuration isn't valid.
-    #[display("A listening address passed through the configuration isn't valid: {_0}")]
-    BadListenMultiaddr(#[error(not(source))] Multiaddr),
+    #[display("A listening address passed through the configuration isn't valid: {address}")]
+    BadListenMultiaddr {
+        /// The faulty address.
+        address: Multiaddr,
+    },
 }
 
 /// Error returned by [`NetworkService::blocks_request`].

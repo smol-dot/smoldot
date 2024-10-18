@@ -193,8 +193,11 @@ pub enum Error {
     /// Error while decoding a digest item.
     DigestItemDecodeError,
     /// Digest log item with an unrecognized type.
-    #[display("Digest log with an unrecognized type {_0}")]
-    UnknownDigestLogType(#[error(not(source))] u8),
+    #[display("Digest log with an unrecognized type {unknown_type}")]
+    UnknownDigestLogType {
+        /// Identifier of the type.
+        unknown_type: u8,
+    },
     /// Found a seal that isn't the last item in the list.
     SealIsntLastItem,
     /// Bad length of an AURA seal.
@@ -1377,7 +1380,7 @@ fn decode_item(
 
             Ok((item, slice))
         }
-        ty => Err(Error::UnknownDigestLogType(ty)),
+        ty => Err(Error::UnknownDigestLogType { unknown_type: ty }),
     }
 }
 
