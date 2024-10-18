@@ -102,14 +102,12 @@ fn add_chain(
             // updated regularly to account for changes in the implementation.
             if allocator::total_alloc_bytes() >= usize::MAX - 400 * 1024 * 1024 {
                 client_lock.chains.remove(outer_chain_id);
-                unsafe {
-                    let error = "Wasm node is running low on memory and will prevent any new chain from being added";
-                    bindings::chain_initialized(
-                        outer_chain_id_u32,
-                        u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
-                        u32::try_from(error.as_bytes().len()).unwrap(),
-                    );
-                }
+                let error = "Wasm node is running low on memory and will prevent any new chain from being added";
+                bindings::chain_initialized(
+                    outer_chain_id_u32,
+                    u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(error.as_bytes().len()).unwrap(),
+                );
                 return;
             }
 
@@ -141,14 +139,12 @@ fn add_chain(
                 Ok(c) => c,
                 Err(error) => {
                     client_lock.chains.remove(outer_chain_id);
-                    unsafe {
                         let error = error.to_string();
                         bindings::chain_initialized(
                             outer_chain_id_u32,
                             u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
                             u32::try_from(error.as_bytes().len()).unwrap(),
                         );
-                    }
                     return;
                 }
             };
@@ -180,10 +176,7 @@ fn add_chain(
                 *json_rpc_responses_rx = json_rpc_responses;
             }
 
-            unsafe {
-                bindings::chain_initialized(outer_chain_id_u32, 0, 0);
-            }
-
+            bindings::chain_initialized(outer_chain_id_u32, 0, 0);
         },
     );
 
@@ -331,7 +324,7 @@ struct JsonRpcResponsesNonEmptyWaker {
 
 impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
-        unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
+        bindings::json_rpc_responses_non_empty(self.chain_id)
     }
 }
 
@@ -350,8 +343,6 @@ fn advance_execution() {
     runnable.run();
 
     if !TASKS_QUEUE.is_empty() {
-        unsafe {
-            bindings::advance_execution_ready();
-        }
+        bindings::advance_execution_ready();
     }
 }

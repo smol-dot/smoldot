@@ -53,7 +53,7 @@
 use alloc::vec::Vec;
 
 #[link(wasm_import_module = "smoldot")]
-extern "C" {
+unsafe extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
     /// the WebAssembly at offset `message_ptr` and with length `message_len`.
     ///
@@ -81,20 +81,20 @@ extern "C" {
     ///
     /// Beyond the `panic` function itself, any other FFI function that throws must similarly
     /// behave like `abort` and prevent any further execution.
-    pub fn panic(message_ptr: u32, message_len: u32);
+    pub unsafe fn panic(message_ptr: u32, message_len: u32);
 
     /// Called in response to [`add_chain`] once the initialization of the chain is complete.
     ///
     /// If `error_msg_ptr` is equal to 0, then the chain initialization is successful. Otherwise,
     /// `error_msg_ptr` and `error_msg_len` designate a buffer in the memory of the WebAssembly
     /// virtual machine where a UTF-8 diagnostic error message can be found.
-    pub fn chain_initialized(chain_id: u32, error_msg_ptr: u32, error_msg_len: u32);
+    pub safe fn chain_initialized(chain_id: u32, error_msg_ptr: u32, error_msg_len: u32);
 
     /// Fills the buffer of the WebAssembly virtual machine with random data, starting at `ptr`
     /// and for `len` bytes.
     ///
     /// This data will be used in order to generate secrets. Do not use a dummy implementation!
-    pub fn random_get(ptr: u32, len: u32);
+    pub unsafe fn random_get(ptr: u32, len: u32);
 
     /// Returns the system clock in number of microseconds since the UNIX epoch, ignoring leap
     /// seconds.
@@ -103,11 +103,11 @@ extern "C" {
     ///
     /// Must never return a negative number. Implementers should be aware that the system clock
     /// can be negative, and abort execution if that is the case.
-    pub fn unix_timestamp_us() -> u64;
+    pub safe fn unix_timestamp_us() -> u64;
 
     /// Returns the number of microseconds since an especified point in time. Must never decrease
     /// over time.
-    pub fn monotonic_clock_us() -> u64;
+    pub safe fn monotonic_clock_us() -> u64;
 
     /// Copies the entire content of the buffer with the given index to the memory of the
     /// WebAssembly at offset `target_pointer`.
@@ -117,12 +117,12 @@ extern "C" {
     /// "buffer index" to the buffer it wants to provide. The Rust code then calls the
     /// [`buffer_size`] and [`buffer_copy`] functions in order to obtain the length and content
     /// of the buffer.
-    pub fn buffer_copy(buffer_index: u32, target_pointer: u32);
+    pub unsafe fn buffer_copy(buffer_index: u32, target_pointer: u32);
 
     /// Returns the size (in bytes) of the buffer with the given index.
     ///
     /// See the documentation of [`buffer_copy`] for context.
-    pub fn buffer_size(buffer_index: u32) -> u32;
+    pub safe fn buffer_size(buffer_index: u32) -> u32;
 
     /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
@@ -130,7 +130,7 @@ extern "C" {
     /// of 0.
     ///
     /// This function might be called spuriously, however this behavior must not be relied upon.
-    pub fn json_rpc_responses_non_empty(chain_id: u32);
+    pub safe fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -139,13 +139,13 @@ extern "C" {
     ///
     /// The log target and message is a UTF-8 string found in the memory of the WebAssembly
     /// virtual machine at offset `ptr` and with length `len`.
-    pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
+    pub safe fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
     /// Called when [`advance_execution`] should be executed again.
     ///
     /// This function might be called from within [`advance_execution`], in which case
     /// [`advance_execution`] should be called again immediately after it returns.
-    pub fn advance_execution_ready();
+    pub safe fn advance_execution_ready();
 
     /// After at least `milliseconds` milliseconds have passed, [`timer_finished`] must be called.
     ///
@@ -159,7 +159,7 @@ extern "C" {
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
     ///
     /// `milliseconds` never contains a negative number, `NaN` or infinite.
-    pub fn start_timer(milliseconds: f64);
+    pub safe fn start_timer(milliseconds: f64);
 
     /// Must return the host supports connecting to a certain type of address.
     ///
@@ -171,7 +171,7 @@ extern "C" {
     ///
     /// Returns a non-zero value if the address is supported. Returns `0` if the address isn't
     /// supported.
-    pub fn connection_type_supported(ty: u8) -> u32;
+    pub safe fn connection_type_supported(ty: u8) -> u32;
 
     /// Must initialize a new connection that tries to connect to the given address.
     ///
@@ -180,11 +180,11 @@ extern "C" {
     ///
     /// - One `type` byte (see below).
     /// - Two big-endian bytes representing the port (either TCP or UDP depending on the `type`)
-    /// to connect to.
+    ///   to connect to.
     /// - (optional) The 32 bytes SHA-256 hash of the certificate of the remote.
     /// - An UTF-8-encoded IP address or domain name. Use the `addr_len` parameter to determine
-    /// its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
-    /// encoded according to RFC5952.
+    ///   its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
+    ///   encoded according to RFC5952.
     ///
     /// The `type` byte defines the type of connection and whether the optional field is present:
     ///
@@ -220,7 +220,7 @@ extern "C" {
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
     /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
-    pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32);
+    pub safe fn connection_new(id: u32, addr_ptr: u32, addr_len: u32);
 
     /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
@@ -235,7 +235,7 @@ extern "C" {
     ///
     /// > **Note**: In JavaScript, remember to unregister event handlers before calling for
     /// >           example `WebSocket.close()`.
-    pub fn reset_connection(id: u32);
+    pub safe fn reset_connection(id: u32);
 
     /// Queues a new outbound substream opening. The [`connection_stream_opened`] function must
     /// later be called when the substream has been successfully opened.
@@ -247,7 +247,7 @@ extern "C" {
     /// >           to open, as this is not supposed to happen. If you need to handle such a
     /// >           situation, either try again opening a substream again or reset the entire
     /// >           connection.
-    pub fn connection_stream_open(connection_id: u32);
+    pub safe fn connection_stream_open(connection_id: u32);
 
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must
     /// currently be in the `Open` state.
@@ -256,7 +256,7 @@ extern "C" {
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
-    pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
+    pub safe fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream.
     ///
@@ -280,7 +280,7 @@ extern "C" {
     ///
     /// The size of the buffer must not exceed the number of writable bytes of the given stream.
     /// Use [`stream_writable_bytes`] to notify that more data can be sent on the stream.
-    pub fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
+    pub safe fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
 
     /// Close the sending side of the given stream of the given connection.
     ///
@@ -295,7 +295,7 @@ extern "C" {
     /// The connection associated with that stream (and, in the case of a multi-stream connection,
     /// the stream itself must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
-    pub fn stream_send_close(connection_id: u32, stream_id: u32);
+    pub safe fn stream_send_close(connection_id: u32, stream_id: u32);
 
     /// Called when the Wasm execution enters the context of a certain task. This is useful for
     /// debugging purposes.
@@ -304,13 +304,13 @@ extern "C" {
     ///
     /// The name of the task is a UTF-8 string found in the memory of the WebAssembly virtual
     /// machine at offset `ptr` and with length `len`.
-    pub fn current_task_entered(ptr: u32, len: u32);
+    pub safe fn current_task_entered(ptr: u32, len: u32);
 
     /// Called when the Wasm execution leave the context of a certain task. This is useful for
     /// debugging purposes.
     ///
     /// Only one task can be currently executing at any time.
-    pub fn current_task_exit();
+    pub safe fn current_task_exit();
 }
 
 /// See [`stream_send`].
@@ -331,7 +331,7 @@ pub struct StreamSendIoVector {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init(max_log_level: u32) {
     crate::init(max_log_level);
 }
@@ -342,7 +342,7 @@ pub extern "C" fn init(max_log_level: u32) {
 ///
 /// After this function is called or during a call to this function, [`advance_execution_ready`]
 /// might be called, indicating that [`advance_execution`] should be called again.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn advance_execution() {
     super::advance_execution()
 }
@@ -377,7 +377,7 @@ pub extern "C" fn advance_execution() {
 /// called by smoldot.
 /// It is possible to call [`remove_chain`] while the initialization is still in progress in
 /// order to cancel it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn add_chain(
     chain_spec_buffer_index: u32,
     database_content_buffer_index: u32,
@@ -398,7 +398,7 @@ pub extern "C" fn add_chain(
 /// subscriptions and cancels all in-progress requests corresponding to that chain.
 ///
 /// Can be called on a chain which hasn't finished initializing yet.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
 }
@@ -428,7 +428,7 @@ pub extern "C" fn remove_chain(chain_id: u32) {
 /// - 0 on success.
 /// - 1 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
     super::json_rpc_send(get_buffer(text_buffer_index), chain_id)
 }
@@ -449,7 +449,7 @@ pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
 ///
 /// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> u32 {
     super::json_rpc_responses_peek(chain_id)
 }
@@ -471,13 +471,13 @@ pub struct JsonRpcResponseInfo {
 ///
 /// It is forbidden to call this function on a chain that hasn't finished initializing yet, or a
 /// chain that was created with `json_rpc_running` equal to 0.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn timer_finished() {
     crate::timers::timer_finished();
 }
@@ -495,7 +495,7 @@ pub extern "C" fn timer_finished() {
 ///
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
 /// the local node's TLS certificate.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
     handshake_ty_buffer_index: u32,
@@ -519,7 +519,7 @@ pub extern "C" fn connection_multi_stream_set_handshake_info(
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
 /// See also [`connection_new`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
 }
@@ -534,7 +534,7 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
     crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
 }
@@ -549,7 +549,7 @@ pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_
 /// For the `outbound` parameter, pass `0` if the substream has been opened by the remote, and any
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
     crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
 }
@@ -566,7 +566,7 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
 /// index can be de-assigned and buffer destroyed once this function returns.
 ///
 /// See also [`connection_new`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
     crate::platform::connection_reset(connection_id, get_buffer(buffer_index));
 }
@@ -587,7 +587,7 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 /// index can be de-assigned and buffer destroyed once this function returns.
 ///
 /// See also [`connection_new`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_reset(connection_id, stream_id, get_buffer(buffer_index));
 }
