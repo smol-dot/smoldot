@@ -159,11 +159,11 @@ pub fn decode_identify_response(
 }
 
 /// Error potentially returned by [`decode_identify_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeIdentifyResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
     /// Couldn't decode the public key of the remote.
-    #[display(fmt = "Failed to decode remote public key: {_0}")]
+    #[display("Failed to decode remote public key: {_0}")]
     InvalidPublicKey(FromProtobufEncodingError),
 }

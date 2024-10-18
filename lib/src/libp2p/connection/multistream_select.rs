@@ -359,17 +359,17 @@ impl<P> fmt::Debug for InProgress<P> {
 }
 
 /// Error that can happen during the negotiation.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
     /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error while decoding a frame length, or frame size limit reached.
-    #[display(fmt = "LEB128 frame error: {_0}")]
+    #[display("LEB128 frame error: {_0}")]
     FrameLength(read_write::IncomingBytesTakeLeb128Error),
     /// Error while decoding a frame.
-    #[display(fmt = "LEB128 frame error: {_0}")]
+    #[display("LEB128 frame error: {_0}")]
     Frame(read_write::IncomingBytesTakeError),
     /// Unknown handshake or unknown multistream-select protocol version.
     BadHandshake,

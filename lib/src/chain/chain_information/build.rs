@@ -92,18 +92,20 @@ pub enum InProgress {
 }
 
 /// Problem encountered during the chain building process.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "While calling {call:?}: {error}")]
+    #[display("While calling {call:?}: {error}")]
     WasmStart {
         call: RuntimeCall,
+        #[error(source)]
         error: host::StartErr,
     },
     /// Error while running the Wasm virtual machine.
-    #[display(fmt = "While calling {call:?}: {error}")]
+    #[display("While calling {call:?}: {error}")]
     WasmVm {
         call: RuntimeCall,
+        #[error(source)]
         error: runtime_call::ErrorDetail,
     },
     /// Runtime has called an offchain worker host function.
@@ -125,7 +127,7 @@ pub enum Error {
     /// Failed to decode the output of the `GrandpaApi_current_set_id` runtime call.
     GrandpaCurrentSetIdOutputDecode,
     /// The combination of the information retrieved from the runtime doesn't make sense together.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidChainInformation(chain_information::ValidityError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,

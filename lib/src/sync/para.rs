@@ -88,9 +88,10 @@ pub fn decode_persisted_validation_data_return_value(
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error decoding persisted validation data")]
-pub struct Error(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error decoding persisted validation data")]
+// TODO: nom doesn't implement the Error trait; remove not(source) at some point
+pub struct Error(#[error(not(source))] nom::error::ErrorKind);
 
 /// Decoded persisted validation data.
 // TODO: document and explain

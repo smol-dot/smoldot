@@ -126,13 +126,13 @@ pub struct Success {
 }
 
 /// Error that can happen during the block production.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     WasmVm(runtime_call::ErrorDetail),
     /// Error while initializing the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VmInit(host::StartErr),
     /// Overflow when incrementing block height.
     BlockHeightOverflow,
@@ -143,19 +143,21 @@ pub enum Error {
     /// Error while parsing output of `BlockBuilder_apply_extrinsic`.
     BadApplyExtrinsicOutput,
     /// Applying an inherent extrinsic has returned a [`DispatchError`].
-    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
+    #[display("Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicDispatchError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
         /// Error returned by the runtime.
+        #[error(source)]
         error: DispatchError,
     },
     /// Applying an inherent extrinsic has returned a [`TransactionValidityError`].
-    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
+    #[display("Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicTransactionValidityError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
         /// Error returned by the runtime.
+        #[error(source)]
         error: TransactionValidityError,
     },
 }
@@ -781,18 +783,18 @@ fn parse_apply_extrinsic_output(
 // TODO: some parsers below are common with the tx-pool ; figure out how/whether they should be merged
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Transaction is invalid: {_0}")]
+    #[display("Transaction is invalid: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
+    #[display("Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 
 /// An invalid transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum InvalidTransaction {
     /// The call of the transaction is not expected.
     Call,
@@ -820,8 +822,8 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
     /// overweight blocks and therefore if found, invalidates the block.
@@ -832,26 +834,26 @@ pub enum InvalidTransaction {
 }
 
 /// An unknown transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum UnknownTransaction {
     /// Could not lookup some information that is required to validate the transaction.
     CannotLookup,
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
 }
 
 /// Reason why a dispatch call failed.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum DispatchError {
     /// Failed to lookup some data.
     CannotLookup,
     /// A bad origin.
     BadOrigin,
     /// A custom error in a module.
-    #[display(fmt = "Error in module #{index}, error number #{error}")]
+    #[display("Error in module #{index}, error number #{error}")]
     Module {
         /// Module index, matching the metadata module index.
         index: u8,

@@ -534,36 +534,36 @@ impl LightSyncState {
 }
 
 /// Error that can happen when parsing a chain spec JSON.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Failed to parse chain spec")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Failed to parse chain spec")]
 pub struct ParseError(ParseErrorInner);
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 enum ParseErrorInner {
     Serde(serde_json::Error),
     Other,
 }
 
 /// Error when building the chain information from the genesis storage.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Error while building the chain information.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     BuildChainInformation(build::Error),
     /// Failed to decode heap pages from the storage.
-    #[display(fmt = "Failed to decode heap pages from the storage: {_0}")]
+    #[display("Failed to decode heap pages from the storage: {_0}")]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
-    #[display(fmt = "Error when initializing the virtual machine: {_0}")]
+    #[display("Error when initializing the virtual machine: {_0}")]
     VmInitialization(executor::host::NewErr),
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,
 }
 
 /// Error when building the chain information corresponding to a checkpoint.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CheckpointToChainInformationError {
     /// The checkpoint corresponds to the genesis block.
     GenesisBlockCheckpoint,
@@ -572,6 +572,6 @@ pub enum CheckpointToChainInformationError {
     /// Found a Grandpa authority with a weight of 0.
     InvalidGrandpaAuthorityWeight,
     /// Information found in the checkpoint is invalid.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidData(ValidityError),
 }

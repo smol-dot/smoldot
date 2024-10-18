@@ -243,14 +243,15 @@ impl JsonRpcService {
 }
 
 /// Error potentially returned by [`JsonRpcService::new`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InitError {
     /// Failed to listen on the server address.
-    #[display(fmt = "Failed to listen on TCP address {bind_address}: {error}")]
+    #[display("Failed to listen on TCP address {bind_address}: {error}")]
     ListenError {
         /// Address that was attempted.
         bind_address: SocketAddr,
         /// Error returned by the operating system.
+        #[error(source)]
         error: io::Error,
     },
 }

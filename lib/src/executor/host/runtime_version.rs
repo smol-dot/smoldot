@@ -62,17 +62,17 @@ pub fn find_embedded_runtime_version(
 }
 
 /// Error returned by [`find_embedded_runtime_version`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum FindEmbeddedRuntimeVersionError {
     /// Error while finding the custom section.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FindSections(FindEncodedEmbeddedRuntimeVersionApisError),
     /// Only one of the two desired custom sections is present.
     CustomSectionsPresenceMismatch,
     /// Error while decoding the runtime version.
     RuntimeVersionDecode,
     /// Error while decoding the runtime APIs.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeApisDecode(CoreVersionApisFromSliceErr),
 }
 
@@ -159,22 +159,22 @@ pub fn find_encoded_embedded_runtime_version_apis(
 }
 
 /// Error returned by [`find_encoded_embedded_runtime_version_apis`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum FindEncodedEmbeddedRuntimeVersionApisError {
     /// Failed to parse Wasm binary.
     FailedToParse,
 }
 
 /// Error while executing `Core_version`.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum CoreVersionError {
     /// Error while decoding the output.
     Decode,
     /// Error while starting the execution of the `Core_version` function.
-    #[display(fmt = "Error while starting the execution of the `Core_version` function: {_0}")]
+    #[display("Error while starting the execution of the `Core_version` function: {_0}")]
     Start(host::StartErr),
     /// Error during the execution of the `Core_version` function.
-    #[display(fmt = "Error during the execution of the `Core_version` function: {_0}")]
+    #[display("Error during the execution of the `Core_version` function: {_0}")]
     Run(host::Error),
     /// `Core_version` used a host function that is forbidden in this context.
     ForbiddenHostFunction,
@@ -411,8 +411,8 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
 }
 
 /// Error potentially returned by [`CoreVersionApisRefIter::from_slice_no_length`].
-#[derive(Debug, Clone, derive_more::Display)]
-#[display(fmt = "Error decoding core version APIs")]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+#[display("Error decoding core version APIs")]
 pub struct CoreVersionApisFromSliceErr();
 
 /// Hashes the name of an API in order to be able to compare it to [`CoreVersionApi::name_hash`].

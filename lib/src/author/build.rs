@@ -495,10 +495,10 @@ impl Seal {
 }
 
 /// Error that can happen during the block production.
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum Error {
     /// Error while producing the block in the runtime.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Runtime(runtime::Error),
     /// Runtime has generated an invalid block header.
     #[from(ignore)]

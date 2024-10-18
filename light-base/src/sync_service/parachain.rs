@@ -1343,10 +1343,10 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 }
 
 /// Error that can happen when fetching the parachain head corresponding to a relay chain block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 enum ParaheadError {
     /// Error while performing call request over the network.
-    #[display(fmt = "Error while performing call request over the network: {_0}")]
+    #[display("Error while performing call request over the network: {_0}")]
     RuntimeCall(runtime_service::RuntimeCallError),
     /// Error pinning the runtime of the block.
     PinRuntimeError(runtime_service::PinPinnedBlockRuntimeError),
@@ -1355,7 +1355,7 @@ enum ParaheadError {
     /// Error while decoding the output of the call.
     ///
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
-    #[display(fmt = "Error while decoding the output of the call: {_0}")]
+    #[display("Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
 }
 

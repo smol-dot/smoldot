@@ -4143,10 +4143,10 @@ pub enum GossipKind {
 }
 
 /// Error returned by [`ChainNetwork::add_chain`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum AddChainError {
     /// The genesis hash and fork id are identical to the ones of an existing chain.
-    #[display(fmt = "Genesis hash and fork id are identical to the ones of an existing chain.")]
+    #[display("Genesis hash and fork id are identical to the ones of an existing chain.")]
     Duplicate {
         /// Identifier of the chain that uses the same genesis hash and fork id.
         existing_identical: ChainId,
@@ -4154,7 +4154,7 @@ pub enum AddChainError {
 }
 
 /// Error returned by [`ChainNetwork::remove_chain`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum RemoveChainError {
     /// Chain is still in use.
     InUse,
@@ -4385,29 +4385,29 @@ pub enum Event<TConn> {
 
 /// See [`Event::ProtocolError`].
 // TODO: reexport these error types
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ProtocolError {
     /// Error in an incoming substream.
-    #[display(fmt = "Error in an incoming substream: {_0}")]
+    #[display("Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
-    #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
+    #[display("Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
-    #[display(fmt = "Error while decoding a received block announce: {_0}")]
+    #[display("Error while decoding a received block announce: {_0}")]
     BadBlockAnnounce(codec::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
-    #[display(fmt = "Error while decoding a received Grandpa notification: {_0}")]
+    #[display("Error while decoding a received Grandpa notification: {_0}")]
     BadGrandpaNotification(codec::DecodeGrandpaNotificationError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
-    #[display(fmt = "Error while decoding a received blocks request: {_0}")]
+    #[display("Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(codec::DecodeBlockRequestError),
 }
 
 /// Error potentially returned by [`ChainNetwork::gossip_open`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum OpenGossipError {
     /// No healthy established connection is available to open the link.
     NoConnection,
@@ -4416,21 +4416,21 @@ pub enum OpenGossipError {
 }
 
 /// Error potentially returned by [`ChainNetwork::gossip_close`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum CloseGossipError {
     /// There exists no outgoing nor ingoing attempt at a gossip link.
     NotOpen,
 }
 
 /// Error potentially returned when starting a request.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum StartRequestError {
     /// There is no valid connection to the given peer on which the request can be started.
     NoConnection,
 }
 
 /// Error potentially returned when starting a request that might be too large.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum StartRequestMaybeTooLargeError {
     /// There is no valid connection to the given peer on which the request can be started.
     NoConnection,
@@ -4460,33 +4460,33 @@ pub enum RequestResult {
 }
 
 /// Error returned by [`ChainNetwork::start_blocks_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
     /// Error while decoding the response returned by the peer.
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeBlockResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_storage_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageProofRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum CallProofRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
@@ -4505,36 +4505,36 @@ impl CallProofRequestError {
 }
 
 /// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum GrandpaWarpSyncRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeGrandpaWarpSyncResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_state_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum StateRequestError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(RequestError),
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     Decode(codec::DecodeStateResponseError),
 }
 
 /// Error during [`ChainNetwork::start_kademlia_find_node_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum KademliaFindNodeError {
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RequestFailed(RequestError),
     /// Failed to decode the response.
-    #[display(fmt = "Response decoding error: {_0}")]
+    #[display("Response decoding error: {_0}")]
     DecodeError(codec::DecodeFindNodeResponseError),
 }
 
 /// Error potentially returned when queueing a notification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum QueueNotificationError {
     /// There is no valid substream to the given peer on which the notification can be sent.
     NoConnection,
@@ -4661,15 +4661,15 @@ impl fmt::Debug for EncodedBlockAnnounceHandshake {
 }
 
 /// Error that can happen when trying to open an outbound block announces notifications substream.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum GossipConnectError {
     /// Error in the underlying protocol.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Substream(NotificationsOutErr),
     /// Error decoding the block announces handshake.
     HandshakeDecode(BlockAnnouncesHandshakeDecodeError),
     /// Mismatch between the genesis hash of the remote and the local genesis hash.
-    #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]
+    #[display("Mismatch between the genesis hash of the remote and the local genesis hash")]
     GenesisMismatch {
         /// Hash of the genesis block of the chain according to the local node.
         local_genesis: [u8; 32],

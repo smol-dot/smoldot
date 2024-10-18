@@ -55,7 +55,7 @@ pub fn decode_payment_info(
 }
 
 /// Potential error when decoding payment information runtime output.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecodeError {
     /// Failed to parse the return value of `TransactionPaymentApi_query_info`.
     ParseError,

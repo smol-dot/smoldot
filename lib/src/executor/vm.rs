@@ -1322,7 +1322,7 @@ impl TryFrom<wasmtime::ValType> for ValueType {
 }
 
 /// Error used in the conversions between VM implementation and the public API.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct UnsupportedTypeError;
 
 /// Outcome of the [`run`](VirtualMachine::run) function.
@@ -1357,25 +1357,25 @@ pub enum ExecOutcome {
 }
 
 /// Opaque error that happened during execution, such as an `unreachable` instruction.
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{_0}")]
-pub struct Trap(String);
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
+#[display("{_0}")]
+pub struct Trap(#[error(not(source))] String);
 
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum NewErr {
     /// Error while compiling the WebAssembly code.
     ///
     /// Contains an opaque error message.
-    #[display(fmt = "{_0}")]
-    InvalidWasm(String),
+    #[display("{_0}")]
+    InvalidWasm(#[error(not(source))] String),
     /// Error while instantiating the WebAssembly module.
     ///
     /// Contains an opaque error message.
-    #[display(fmt = "{_0}")]
-    Instantiation(String),
+    #[display("{_0}")]
+    Instantiation(#[error(not(source))] String),
     /// Failed to resolve a function imported by the module.
-    #[display(fmt = "Unresolved function `{module_name}`:`{function}`")]
+    #[display("Unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionImport {
         /// Name of the function that was unresolved.
         function: String,
@@ -1384,11 +1384,11 @@ pub enum NewErr {
     },
     /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
     /// this is allowed in the Substrate/Polkadot specification.
-    #[display(fmt = "Start function not supported")]
+    #[display("Start function not supported")]
     // TODO: figure this out
     StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
-    #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
+    #[display("If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
     /// Wasm module imports a memory that isn't named "memory".
     MemoryNotNamedMemory,
@@ -1402,41 +1402,36 @@ pub enum NewErr {
     ImportTypeNotSupported,
 }
 
-// TODO: an implementation of the `Error` trait is required in order to interact with wasmtime, but it's not possible to implement this trait on non-std yet
-#[cfg(feature = "wasmtime")]
-#[cfg_attr(docsrs, doc(cfg(feature = "wasmtime")))]
-impl std::error::Error for NewErr {}
-
 /// Error that can happen when calling [`Prepare::start`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum StartErr {
     /// Couldn't find the requested function.
-    #[display(fmt = "Function to start was not found.")]
+    #[display("Function to start was not found.")]
     FunctionNotFound,
     /// The requested function has been found in the list of exports, but it is not a function.
-    #[display(fmt = "Symbol to start is not a function.")]
+    #[display("Symbol to start is not a function.")]
     NotAFunction,
     /// The requested function has a signature that isn't supported.
-    #[display(fmt = "Function to start uses unsupported signature.")]
+    #[display("Function to start uses unsupported signature.")]
     SignatureNotSupported,
     /// The types of the provided parameters don't match the signature.
-    #[display(fmt = "The types of the provided parameters don't match the signature.")]
+    #[display("The types of the provided parameters don't match the signature.")]
     InvalidParameters,
 }
 
 /// Error while reading memory.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Out of bounds when accessing virtual machine memory")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Out of bounds when accessing virtual machine memory")]
 pub struct OutOfBoundsError;
 
 /// Error that can happen when resuming the execution of a function.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum RunErr {
     /// The state machine is poisoned.
-    #[display(fmt = "State machine is poisoned")]
+    #[display("State machine is poisoned")]
     Poisoned,
     /// Passed a wrong value back.
-    #[display(fmt = "Expected value of type {expected:?} but got {obtained:?} instead")]
+    #[display("Expected value of type {expected:?} but got {obtained:?} instead")]
     BadValueTy {
         /// Type of the value that was expected.
         expected: Option<ValueType>,
@@ -1446,7 +1441,7 @@ pub enum RunErr {
 }
 
 /// Error that can happen when calling [`VirtualMachinePrototype::global_value`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum GlobalValueErr {
     /// Couldn't find requested symbol.
     NotFound,

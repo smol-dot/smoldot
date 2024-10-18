@@ -102,8 +102,9 @@ pub fn decode_partial_grandpa_commit(
 }
 
 /// Error potentially returned by [`decode_grandpa_commit`].
-#[derive(Debug, derive_more::Display)]
-pub struct CommitDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: nom::Err doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+pub struct CommitDecodeError<'a>(#[error(not(source))] nom::Err<nom::error::Error<&'a [u8]>>);
 
 // TODO: document and explain
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,9 +360,10 @@ impl<'a> Iterator for VotesAncestriesIter<'a> {
 impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 
 /// Potential error when decoding a Grandpa justification.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Justification parsing error: {_0:?}")]
-pub struct JustificationDecodeError(nom::error::ErrorKind);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: nom::Err doesn't implement the Error trait at the moment; remove error(not(source)) eventually
+#[display("Justification parsing error: {_0:?}")]
+pub struct JustificationDecodeError(#[error(not(source))] nom::error::ErrorKind);
 
 /// `Nom` combinator that parses a justification.
 fn grandpa_justification<'a>(

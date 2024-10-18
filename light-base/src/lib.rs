@@ -1083,29 +1083,29 @@ impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPl
 }
 
 /// Error potentially returned by [`Client::add_chain`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum AddChainError {
     /// Failed to decode the specification of the chain.
-    #[display(fmt = "Failed to decode chain specification: {_0}")]
+    #[display("Failed to decode chain specification: {_0}")]
     ChainSpecParseError(chain_spec::ParseError),
     /// The chain specification must contain either the storage of the genesis block, or a
     /// checkpoint. Neither was provided.
-    #[display(fmt = "Either a checkpoint or the genesis storage must be provided")]
+    #[display("Either a checkpoint or the genesis storage must be provided")]
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
-    #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
+    #[display("Invalid checkpoint in chain specification: {_0}")]
     InvalidCheckpoint(chain_spec::CheckpointToChainInformationError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
-    #[display(fmt = "Failed to build genesis chain information: {_0}")]
+    #[display("Failed to build genesis chain information: {_0}")]
     InvalidGenesisStorage(chain_spec::FromGenesisStorageError),
     /// The list of potential relay chains doesn't contain any relay chain with the name indicated
     /// in the chain specification of the parachain.
-    #[display(fmt = "Couldn't find relevant relay chain")]
+    #[display("Couldn't find relevant relay chain")]
     NoRelayChainFound,
     /// The list of potential relay chains contains more than one relay chain with the name
     /// indicated in the chain specification of the parachain.
-    #[display(fmt = "Multiple relevant relay chains found")]
+    #[display("Multiple relevant relay chains found")]
     MultipleRelayChains,
 }
 

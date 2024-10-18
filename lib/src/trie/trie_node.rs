@@ -128,7 +128,7 @@ pub fn encode<'a>(
 }
 
 /// Error potentially returned by [`encode`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum EncodeError {
     /// Nodes that have no children nor storage value are invalid unless they are the root node.
     PartialKeyButNoChildrenNoStorageValue,
@@ -577,7 +577,7 @@ impl<'a> fmt::Debug for DecodedPartialKey<'a> {
 }
 
 /// Possible error returned by [`decode`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Node value is empty.
     Empty,

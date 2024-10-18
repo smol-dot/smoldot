@@ -89,7 +89,7 @@ pub struct VerifySuccess {
 }
 
 /// Failure to verify a block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum VerifyError {
     /// The seal (containing the signature of the authority) is missing from the header.
     MissingSeal,

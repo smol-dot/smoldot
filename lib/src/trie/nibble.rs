@@ -101,10 +101,10 @@ impl fmt::Debug for Nibble {
 }
 
 /// Error when building a [`Nibble`] from a `u8`.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum NibbleFromU8Error {
     /// The integer value is too large.
-    #[display(fmt = "Value is too large")]
+    #[display("Value is too large")]
     TooLarge,
 }
 

@@ -810,7 +810,7 @@ where
 }
 
 /// See [`BasicPeeringStrategy::decrease_address_connections`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum DecreaseAddressConnectionsError {
     /// Address isn't known to the collection.
     UnknownAddress,

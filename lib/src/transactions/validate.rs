@@ -105,7 +105,7 @@ pub struct ValidTransaction {
 }
 
 /// An invalid transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum InvalidTransaction {
     /// The call of the transaction is not expected.
     Call,
@@ -133,8 +133,8 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
     /// overweight blocks and therefore if found, invalidates the block.
@@ -145,29 +145,29 @@ pub enum InvalidTransaction {
 }
 
 /// An unknown transaction validity.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum UnknownTransaction {
     /// Could not lookup some information that is required to validate the transaction.
     CannotLookup,
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {_0})")]
-    Custom(u8),
+    #[display("Other reason (code: {_0})")]
+    Custom(#[error(not(source))] u8),
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Invalid transaction: {_0}")]
+    #[display("Invalid transaction: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
+    #[display("Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 

@@ -62,7 +62,7 @@ pub fn execute_block_parameter<'a>(
 }
 
 /// Error potentially returned by [`execute_block_parameter`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockParameterError {
     /// Header provided as parameter is invalid.
     InvalidHeader(header::Error),
@@ -78,7 +78,7 @@ pub fn check_execute_block_output(output: &[u8]) -> Result<(), ExecuteBlockOutpu
 }
 
 /// Error potentially returned by [`check_execute_block_output`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockOutputError {
     /// The output is not empty.
     NotEmpty,
@@ -174,10 +174,10 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
 }
 
 /// Error potentially returned by [`check_check_inherents_output`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InherentsOutputError {
     /// Runtime has returned some errors.
-    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
+    #[display("Runtime has returned some errors when verifying inherents: {errors:?}")]
     Error {
         /// List of errors produced by the runtime.
         ///

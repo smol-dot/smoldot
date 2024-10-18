@@ -471,7 +471,7 @@ impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
 }
 
 /// Error that can happen when verifying a justification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum JustificationVerifyError {
     /// Type of the justification doesn't match the finality mechanism used by the chain.
     ///
@@ -479,43 +479,43 @@ pub enum JustificationVerifyError {
     /// >           always returned.
     JustificationEngineMismatch,
     /// Error while decoding the justification.
-    #[display(fmt = "Error while decoding the justification: {_0}")]
+    #[display("Error while decoding the justification: {_0}")]
     InvalidJustification(decode::JustificationDecodeError),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::JustificationVerifyError),
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FinalityVerify(FinalityVerifyError),
 }
 
 /// Error that can happen when verifying a Grandpa commit.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CommitVerifyError {
     /// Chain doesn't use the GrandPa algorithm.
     NotGrandpa,
     /// Error while decoding the commit.
     InvalidCommit,
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
     /// This doesn't mean that the commit is bad, but that it can't be verified without adding
     /// more blocks to the tree.
-    #[display(fmt = "Not enough blocks are known to verify this commit")]
+    #[display("Not enough blocks are known to verify this commit")]
     NotEnoughKnownBlocks {
         /// Block number that the commit targets.
         target_block_number: u64,
     },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::CommitVerifyError),
 }
 
 /// Error that can happen when verifying a proof of finality.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FinalityVerifyError {
     /// The target block height and hash are the same as the block that is already finalized.
     /// While the proof couldn't be verified, nothing could be gained from actually verifying it.
@@ -526,7 +526,7 @@ pub enum FinalityVerifyError {
     /// The target block height is strictly inferior to the finalized block height.
     BelowFinalized,
     /// Finality proof targets a block that isn't in the chain.
-    #[display(fmt = "Justification targets a block (#{block_number}) that isn't in the chain.")]
+    #[display("Justification targets a block (#{block_number}) that isn't in the chain.")]
     UnknownTargetBlock {
         /// Number of the block that isn't in the chain.
         block_number: u64,
@@ -536,8 +536,8 @@ pub enum FinalityVerifyError {
     /// There exists a block in-between the latest finalized block and the block targeted by the
     /// justification that must first be finalized.
     #[display(
-        fmt = "There exists a block in-between the latest finalized block and the block \
-                     targeted by the justification that must first be finalized"
+        "There exists a block in-between the latest finalized block and the block \
+        targeted by the justification that must first be finalized"
     )]
     TooFarAhead {
         /// Number of the block contained in the justification.
@@ -615,7 +615,7 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 }
 
 /// Error that can happen when setting the finalized block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SetFinalizedError {
     /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,

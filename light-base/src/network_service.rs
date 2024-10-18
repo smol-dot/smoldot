@@ -607,46 +607,46 @@ pub enum Event {
 }
 
 /// Error returned by [`NetworkServiceChain::blocks_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::BlocksRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::grandpa_warp_sync_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum WarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::GrandpaWarpSyncRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::storage_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Storage proof request is too large and can't be sent.
     RequestTooLarge,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::StorageProofRequestError),
 }
 
 /// Error returned by [`NetworkServiceChain::call_proof_request`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum CallProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Call proof request is too large and can't be sent.
     RequestTooLarge,
     /// Error during the request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Request(service::CallProofRequestError),
 }
 

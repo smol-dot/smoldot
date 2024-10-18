@@ -999,7 +999,7 @@ pub enum StorageQueryProgress<TPlat: PlatformRef> {
 
 /// Error that can happen when calling [`SyncService::storage_query`].
 // TODO: remove?
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Error)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
@@ -1047,13 +1047,13 @@ impl fmt::Display for StorageQueryError {
 }
 
 /// See [`StorageQueryError`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,

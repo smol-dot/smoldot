@@ -96,9 +96,9 @@ pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVer
             .iter()
             .find(|(_, pubkey)| !unique.insert(pubkey))
         {
-            return CommitVerify::Finished(Err(CommitVerifyError::DuplicateSignature(
-                **faulty_pub_key,
-            )));
+            return CommitVerify::Finished(Err(CommitVerifyError::DuplicateSignature {
+                authority_key: **faulty_pub_key,
+            }));
         }
     }
 
@@ -142,7 +142,9 @@ impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
     pub fn resume(mut self, is_authority: bool) -> CommitVerify<C> {
         if !is_authority {
             let key = *self.authority_public_key();
-            return CommitVerify::Finished(Err(CommitVerifyError::NotAuthority(key)));
+            return CommitVerify::Finished(Err(CommitVerifyError::NotAuthority {
+                authority_key: key,
+            }));
         }
 
         self.inner.next_precommit_author_verified = true;
@@ -343,7 +345,7 @@ impl<C: AsRef<[u8]>> CommitVerification<C> {
 }
 
 /// Error that can happen while verifying a commit.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum CommitVerifyError {
     /// Failed to decode the commit message.
     InvalidFormat,
@@ -354,11 +356,11 @@ pub enum CommitVerifyError {
     /// One of the signatures can't be verified.
     BadSignature,
     /// One authority has produced two signatures.
-    #[display(fmt = "One authority has produced two signatures")]
-    DuplicateSignature([u8; 32]),
+    #[display("One authority has produced two signatures")]
+    DuplicateSignature { authority_key: [u8; 32] },
     /// One of the public keys isn't in the list of authorities.
-    #[display(fmt = "One of the public keys isn't in the list of authorities")]
-    NotAuthority([u8; 32]),
+    #[display("One of the public keys isn't in the list of authorities")]
+    NotAuthority { authority_key: [u8; 32] },
     /// Commit contains a vote for a block that isn't a descendant of the target block.
     BadAncestry,
 }
@@ -442,15 +444,15 @@ pub fn verify_justification<'a>(
         match authorities_list.entry(precommit.authority_public_key) {
             hashbrown::hash_map::Entry::Occupied(mut entry) => {
                 if entry.insert(true) {
-                    return Err(JustificationVerifyError::DuplicateSignature(
-                        *precommit.authority_public_key,
-                    ));
+                    return Err(JustificationVerifyError::DuplicateSignature {
+                        authority_key: *precommit.authority_public_key,
+                    });
                 }
             }
             hashbrown::hash_map::Entry::Vacant(_) => {
-                return Err(JustificationVerifyError::NotAuthority(
-                    *precommit.authority_public_key,
-                ))
+                return Err(JustificationVerifyError::NotAuthority {
+                    authority_key: *precommit.authority_public_key,
+                })
             }
         }
 
@@ -499,7 +501,7 @@ pub fn verify_justification<'a>(
 }
 
 /// Error that can happen while verifying a justification.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum JustificationVerifyError {
     /// Failed to decode the justification.
     InvalidFormat,
@@ -508,11 +510,11 @@ pub enum JustificationVerifyError {
     /// One of the signatures can't be verified.
     BadSignature,
     /// One authority has produced two signatures.
-    #[display(fmt = "One authority has produced two signatures")]
-    DuplicateSignature([u8; 32]),
+    #[display("One authority has produced two signatures")]
+    DuplicateSignature { authority_key: [u8; 32] },
     /// One of the public keys isn't in the list of authorities.
-    #[display(fmt = "One of the public keys isn't in the list of authorities")]
-    NotAuthority([u8; 32]),
+    #[display("One of the public keys isn't in the list of authorities")]
+    NotAuthority { authority_key: [u8; 32] },
     /// Justification doesn't contain enough authorities signatures to be valid.
     NotEnoughSignatures,
 }

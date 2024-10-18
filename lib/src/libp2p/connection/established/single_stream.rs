@@ -810,16 +810,16 @@ where
 }
 
 /// Error during a connection. The connection should be shut down.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
-    #[display(fmt = "Noise error: {_0}")]
+    #[display("Noise error: {_0}")]
     Noise(noise::CipherError),
     /// Error while encoding noise data.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     NoiseEncrypt(noise::EncryptError),
     /// Error in the Yamux multiplexing protocol.
-    #[display(fmt = "Yamux error: {_0}")]
+    #[display("Yamux error: {_0}")]
     Yamux(yamux::Error),
 }
 

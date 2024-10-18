@@ -346,7 +346,7 @@ pub enum DropReason {
 }
 
 /// Failed to check the validity of a transaction.
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum ValidateTransactionError {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(runtime_service::RuntimeError),
@@ -361,7 +361,7 @@ pub enum ValidateTransactionError {
     ///
     /// There is no point in trying to validate the transaction call again, as it would result
     /// in the same error.
-    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    #[display("Error during the execution of the runtime: {_0}")]
     Execution(runtime_service::RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
@@ -370,9 +370,9 @@ pub enum ValidateTransactionError {
     /// there can be multiple errors.
     ///
     /// Trying the same transaction again might succeed.
-    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    #[display("Error trying to access the storage required for the runtime call")]
     // TODO: better display?
-    Inaccessible(Vec<runtime_service::RuntimeCallInaccessibleError>),
+    Inaccessible(#[error(not(source))] Vec<runtime_service::RuntimeCallInaccessibleError>),
 
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),

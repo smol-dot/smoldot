@@ -612,7 +612,7 @@ pub struct VrfSignature {
     pub proof: [u8; 64],
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SignError {
     /// The given `(namespace, public key)` combination is unknown to this keystore.
     UnknownPublicKey,
@@ -620,25 +620,25 @@ pub enum SignError {
     /// Error while accessing the file containing the secret key.
     /// Typically indicates the content of the file has been modified by something else than
     /// the keystore.
-    #[display(fmt = "Error loading the secret key; {_0}")]
+    #[display("Error loading the secret key; {_0}")]
     KeyLoad(KeyLoadError),
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum KeyLoadError {
     /// Error reported by the operating system.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Io(io::Error),
     /// Content of the file is invalid. Contains a human-readable error message as a string.
     /// Because the format of the content of the file is an implementation detail, no detail is
     /// provided.
-    #[display(fmt = "{_0}")]
-    BadFormat(String),
+    #[display("{_0}")]
+    BadFormat(#[error(not(source))] String),
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SignVrfError {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Sign(SignError),
     WrongKeyAlgorithm,
 }

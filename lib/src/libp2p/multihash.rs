@@ -99,7 +99,7 @@ impl<T> AsRef<T> for Multihash<T> {
 }
 
 /// Error when turning bytes into a [`Multihash`].
-#[derive(Debug, derive_more::Display, Clone)]
+#[derive(Debug, derive_more::Display, derive_more::Error, Clone)]
 pub enum FromBytesError {
     /// The multihash is invalid.
     DecodeError,

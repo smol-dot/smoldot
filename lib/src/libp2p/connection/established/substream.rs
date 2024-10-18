@@ -1522,34 +1522,34 @@ pub enum InboundTy {
 }
 
 /// Error that can happen while processing an inbound substream.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum InboundError {
     /// Error during protocol negotiation.
-    #[display(fmt = "Protocol negotiation error: {_0}")]
+    #[display("Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Error while receiving an inbound request.
-    #[display(fmt = "Error receiving inbound request: {_0}")]
+    #[display("Error receiving inbound request: {_0}")]
     RequestInLebError(read_write::IncomingBytesTakeLeb128Error),
     /// Substream has been unexpectedly closed.
-    #[display(fmt = "Substream unexpectedly closed")]
+    #[display("Substream unexpectedly closed")]
     SubstreamClosed,
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
     /// Error while receiving an inbound notifications substream handshake.
-    #[display(fmt = "Error while receiving an inbound notifications substream handshake: {error}")]
+    #[display("Error while receiving an inbound notifications substream handshake: {error}")]
     NotificationsInError {
         /// Error that happened.
         error: read_write::IncomingBytesTakeLeb128Error,
     },
     /// Unexpected end of file while receiving an inbound notifications substream handshake.
     #[display(
-        fmt = "Unexpected end of file while receiving an inbound notifications substream handshake"
+        "Unexpected end of file while receiving an inbound notifications substream handshake"
     )]
     NotificationsInUnexpectedEof,
 }
 
 /// Error that can happen during a request in a request-response scheme.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum RequestError {
     /// Remote hasn't answered in time.
     Timeout,
@@ -1562,7 +1562,7 @@ pub enum RequestError {
     /// detected a protocol error.
     SubstreamReset,
     /// Error during protocol negotiation.
-    #[display(fmt = "Protocol negotiation error: {_0}")]
+    #[display("Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Invalid LEB128 number when receiving the response.
     ResponseInvalidLeb128,
@@ -1587,14 +1587,14 @@ impl RequestError {
 }
 
 /// Error potentially returned by [`Substream::respond_in_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum RespondInRequestError {
     /// The substream has already been closed.
     SubstreamClosed,
 }
 
 /// Error that can happen when trying to open an outbound notifications substream.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum NotificationsOutErr {
     /// Remote took too long to perform the handshake.
     Timeout,
@@ -1603,20 +1603,20 @@ pub enum NotificationsOutErr {
     /// Remote has indicated that it doesn't support the requested protocol.
     ProtocolNotAvailable,
     /// Error during the multistream-select handshake.
-    #[display(fmt = "Protocol negotiation error: {_0}")]
+    #[display("Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Substream has been reset during the negotiation.
     SubstreamReset,
     /// Error while receiving the remote's handshake.
-    #[display(fmt = "Error while receiving remote handshake: {_0}")]
+    #[display("Error while receiving remote handshake: {_0}")]
     HandshakeRecvError(read_write::IncomingBytesTakeLeb128Error),
 }
 
 /// Reason why an inbound notifications substream has been closed.
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum NotificationsInClosedErr {
     /// Error in the protocol.
-    #[display(fmt = "Error while receiving notification: {_0}")]
+    #[display("Error while receiving notification: {_0}")]
     ProtocolError(read_write::IncomingBytesTakeLeb128Error),
     /// Substream has been closed.
     SubstreamClosed,

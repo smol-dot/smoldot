@@ -602,22 +602,22 @@ pub enum HeaderVerifySuccess {
 
 /// Error that can happen when verifying a block header.
 // TODO: some of these errors are redundant with verify::header_only::Error
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.
-    #[display(fmt = "Error while decoding the header: {_0}")]
+    #[display("Error while decoding the header: {_0}")]
     InvalidHeader(header::Error),
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The parent of the block isn't known.
-    #[display(fmt = "The parent of the block isn't known.")]
+    #[display("The parent of the block isn't known.")]
     BadParent {
         /// Hash of the parent block in question.
         parent_hash: [u8; 32],
     },
     /// The block verification has failed. The block is invalid and should be thrown away.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     VerificationFailed(verify::header_only::Error),
 }

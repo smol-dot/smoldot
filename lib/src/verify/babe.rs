@@ -193,7 +193,7 @@ pub struct VerifySuccess {
 }
 
 /// Failure to verify a block.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum VerifyError {
     /// The seal (containing the signature of the authority) is missing from the header.
     MissingSeal,
@@ -209,7 +209,7 @@ pub enum VerifyError {
     MissingEpochChangeLog,
     /// The header contains an epoch change that would put the Babe configuration in an
     /// non-sensical state.
-    #[display(fmt = "Invalid Babe epoch change found in header: {_0}")]
+    #[display("Invalid Babe epoch change found in header: {_0}")]
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
@@ -235,7 +235,7 @@ pub enum VerifyError {
 }
 
 /// See [`VerifyError::InvalidChainConfiguration`]
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InvalidChainConfiguration {
     /// The start slot of the epoch the parent block belongs to is superior to the slot where the
     /// parent block was authored.

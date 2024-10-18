@@ -172,8 +172,8 @@ pub fn decode_yamux_header(bytes: &[u8; 12]) -> Result<DecodedYamuxHeader, Yamux
 }
 
 /// Error while decoding a Yamux header.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error at offset {offset}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("Error at offset {offset}")]
 pub struct YamuxHeaderDecodeError {
     offset: usize,
 }

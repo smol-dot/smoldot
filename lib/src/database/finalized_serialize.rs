@@ -101,16 +101,16 @@ pub struct Decoded {
 }
 
 /// Opaque error indicating a corruption in the data stored in the local storage.
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{_0}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{_0}")]
 pub struct CorruptedError(CorruptedErrorInner);
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 enum CorruptedErrorInner {
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Serde(serde_json::Error),
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     Deserialize(defs::DeserializeError),
-    #[display(fmt = "Invalid chain information: {_0}")]
+    #[display("Invalid chain information: {_0}")]
     InvalidChain(chain_information::ValidityError),
 }

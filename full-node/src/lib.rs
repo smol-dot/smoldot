@@ -228,7 +228,7 @@ impl Client {
 }
 
 /// Error potentially returned by [`start`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum StartError {
     /// Failed to parse the chain specification.
     ChainSpecParse(chain_spec::ParseError),
@@ -255,7 +255,7 @@ pub enum StartError {
 }
 
 /// Error potentially returned by [`Client::relay_chain_send_json_rpc_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum RelayChainSendJsonRpcRequestError {
     /// There is no relay chain to send the JSON-RPC request to.
     NoRelayChain,

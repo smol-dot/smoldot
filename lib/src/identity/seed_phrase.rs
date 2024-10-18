@@ -182,7 +182,7 @@ pub struct ParsedPrivateKey {
 }
 
 /// Error in [`parse_private_key`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParsePrivateKeyError {
     /// Couldn't parse the string in any meaningful way.
     InvalidFormat,
@@ -272,7 +272,7 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<Box<[u8; 32]>, Bip3
 }
 
 /// Failed to decode BIP39 mnemonic phrase.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum Bip39ToSeedError {
     /// Invalid BIP39 mnemonic phrase.
     WrongMnemonic(Bip39DecodeError),
@@ -281,8 +281,9 @@ pub enum Bip39ToSeedError {
 }
 
 /// Invalid BIP39 mnemonic phrase.
-#[derive(Debug, derive_more::Display)]
-pub struct Bip39DecodeError(bip39::Error);
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+// TODO: bip39 doesn't implement the Error trait; remove not(source) at some point
+pub struct Bip39DecodeError(#[error(not(source))] bip39::Error);
 
 #[cfg(test)]
 mod tests {

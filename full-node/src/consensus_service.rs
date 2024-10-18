@@ -165,7 +165,7 @@ enum ToBackground {
 }
 
 /// Potential error when calling [`ConsensusService::new`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum InitError {
     /// Database is corrupted.
     DatabaseCorruption(full_sqlite::CorruptedError),
@@ -3281,7 +3281,7 @@ pub struct ExecuteBlockSuccess {
 }
 
 /// Error returned by [`execute_block_and_insert`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum ExecuteBlockError {
     /// Failed to verify block.
     VerificationFailure(ExecuteBlockVerificationFailureError),
@@ -3290,14 +3290,15 @@ pub enum ExecuteBlockError {
 }
 
 /// See [`ExecuteBlockError::VerificationFailure`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockVerificationFailureError {
     /// Error starting the runtime execution.
     RuntimeStartError(executor::host::StartErr),
     /// Error while accessing the parent block in the database.
-    #[display(fmt = "Error while accessing the parent block in the database: {error}")]
+    #[display("Error while accessing the parent block in the database: {error}")]
     DatabaseParentAccess {
         /// Error that happened.
+        #[error(source)]
         error: full_sqlite::StorageAccessError,
         /// In which context the error hapened.
         context: ExecuteBlockDatabaseAccessFailureContext,
@@ -3327,15 +3328,15 @@ pub enum ExecuteBlockDatabaseAccessFailureContext {
 }
 
 /// See [`ExecuteBlockError::InvalidBlock`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ExecuteBlockInvalidBlockError {
     /// Error while executing the runtime.
     RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error in the output of `BlockBuilder_check_inherents`.
-    #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
+    #[display("Error in the output of BlockBuilder_check_inherents: {_0}")]
     CheckInherentsOutputError(body_only::InherentsOutputError),
     /// Error in the output of `Core_execute_block`.
-    #[display(fmt = "Error in the output of Core_execute_block: {_0}")]
+    #[display("Error in the output of Core_execute_block: {_0}")]
     ExecuteBlockOutputError(body_only::ExecuteBlockOutputError),
     /// The new `:code` after the execution is empty.
     EmptyCode,
@@ -3530,16 +3531,16 @@ pub struct RuntimeCallSuccess {
 }
 
 /// Error returned by [`runtime_call()`].
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
 pub enum RuntimeCallError {
     /// Error starting the runtime execution.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeStartError(executor::host::StartErr),
     /// Error while executing the runtime.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error while accessing the parent block in the database.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     DatabaseParentAccess(full_sqlite::StorageAccessError),
     /// State trie version stored in database is invalid.
     DatabaseInvalidStateTrieVersion,

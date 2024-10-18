@@ -359,7 +359,7 @@ impl ClientMainTask {
                             .notify(usize::MAX);
                         continue;
                     }
-                    Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
+                    Err(methods::ParseClientToServerError::UnknownNotification { .. }) => continue,
                     Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
                         let response = parse::build_parse_error_response();
                         let mut responses_queue =
@@ -931,41 +931,43 @@ impl Drop for SerializedRequestsIo {
 }
 
 /// See [`SerializedRequestsIo::wait_next_response`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum WaitNextResponseError {
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
 
 /// Error returned by [`SerializedRequestsIo::send_request`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{cause}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{cause}")]
 pub struct SendRequestError {
     /// The JSON-RPC request that was passed as parameter.
     pub request: String,
     /// Reason for the error.
+    #[error(source)]
     pub cause: SendRequestErrorCause,
 }
 
 /// See [`SendRequestError::cause`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum SendRequestErrorCause {
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
 
 /// Error returned by [`SerializedRequestsIo::try_send_request`].
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "{cause}")]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{cause}")]
 pub struct TrySendRequestError {
     /// The JSON-RPC request that was passed as parameter.
     pub request: String,
     /// Reason for the error.
+    #[error(source)]
     pub cause: TrySendRequestErrorCause,
 }
 
 /// See [`TrySendRequestError::cause`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum TrySendRequestErrorCause {
     /// Limit to the maximum number of pending requests that was passed as
     /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before

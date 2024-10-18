@@ -325,10 +325,10 @@ pub enum StorageValue {
 }
 
 /// Possible error returned by [`PrefixScan::resume_all_keys`] or [`PrefixScan::resume_partial`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// The proof has an invalid format.
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     InvalidProof(proof_decode::Error),
     /// One or more entries in the proof are missing.
     MissingProofEntry,

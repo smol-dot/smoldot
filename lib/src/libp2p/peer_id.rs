@@ -132,7 +132,7 @@ impl PublicKey {
 }
 
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromProtobufEncodingError {
     /// Error decoding the Protobuf message.
     ProtobufDecodeError,
@@ -145,7 +145,7 @@ pub enum FromProtobufEncodingError {
 }
 
 /// Call to [`PublicKey::verify`] has failed. No reason is provided for security reasons.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub struct SignatureVerifyFailed();
 
 /// Public keys with byte-lengths smaller than `MAX_INLINE_KEY_LENGTH` will be
@@ -314,31 +314,33 @@ impl FromStr for PeerId {
 }
 
 /// Error when turning bytes into a [`PeerId`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum FromBytesError {
     /// Failed to decode bytes into a multihash.
     DecodeError(multihash::FromBytesError),
     /// The algorithm used in the multihash isn't identity or SHA-256.
     InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
-    #[display(fmt = "Failed to decode public key protobuf: {_0}")]
+    #[display("Failed to decode public key protobuf: {_0}")]
     InvalidPublicKey(FromProtobufEncodingError),
 }
 
 /// Error when parsing a string to a [`PeerId`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParseError {
     /// Error decoding the Base58 encoding.
-    #[display(fmt = "Base58 decoding error: {_0}")]
+    #[display("Base58 decoding error: {_0}")]
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
-    #[display(fmt = "{_0}")]
+    #[display("{_0}")]
     NotPeerId(FromBytesError),
 }
 
 /// Error when decoding Base58 encoding.
-#[derive(Debug, derive_more::Display, derive_more::From)]
-pub struct Bs58DecodeError(bs58::decode::Error);
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
+#[display("{_0}")]
+// TODO: bs58 doesn't implement the Error trait; remove not(source) at some point
+pub struct Bs58DecodeError(#[error(not(source))] bs58::decode::Error);
 
 #[cfg(test)]
 mod tests {
