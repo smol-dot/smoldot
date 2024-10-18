@@ -535,8 +535,10 @@ pub enum FinalityVerifyError {
     },
     /// There exists a block in-between the latest finalized block and the block targeted by the
     /// justification that must first be finalized.
-    #[display("There exists a block in-between the latest finalized block and the block \
-        targeted by the justification that must first be finalized")]
+    #[display(
+        "There exists a block in-between the latest finalized block and the block \
+        targeted by the justification that must first be finalized"
+    )]
     TooFarAhead {
         /// Number of the block contained in the justification.
         justification_block_number: u64,

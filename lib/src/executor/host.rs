@@ -4107,8 +4107,10 @@ pub enum Error {
     },
     /// Called `ext_default_child_storage_root_version_1` or
     /// `ext_default_child_storage_root_version_2` on a child trie that doesn't exist.
-    #[display("Called `ext_default_child_storage_root_version_1` or
-        `ext_default_child_storage_root_version_2` on a child trie that doesn't exist.")]
+    #[display(
+        "Called `ext_default_child_storage_root_version_1` or
+        `ext_default_child_storage_root_version_2` on a child trie that doesn't exist."
+    )]
     ChildStorageRootTrieDoesntExist,
     /// Runtime has tried to perform a signature batch verification before initiating a batch
     /// verification.
