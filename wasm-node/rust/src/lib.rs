@@ -52,11 +52,11 @@ fn init(max_log_level: u32) {
 }
 
 fn add_chain(
-    chain_spec: Vec<u8>,
-    database_content: Vec<u8>,
+    chain_spec: Box<[u8]>,
+    database_content: Box<[u8]>,
     json_rpc_max_pending_requests: u32,
     json_rpc_max_subscriptions: u32,
-    potential_relay_chains: Vec<u8>,
+    potential_relay_chains: Box<[u8]>,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -212,9 +212,9 @@ fn remove_chain(chain_id: u32) {
     }
 }
 
-fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
+fn json_rpc_send(json_rpc_request: Box<[u8]>, chain_id: u32) -> u32 {
     // As mentioned in the documentation, the bytes *must* be valid UTF-8.
-    let json_rpc_request: String = String::from_utf8(json_rpc_request)
+    let json_rpc_request: String = String::from_utf8(json_rpc_request.to_vec())
         .unwrap_or_else(|_| panic!("non-UTF-8 JSON-RPC request"));
 
     let mut client_lock = CLIENT.try_lock().unwrap();

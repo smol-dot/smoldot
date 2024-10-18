@@ -975,7 +975,7 @@ struct Stream {
 
 pub(crate) fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
-    handshake_ty: Vec<u8>,
+    handshake_ty: Box<[u8]>,
 ) {
     let (_, local_tls_certificate_sha256) = nom::sequence::preceded(
         nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
@@ -1033,7 +1033,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     stream.something_happened.notify(usize::MAX);
 }
 
-pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Box<[u8]>) {
     let mut lock = STATE.try_lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -1088,7 +1088,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
     }
 
     stream.messages_queue_total_size += message.len();
-    stream.messages_queue.push_back(message.into_boxed_slice());
+    stream.messages_queue.push_back(message);
     stream.something_happened.notify(usize::MAX);
 }
 
@@ -1132,7 +1132,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
     }
 }
 
-pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
+pub(crate) fn connection_reset(connection_id: u32, message: Box<[u8]>) {
     let message = str::from_utf8(&message)
         .unwrap_or_else(|_| panic!("non-UTF-8 message"))
         .to_owned();
@@ -1173,7 +1173,7 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     }
 }
 
-pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Box<[u8]>) {
     let message: String = str::from_utf8(&message)
         .unwrap_or_else(|_| panic!("non-UTF-8 message"))
         .to_owned();

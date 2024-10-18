@@ -50,7 +50,7 @@
 //! they are treated as unsigned integers by the JavaScript.
 //!
 
-use alloc::vec::Vec;
+use alloc::boxed::Box;
 
 #[link(wasm_import_module = "smoldot")]
 unsafe extern "C" {
@@ -139,7 +139,13 @@ unsafe extern "C" {
     ///
     /// The log target and message is a UTF-8 string found in the memory of the WebAssembly
     /// virtual machine at offset `ptr` and with length `len`.
-    pub safe fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
+    pub safe fn log(
+        level: u32,
+        target_ptr: u32,
+        target_len: u32,
+        message_ptr: u32,
+        message_len: u32,
+    );
 
     /// Called when [`advance_execution`] should be executed again.
     ///
@@ -592,16 +598,12 @@ pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32, buffer_index:
     crate::platform::stream_reset(connection_id, stream_id, get_buffer(buffer_index));
 }
 
-pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {
+pub(crate) fn get_buffer(buffer_index: u32) -> Box<[u8]> {
     unsafe {
         let len = usize::try_from(buffer_size(buffer_index)).unwrap();
 
-        let mut buffer = Vec::<u8>::with_capacity(len);
-        buffer_copy(
-            buffer_index,
-            buffer.spare_capacity_mut().as_mut_ptr() as usize as u32,
-        );
-        buffer.set_len(len);
-        buffer
+        let mut buffer = Box::<[u8]>::new_uninit_slice(len);
+        buffer_copy(buffer_index, buffer.as_mut_ptr() as usize as u32);
+        buffer.assume_init()
     }
 }
