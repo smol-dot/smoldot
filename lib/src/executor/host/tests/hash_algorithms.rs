@@ -33,7 +33,7 @@ extern "C" {
     fn ext_hashing_keccak_256_version_1(ptrsz: i64) -> i32;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
     let slice = b"hello world";
     let ptrsz = u64::from(slice.len() as u32) << 32 | u64::from(slice.as_ptr() as usize as u32);
@@ -77,7 +77,7 @@ macro_rules! gen_test {
                     fn ext_hashing_keccak_256_version_1(ptrsz: i64) -> i32;
                 }
 
-                #[no_mangle]
+                #[unsafe(no_mangle)]
                 extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
                     let slice = b"hello world";
                     let ptrsz = u64::from(slice.len() as u32) << 32 | u64::from(slice.as_ptr() as usize as u32);

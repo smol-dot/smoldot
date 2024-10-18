@@ -47,12 +47,12 @@ pub struct Delay {
 
 impl Delay {
     pub fn new(after: Duration) -> Self {
-        let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
+        let now = Duration::from_micros(bindings::monotonic_clock_us());
         Self::new_inner(now + after, now)
     }
 
     pub fn new_at_monotonic_clock(when: Duration) -> Self {
-        let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
+        let now = Duration::from_micros(bindings::monotonic_clock_us());
         Self::new_inner(when, now)
     }
 
@@ -200,7 +200,7 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let lock = &mut *lock;
 
-    let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
+    let now = Duration::from_micros(bindings::monotonic_clock_us());
 
     // Note that this function can be called spuriously.
     // For example, `process_timers` can be scheduled twice from two different timers, and the
@@ -270,5 +270,5 @@ fn start_timer(duration: Duration) {
     // Note that ideally `duration` should be rounded up in order to make sure that it is not
     // truncated, but the precision of an `f64` is so high and the precision of the operating
     // system generally so low that this is not worth dealing with.
-    unsafe { bindings::start_timer(duration.as_secs_f64() * 1000.0) }
+    bindings::start_timer(duration.as_secs_f64() * 1000.0)
 }
