@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BanSeverity","BlocksRequestError","CallProofRequestError","Event","QueueNotificationError","Role","StorageProofRequestError","WarpSyncRequestError"],"struct":["CallProofRequestConfig","ChainId","Config","ConfigChain","EncodedMerkleProof","NetworkService","NetworkServiceChain","PeerId"]};
