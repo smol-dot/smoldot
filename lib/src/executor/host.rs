@@ -200,7 +200,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
-use core::{fmt, hash::Hasher as _, iter, str};
+use core::{fmt, iter, str};
 use functions::HostFunction;
 
 pub mod runtime_version;
@@ -1794,8 +1794,7 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(out.as_bytes()))
             }
             HostFunction::ext_hashing_twox_64_version_1 => {
-                let r0 =
-                {
+                let r0 = {
                     let data = expect_pointer_size!(0);
                     twox_hash::XxHash64::oneshot(0, data.as_ref())
                 };
