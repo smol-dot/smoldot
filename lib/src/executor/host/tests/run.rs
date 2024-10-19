@@ -92,7 +92,7 @@ fn function_to_run_invalid_params() {
 fn input_provided_correctly() {
     /* Source code:
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
             let inparam: &[u8] = unsafe {
                 core::slice::from_raw_parts(
@@ -299,7 +299,7 @@ fn input_provided_correctly() {
 fn large_input_provided_correctly() {
     /* Source code:
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
             let inparam: &[u8] = unsafe {
                 core::slice::from_raw_parts(
@@ -413,7 +413,7 @@ fn return_value_works() {
 
         static OUT: &[u8] = b"hello world";
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_: i32, _: i32) -> i64 {
             let ptr = OUT.as_ptr() as usize as u32;
             let sz = OUT.len() as u32;
@@ -482,7 +482,7 @@ fn return_value_works() {
 fn bad_return_value() {
     /* Source code:
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_: i32, _: i32) -> i32 {
             0
         }
@@ -546,7 +546,7 @@ fn bad_return_value() {
 fn returned_ptr_out_of_range() {
     /* Source code:
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_: i32, _: i32) -> i64 {
             let ptr = 0xffff_fff0usize as u32;
             let sz = 5 as u32;
@@ -613,7 +613,7 @@ fn returned_ptr_out_of_range() {
 fn returned_size_out_of_range() {
     /* Source code:
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_: i32, _: i32) -> i64 {
             let ptr = 5 as u32;
             let sz = 0xffff_fff0usize as u32;
@@ -683,7 +683,7 @@ fn unresolved_host_function_called() {
             fn host_function_that_doesnt_exist();
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         extern "C" fn test(_: i32, _: i32) -> i64 {
             unsafe {
                 host_function_that_doesnt_exist()
