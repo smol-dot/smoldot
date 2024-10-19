@@ -180,8 +180,8 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - uses: actions/setup-node@v4.0.3
         with:
-          # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
-          node-version: 16
+          # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
+          node-version: 18
       - uses: Swatinem/rust-cache@v2
       - run: npm install
         working-directory: ./wasm-node/javascript
@@ -209,8 +209,9 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - uses: actions/setup-node@v4.0.3
         with:
-          node-version: 16
-      - uses: denoland/setup-deno@v1
+          # Set to the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
+          node-version: 18
+      - uses: denoland/setup-deno@v2
         with:
           deno-version: v1.x
       # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors
