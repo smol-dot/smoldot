@@ -68,6 +68,7 @@ impl InterpreterPrototype {
             config.wasm_mutable_global(false);
             config.wasm_saturating_float_to_int(false);
             config.wasm_tail_call(false);
+            config.wasm_multi_memory(false);
             config.compilation_mode(compilation_mode);
 
             wasmi::Engine::new(&config)
