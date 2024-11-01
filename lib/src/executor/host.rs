@@ -3111,7 +3111,9 @@ impl EcdsaPublicKeyRecover {
             .unwrap_or_else(|_| unreachable!())
     }
 
-    /// Returns the signature and public key type.
+    /// Returns the signature and public key tag.
+    ///
+    /// Always 65 bytes long.
     ///
     /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
     /// >           set of valid signatures.
@@ -3167,6 +3169,8 @@ impl EcdsaPublicKeyRecover {
     }
 
     /// Verify the signature and resume execution.
+    ///
+    /// This is equivalent to calling `resume(normal_outcome())`.
     pub fn verify_and_resume(self) -> HostVm {
         let outcome = self.normal_outcome_inner();
         self.resume_inner(outcome)
