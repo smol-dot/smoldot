@@ -1639,11 +1639,9 @@ impl ReadyToRun {
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
-                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
                 HostVm::EcdsaPublicKeyRecover(EcdsaPublicKeyRecover {
                     signature_ptr: expect_pointer_constant_size_raw!(0, 65),
-                    message_ptr,
-                    message_size,
+                    message_ptr: expect_pointer_constant_size_raw!(1, 32),
                     inner: self.inner,
                     host_fn,
                 })
@@ -3094,20 +3092,20 @@ pub struct EcdsaPublicKeyRecover {
     inner: Box<Inner>,
     /// Pointer to the signature and public key tag. Always 65 bytes. Guaranteed to be in range.
     signature_ptr: u32,
-    /// Pointer to the message. Guaranteed to be in range.
+    /// Pointer to the message. Always 32 bytes. Guaranteed to be in range.
     message_ptr: u32,
-    /// Size of the message. Guaranteed to be in range.
-    message_size: u32,
     /// Which host function this is.
     host_fn: HostFunction,
 }
 
 impl EcdsaPublicKeyRecover {
     /// Returns the message that the signature is expected to sign.
+    ///
+    /// Always 32 bytes long.
     pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
-            .read_memory(self.message_ptr, self.message_size)
+            .read_memory(self.message_ptr, 32)
             .unwrap_or_else(|_| unreachable!())
     }
 

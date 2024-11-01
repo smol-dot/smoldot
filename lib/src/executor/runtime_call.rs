@@ -1046,6 +1046,8 @@ pub struct EcdsaPublicKeyRecover {
 
 impl EcdsaPublicKeyRecover {
     /// Returns the message that the signature is expected to sign.
+    ///
+    /// Always 32 bytes long.
     pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
         match self.inner.vm {
             host::HostVm::EcdsaPublicKeyRecover(ref sig) => sig.message(),
