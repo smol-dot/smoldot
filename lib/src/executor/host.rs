@@ -670,6 +670,10 @@ pub enum HostVm {
     /// Need to verify whether a signature is valid.
     #[from]
     SignatureVerification(SignatureVerification),
+    /// Need to verify whether an ECDSA signature is valid and provide the corresponding
+    /// public key.
+    #[from]
+    EcdsaPublicKeyRecover(EcdsaPublicKeyRecover),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
     /// still SCALE-encoded), or an error if the call has failed.
     #[from]
@@ -718,6 +722,7 @@ impl HostVm {
             HostVm::OffchainRandomSeed(inner) => inner.inner.into_prototype(),
             HostVm::OffchainSubmitTransaction(inner) => inner.inner.into_prototype(),
             HostVm::SignatureVerification(inner) => inner.inner.into_prototype(),
+            HostVm::EcdsaPublicKeyRecover(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
             HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
@@ -1631,104 +1636,17 @@ impl ReadyToRun {
             }
 
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
-            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
-                let sig = expect_pointer_constant_size!(0, 65);
-                let msg = expect_pointer_constant_size!(1, 32);
-                let is_v2 = matches!(
-                    host_fn,
-                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
-                );
-
-                let result = {
-                    let rs = if is_v2 {
-                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                    } else {
-                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-                    };
-
-                    if let Ok(rs) = rs {
-                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                            sig[64] - 27
-                        } else {
-                            sig[64]
-                        });
-
-                        if let Ok(v) = v {
-                            let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg)
-                                    .unwrap_or_else(|_| unreachable!()),
-                                &rs,
-                                &v,
-                            );
-
-                            if let Ok(pubkey) = pubkey {
-                                let mut res = Vec::with_capacity(65);
-                                res.push(0);
-                                res.extend_from_slice(&pubkey.serialize()[1..65]);
-                                res
-                            } else {
-                                vec![1, 2]
-                            }
-                        } else {
-                            vec![1, 1]
-                        }
-                    } else {
-                        vec![1, 0]
-                    }
-                };
-
-                self.inner
-                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
-                let sig = expect_pointer_constant_size!(0, 65);
-                let msg = expect_pointer_constant_size!(1, 32);
-                let is_v2 = matches!(
+                let (message_ptr, message_size) = expect_pointer_size_raw!(1);
+                HostVm::EcdsaPublicKeyRecover(EcdsaPublicKeyRecover {
+                    signature_ptr: expect_pointer_constant_size_raw!(0, 65),
+                    message_ptr,
+                    message_size,
+                    inner: self.inner,
                     host_fn,
-                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
-                );
-
-                let result = {
-                    let rs = if is_v2 {
-                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                    } else {
-                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-                    };
-
-                    if let Ok(rs) = rs {
-                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                            sig[64] - 27
-                        } else {
-                            sig[64]
-                        });
-
-                        if let Ok(v) = v {
-                            let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg)
-                                    .unwrap_or_else(|_| unreachable!()),
-                                &rs,
-                                &v,
-                            );
-
-                            if let Ok(pubkey) = pubkey {
-                                let mut res = Vec::with_capacity(34);
-                                res.push(0);
-                                res.extend_from_slice(&pubkey.serialize_compressed());
-                                res
-                            } else {
-                                vec![1, 2]
-                            }
-                        } else {
-                            vec![1, 1]
-                        }
-                    } else {
-                        vec![1, 0]
-                    }
-                };
-
-                self.inner
-                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
+                })
             }
             HostFunction::ext_crypto_start_batch_verify_version_1 => {
                 if self.inner.signatures_batch_verification.is_some() {
@@ -3169,6 +3087,153 @@ impl fmt::Debug for SignatureVerification {
             .field("public_key", &self.public_key().as_ref())
             .finish()
     }
+}
+
+/// Must verify whether a signature is correct and return the corresponding public key.
+pub struct EcdsaPublicKeyRecover {
+    inner: Box<Inner>,
+    /// Pointer to the signature and public key tag. Always 65 bytes. Guaranteed to be in range.
+    signature_ptr: u32,
+    /// Pointer to the message. Guaranteed to be in range.
+    message_ptr: u32,
+    /// Size of the message. Guaranteed to be in range.
+    message_size: u32,
+    /// Which host function this is.
+    host_fn: HostFunction,
+}
+
+impl EcdsaPublicKeyRecover {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.message_ptr, self.message_size)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    /// Returns the signature and public key type.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.signature_ptr, 65)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    /// Returns how the function would normally proceed.
+    pub fn normal_outcome(&self) -> Result<[u8; 65], EcdsaPublicKeyRecoverError> {
+        self.normal_outcome_inner().map(|pk| pk.serialize())
+    }
+
+    fn normal_outcome_inner(&self) -> Result<libsecp256k1::PublicKey, EcdsaPublicKeyRecoverError> {
+        let sig = self.signature();
+        let sig = sig.as_ref();
+        let msg = self.message();
+        let msg = msg.as_ref();
+
+        let is_v2 = matches!(
+            self.host_fn,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
+                | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
+        );
+
+        let rs = if is_v2 {
+            libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+        } else {
+            libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+        };
+
+        let Ok(rs) = rs else {
+            return Err(EcdsaPublicKeyRecoverError::IncorrectRSValue);
+        };
+
+        let Ok(v) =
+            libsecp256k1::RecoveryId::parse(if sig[64] > 26 { sig[64] - 27 } else { sig[64] })
+        else {
+            return Err(EcdsaPublicKeyRecoverError::IncorrectVValue);
+        };
+
+        let Ok(pubkey) = libsecp256k1::recover(
+            &libsecp256k1::Message::parse_slice(&msg).unwrap_or_else(|_| unreachable!()),
+            &rs,
+            &v,
+        ) else {
+            return Err(EcdsaPublicKeyRecoverError::InvalidSignature);
+        };
+
+        Ok(pubkey)
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(self) -> HostVm {
+        let outcome = self.normal_outcome_inner();
+        self.resume_inner(outcome)
+    }
+
+    /// Resume the execution, indicating the public key.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`EcdsaPublicKeyRecover::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the public key isn't a valid ECDSA public key.
+    ///
+    pub fn resume(self, result: Result<&[u8; 65], EcdsaPublicKeyRecoverError>) -> HostVm {
+        let result = result.map(|pk| libsecp256k1::PublicKey::parse(pk).unwrap());
+        self.resume_inner(result)
+    }
+
+    fn resume_inner(
+        self,
+        result: Result<libsecp256k1::PublicKey, EcdsaPublicKeyRecoverError>,
+    ) -> HostVm {
+        let is_compressed_variant = matches!(
+            self.host_fn,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
+                | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
+        );
+
+        let result = match result {
+            Ok(pubkey) => {
+                let mut res = Vec::with_capacity(65);
+                res.push(0);
+                if !is_compressed_variant {
+                    res.extend_from_slice(&pubkey.serialize()[1..65]);
+                } else {
+                    res.extend_from_slice(&pubkey.serialize_compressed());
+                }
+                res
+            }
+            Err(EcdsaPublicKeyRecoverError::IncorrectRSValue) => vec![1, 0],
+            Err(EcdsaPublicKeyRecoverError::IncorrectVValue) => vec![1, 1],
+            Err(EcdsaPublicKeyRecoverError::InvalidSignature) => vec![1, 2],
+        };
+
+        self.inner
+            .alloc_write_and_return_pointer_size(self.host_fn.name(), iter::once(&result))
+    }
+}
+
+impl fmt::Debug for EcdsaPublicKeyRecover {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("SignatureVerification")
+            .field("message", &self.message().as_ref())
+            .field("signature", &self.signature().as_ref())
+            .finish()
+    }
+}
+
+/// Error that can be returned to the virtual machine in case of error in the ECDSA signature
+/// verification.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum EcdsaPublicKeyRecoverError {
+    IncorrectRSValue,
+    IncorrectVValue,
+    InvalidSignature,
 }
 
 /// Must provide the runtime version obtained by calling the `Core_version` entry point of a Wasm

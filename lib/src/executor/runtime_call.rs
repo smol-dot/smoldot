@@ -52,7 +52,8 @@ use alloc::{
 use core::{fmt, iter, ops};
 
 pub use host::{
-    Error as ErrorDetail, LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr, StorageProofSizeBehavior,
+    EcdsaPublicKeyRecoverError, Error as ErrorDetail, LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr,
+    StorageProofSizeBehavior,
 };
 pub use trie::{Nibble, TrieEntryVersion};
 
@@ -513,6 +514,9 @@ pub enum RuntimeCall {
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
     SignatureVerification(SignatureVerification),
+    /// Verifying whether a signature is correct and returning the corresponding public key is
+    /// required in order to continue.
+    EcdsaPublicKeyRecover(EcdsaPublicKeyRecover),
     /// Runtime would like to emit some log.
     LogEmit(LogEmit),
     /// Setting an offchain storage value is required in order to continue.
@@ -534,6 +538,7 @@ impl RuntimeCall {
             RuntimeCall::ClosestDescendantMerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeCall::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeCall::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
+            RuntimeCall::EcdsaPublicKeyRecover(inner) => inner.inner.vm.into_prototype(),
             RuntimeCall::LogEmit(inner) => inner.inner.vm.into_prototype(),
             RuntimeCall::OffchainStorageSet(inner) => inner.inner.vm.into_prototype(),
             RuntimeCall::Offchain(inner) => inner.into_prototype(),
@@ -1026,6 +1031,70 @@ impl SignatureVerification {
     pub fn resume_failed(mut self) -> RuntimeCall {
         match self.inner.vm {
             host::HostVm::SignatureVerification(sig) => self.inner.vm = sig.resume_failed(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+}
+
+/// Verifying whether a signature is correct is required in order to continue.
+#[must_use]
+pub struct EcdsaPublicKeyRecover {
+    inner: Inner,
+}
+
+impl EcdsaPublicKeyRecover {
+    /// Returns the message that the signature is expected to sign.
+    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::EcdsaPublicKeyRecover(ref sig) => sig.message(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the signature.
+    ///
+    /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
+    /// >           set of valid signatures.
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match self.inner.vm {
+            host::HostVm::EcdsaPublicKeyRecover(ref sig) => sig.signature(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns how the function would normally proceed.
+    pub fn normal_outcome(&self) -> Result<[u8; 65], EcdsaPublicKeyRecoverError> {
+        match self.inner.vm {
+            host::HostVm::EcdsaPublicKeyRecover(ref sig) => sig.normal_outcome(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Verify the signature and resume execution.
+    pub fn verify_and_resume(mut self) -> RuntimeCall {
+        match self.inner.vm {
+            host::HostVm::EcdsaPublicKeyRecover(sig) => self.inner.vm = sig.verify_and_resume(),
+            _ => unreachable!(),
+        }
+
+        self.inner.run()
+    }
+
+    /// Resume the execution, indicating the public key.
+    ///
+    /// > **Note**: You are strongly encouraged to call
+    /// >           [`EcdsaPublicKeyRecover::verify_and_resume`]. This function is meant to be
+    /// >           used only in debugging situations.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the public key isn't a valid ECDSA public key.
+    ///
+    pub fn resume(mut self, result: Result<&[u8; 65], EcdsaPublicKeyRecoverError>) -> RuntimeCall {
+        match self.inner.vm {
+            host::HostVm::EcdsaPublicKeyRecover(sig) => self.inner.vm = sig.resume(result),
             _ => unreachable!(),
         }
 
@@ -1781,6 +1850,12 @@ impl Inner {
                 host::HostVm::SignatureVerification(req) => {
                     self.vm = req.into();
                     return RuntimeCall::SignatureVerification(SignatureVerification {
+                        inner: self,
+                    });
+                }
+                host::HostVm::EcdsaPublicKeyRecover(req) => {
+                    self.vm = req.into();
+                    return RuntimeCall::EcdsaPublicKeyRecover(EcdsaPublicKeyRecover {
                         inner: self,
                     });
                 }

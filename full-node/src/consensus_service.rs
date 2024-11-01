@@ -3503,6 +3503,9 @@ pub async fn runtime_call(
             runtime_call::RuntimeCall::SignatureVerification(sig) => {
                 call = sig.verify_and_resume();
             }
+            runtime_call::RuntimeCall::EcdsaPublicKeyRecover(sig) => {
+                call = sig.verify_and_resume();
+            }
             runtime_call::RuntimeCall::Offchain(_) => {
                 // Offchain storage calls are forbidden.
                 return Err(RuntimeCallError::ForbiddenHostFunction);
