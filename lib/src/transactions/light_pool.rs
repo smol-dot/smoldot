@@ -818,6 +818,9 @@ where
         &mut self,
         new_finalized_block_hash: &[u8; 32],
     ) -> impl Iterator<Item = ([u8; 32], TBl)> {
+        if self.best_block_index.is_none() {
+            let _ = self.set_best_block(new_finalized_block_hash);
+        }
         let new_finalized_block_index = if *new_finalized_block_hash == self.blocks_tree_root_hash {
             assert!(self.finalized_block_index.is_none());
             return Vec::new().into_iter();
@@ -1068,9 +1071,7 @@ where
             });
         }
 
-        // We returned earlier in the function if `finalized_node_index` is `None`. Consequently,
-        // `best_block_index` can't be `None` either.
-        if self.best_block_index.unwrap() == upmost_to_remove {
+        if self.best_block_index == Some(upmost_to_remove) {
             self.best_block_index = None;
         }
 
