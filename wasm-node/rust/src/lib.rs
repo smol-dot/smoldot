@@ -52,11 +52,11 @@ fn init(max_log_level: u32) {
 }
 
 fn add_chain(
-    chain_spec: Vec<u8>,
-    database_content: Vec<u8>,
+    chain_spec: Box<[u8]>,
+    database_content: Box<[u8]>,
     json_rpc_max_pending_requests: u32,
     json_rpc_max_subscriptions: u32,
-    potential_relay_chains: Vec<u8>,
+    potential_relay_chains: Box<[u8]>,
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
@@ -102,14 +102,12 @@ fn add_chain(
             // updated regularly to account for changes in the implementation.
             if allocator::total_alloc_bytes() >= usize::MAX - 400 * 1024 * 1024 {
                 client_lock.chains.remove(outer_chain_id);
-                unsafe {
-                    let error = "Wasm node is running low on memory and will prevent any new chain from being added";
-                    bindings::chain_initialized(
-                        outer_chain_id_u32,
-                        u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
-                        u32::try_from(error.as_bytes().len()).unwrap(),
-                    );
-                }
+                let error = "Wasm node is running low on memory and will prevent any new chain from being added";
+                bindings::chain_initialized(
+                    outer_chain_id_u32,
+                    u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(error.as_bytes().len()).unwrap(),
+                );
                 return;
             }
 
@@ -141,14 +139,12 @@ fn add_chain(
                 Ok(c) => c,
                 Err(error) => {
                     client_lock.chains.remove(outer_chain_id);
-                    unsafe {
                         let error = error.to_string();
                         bindings::chain_initialized(
                             outer_chain_id_u32,
                             u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
                             u32::try_from(error.as_bytes().len()).unwrap(),
                         );
-                    }
                     return;
                 }
             };
@@ -180,10 +176,7 @@ fn add_chain(
                 *json_rpc_responses_rx = json_rpc_responses;
             }
 
-            unsafe {
-                bindings::chain_initialized(outer_chain_id_u32, 0, 0);
-            }
-
+            bindings::chain_initialized(outer_chain_id_u32, 0, 0);
         },
     );
 
@@ -219,9 +212,9 @@ fn remove_chain(chain_id: u32) {
     }
 }
 
-fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
+fn json_rpc_send(json_rpc_request: Box<[u8]>, chain_id: u32) -> u32 {
     // As mentioned in the documentation, the bytes *must* be valid UTF-8.
-    let json_rpc_request: String = String::from_utf8(json_rpc_request)
+    let json_rpc_request: String = String::from_utf8(json_rpc_request.to_vec())
         .unwrap_or_else(|_| panic!("non-UTF-8 JSON-RPC request"));
 
     let mut client_lock = CLIENT.try_lock().unwrap();
@@ -331,7 +324,7 @@ struct JsonRpcResponsesNonEmptyWaker {
 
 impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
-        unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
+        bindings::json_rpc_responses_non_empty(self.chain_id)
     }
 }
 
@@ -350,8 +343,6 @@ fn advance_execution() {
     runnable.run();
 
     if !TASKS_QUEUE.is_empty() {
-        unsafe {
-            bindings::advance_execution_ready();
-        }
+        bindings::advance_execution_ready();
     }
 }
