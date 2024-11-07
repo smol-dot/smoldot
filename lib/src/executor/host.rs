@@ -200,7 +200,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
-use core::{fmt, hash::Hasher as _, iter, str};
+use core::{fmt, iter, str};
 use functions::HostFunction;
 
 pub mod runtime_version;
@@ -1794,27 +1794,23 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(out.as_bytes()))
             }
             HostFunction::ext_hashing_twox_64_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                {
+                let r0 = {
                     let data = expect_pointer_size!(0);
-                    h0.write(data.as_ref());
-                }
-                let r0 = h0.finish();
+                    twox_hash::XxHash64::oneshot(0, data.as_ref())
+                };
 
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&r0.to_le_bytes()))
             }
             HostFunction::ext_hashing_twox_128_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                let mut h1 = twox_hash::XxHash::with_seed(1);
-                {
+                let [r0, r1] = {
                     let data = expect_pointer_size!(0);
                     let data = data.as_ref();
-                    h0.write(data);
-                    h1.write(data);
-                }
-                let r0 = h0.finish();
-                let r1 = h1.finish();
+                    [
+                        twox_hash::XxHash64::oneshot(0, data),
+                        twox_hash::XxHash64::oneshot(1, data),
+                    ]
+                };
 
                 self.inner.alloc_write_and_return_pointer(
                     host_fn.name(),
@@ -1822,22 +1818,16 @@ impl ReadyToRun {
                 )
             }
             HostFunction::ext_hashing_twox_256_version_1 => {
-                let mut h0 = twox_hash::XxHash::with_seed(0);
-                let mut h1 = twox_hash::XxHash::with_seed(1);
-                let mut h2 = twox_hash::XxHash::with_seed(2);
-                let mut h3 = twox_hash::XxHash::with_seed(3);
-                {
+                let [r0, r1, r2, r3] = {
                     let data = expect_pointer_size!(0);
                     let data = data.as_ref();
-                    h0.write(data);
-                    h1.write(data);
-                    h2.write(data);
-                    h3.write(data);
-                }
-                let r0 = h0.finish();
-                let r1 = h1.finish();
-                let r2 = h2.finish();
-                let r3 = h3.finish();
+                    [
+                        twox_hash::XxHash64::oneshot(0, data),
+                        twox_hash::XxHash64::oneshot(1, data),
+                        twox_hash::XxHash64::oneshot(2, data),
+                        twox_hash::XxHash64::oneshot(3, data),
+                    ]
+                };
 
                 self.inner.alloc_write_and_return_pointer(
                     host_fn.name(),
