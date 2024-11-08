@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic in transactions service when the runtime service resets after having lost track of the head of the chain.
+
 ## 2.0.30 - 2024-08-16
 
 ### Added

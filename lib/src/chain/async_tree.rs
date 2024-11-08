@@ -889,7 +889,7 @@ where
         if let Some(input_finalized_index) = self.input_finalized_index {
             // Finding a new finalized block.
             // We always take the first node on the path towards `input_finalized_index`, in
-            // order to finalized blocks one by one.
+            // order to finalize blocks one by one.
             let new_finalized = {
                 self.non_finalized_blocks
                     .root_to_node_path(input_finalized_index)
@@ -914,6 +914,13 @@ where
                 let mut pruned_blocks = Vec::new();
                 let mut pruned_finalized = None;
                 let mut best_output_block_updated = false;
+
+                // Since we change the finalized block, if the output best block is equal to this
+                // finalized block, that means it is modified, even though its value might remain
+                // at `None`.
+                if self.output_best_block_index.is_none() {
+                    best_output_block_updated = true;
+                }
 
                 for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
                     debug_assert_ne!(Some(pruned.index), self.input_finalized_index);
@@ -963,26 +970,25 @@ where
                 // Try to advance the output best block to the `Finished` block with the highest
                 // weight.
                 // Weight of the current output best block.
-                let mut current_runtime_service_best_block_weight =
-                    match self.output_best_block_index {
-                        None => self.output_finalized_block_weight,
-                        Some(idx) => {
-                            self.non_finalized_blocks
-                                .get(idx)
-                                .unwrap()
-                                .input_best_block_weight
-                        }
-                    };
+                let mut previously_reported_best_block_weight = match self.output_best_block_index {
+                    None => self.output_finalized_block_weight,
+                    Some(idx) => {
+                        self.non_finalized_blocks
+                            .get(idx)
+                            .unwrap()
+                            .input_best_block_weight
+                    }
+                };
 
                 for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
                     // Check uniqueness of weights.
                     debug_assert!(
-                        block.input_best_block_weight != current_runtime_service_best_block_weight
+                        block.input_best_block_weight != previously_reported_best_block_weight
                             || block.input_best_block_weight == 0
                             || self.output_best_block_index == Some(node_index)
                     );
 
-                    if block.input_best_block_weight <= current_runtime_service_best_block_weight {
+                    if block.input_best_block_weight <= previously_reported_best_block_weight {
                         continue;
                     }
 
@@ -994,7 +1000,7 @@ where
                     }
 
                     // Input best can be updated to the block being iterated.
-                    current_runtime_service_best_block_weight = block.input_best_block_weight;
+                    previously_reported_best_block_weight = block.input_best_block_weight;
                     self.output_best_block_index = Some(node_index);
                     best_output_block_updated = true;
 
