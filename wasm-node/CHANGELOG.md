@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.31 - 2024-11-08
+
 ### Fixed
 
 - Fix panic in transactions service when the runtime service resets after having lost track of the head of the chain. ([#2029](https://github.com/smol-dot/smoldot/pull/2029))
