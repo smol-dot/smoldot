@@ -43,6 +43,8 @@ use super::{nibble, trie_node, TrieEntryVersion};
 use alloc::vec::Vec;
 use core::{fmt, iter, ops};
 
+mod tests;
+
 /// Configuration to pass to [`decode_and_verify_proof`].
 pub struct Config<I> {
     /// List of node values of nodes found in the trie. At least one entry corresponding to the
@@ -1218,11 +1220,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             // If the child isn't present in the proof, then the proof is
                             // incomplete. While in some situations we could prove that the child
                             // is necessarily the next key, there is no way to know its full key.
-                            if children_present_in_proof_bitmap & (1 << key_before_nibble) == 0 {
+                            if children_present_in_proof_bitmap & (1 << child_num) == 0 {
                                 return Err(IncompleteProofError());
                             }
 
-                            for c in 0..key_before_nibble {
+                            for c in 0..child_num {
                                 if children_present_in_proof_bitmap & (1 << c) != 0 {
                                     iter_entry += 1;
                                     iter_entry += self.entries[iter_entry].child_entries_follow_up;
