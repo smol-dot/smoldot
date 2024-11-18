@@ -325,14 +325,14 @@ fn closest_descendant_merkle_value_works() {
     );
 
     assert!(matches!(
-        dbg!(decoded.closest_descendant_merkle_value(
+        decoded.closest_descendant_merkle_value(
             EXAMPLE_PROOF_STATE_ROOT,
             [
                 super::nibble::Nibble::try_from(1).unwrap(),
                 super::nibble::Nibble::try_from(0).unwrap()
             ]
             .into_iter()
-        )),
+        ),
         Err(super::IncompleteProofError())
     ));
 
