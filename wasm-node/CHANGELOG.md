@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix another bug concerning incomplete Merkle proofs, similar to the one fixed in v2.0.32. ([#2039](https://github.com/smol-dot/smoldot/pull/2039))
+
 ## 2.0.32 - 2024-11-08
 
 ### Fixed
