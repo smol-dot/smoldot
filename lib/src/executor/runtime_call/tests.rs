@@ -205,9 +205,13 @@ struct Block {
 #[derive(serde::Deserialize)]
 struct Storage {
     #[serde(rename = "mainTrie")]
-    main_trie: hashbrown::HashMap<HexString, HexString>,
+    main_trie: hashbrown::HashMap<HexString, HexString, fnv::FnvBuildHasher>,
     #[serde(rename = "childTries")]
-    child_tries: hashbrown::HashMap<HexString, hashbrown::HashMap<HexString, HexString>>,
+    child_tries: hashbrown::HashMap<
+        HexString,
+        hashbrown::HashMap<HexString, HexString, fnv::FnvBuildHasher>,
+        fnv::FnvBuildHasher,
+    >,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
