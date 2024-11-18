@@ -54,6 +54,7 @@ fn issue_2035() {
             ]
             .iter()
             .copied()
-        ).collect::<Vec<_>>()
+        )
+        .collect::<Vec<_>>()
     );
 }
