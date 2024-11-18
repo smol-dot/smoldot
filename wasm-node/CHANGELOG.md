@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix smoldot sometimes considering some Merkle proofs as incomplete when storage nodes are being enumerated by a runtime call, and that a branch node immediately follows a storage node in lexicographic order. ([#2037](https://github.com/smol-dot/smoldot/pull/2037))
+
 ## 2.0.31 - 2024-11-08
 
 ### Fixed
