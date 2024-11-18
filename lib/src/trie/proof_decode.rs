@@ -1069,8 +1069,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // after the last entry of the trie.
                     return Ok(None);
                 };
+                let Ok(parent_entry_decoded) =
+                    trie_node::decode(&proof[self.entries[parent_entry].range_in_proof.clone()])
+                else {
+                    // Proof has been checked to be entirely decodable.
+                    unreachable!()
+                };
 
-                let Some(child_num) = iter_entry_decoded
+                let Some(child_num) = parent_entry_decoded
                     .children
                     .iter()
                     .skip(usize::from(parent_to_child_nibble) + 1)
