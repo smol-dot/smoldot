@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "arrayvec 0.7.6",
  "async-lock",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "2.0.32"
+version = "2.0.33"
 dependencies = [
  "async-lock",
  "async-task",
