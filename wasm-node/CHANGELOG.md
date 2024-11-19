@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix another bug concerning incomplete Merkle proofs, similar to the one fixed in v2.0.32. ([#2039](https://github.com/smol-dot/smoldot/pull/2039))
+- Fix another bug concerning incomplete Merkle proofs, similar to the one fixed in v2.0.32. ([#2039](https://github.com/smol-dot/smoldot/pull/2039), [#2041](https://github.com/smol-dot/smoldot/pull/2041))
 
 ## 2.0.32 - 2024-11-08
 

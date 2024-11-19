@@ -1105,9 +1105,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 // `iter_entry` is still pointing to the child at index `parent_to_child_nibble`.
                 // Since we're jumping to its next sibling, all we have to do is skip over it
                 // and its descedants.
-                iter_entry += 1;
                 iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                iter_entry += 1;
                 iterating_up = false;
+                continue; // Continue in order to refresh `iter_entry_decoded`.
             }
 
             let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
