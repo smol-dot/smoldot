@@ -511,18 +511,18 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             const mem = new Uint8Array(state.instance.exports.memory.buffer);
             const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-            const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-            const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
 
-            // `len === 0` means "queue is empty" according to the API.
-            // In that situation, queue the resolve/reject.
-            if (len !== 0) {
-                const message = buffer.utf8BytesToString(mem, ptr, len);
-                state.instance.exports.json_rpc_responses_pop(chainId);
-                return message;
-            } else {
+            if (mem.byteLength < responseInfo + 8)
                 return null
-            }
+            const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+            // `len === 0` means "queue is empty" according to the API.
+            if (len === 0) return null
+
+            // In that situation, queue the resolve/reject.
+            const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+            const message = buffer.utf8BytesToString(mem, ptr, len);
+            state.instance.exports.json_rpc_responses_pop(chainId);
+            return message;
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number) => {
