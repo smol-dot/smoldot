@@ -514,9 +514,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             if (mem.byteLength < responseInfo + 8)
                 return null
+
             const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
             // `len === 0` means "queue is empty" according to the API.
-            if (len === 0) return null
+            if (len === 0)
+                return null
 
             // In that situation, queue the resolve/reject.
             const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
