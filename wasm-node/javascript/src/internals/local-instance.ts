@@ -509,8 +509,10 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             if (!state.instance)
                 return null;
 
-            const mem = new Uint8Array(state.instance.exports.memory.buffer);
             const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+            // Note that the memory must be created after calling the Wasm function, otherwise
+            // it might be invalidated if it is grown.
+            const mem = new Uint8Array(state.instance.exports.memory.buffer);
             const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
             const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
 
