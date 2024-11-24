@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix a `RangeError` exception sometimes being thrown due the smoldot Wasm instance growing its memory at an unexpected time. ([#2047](https://github.com/smol-dot/smoldot/pull/2047))
+
 ## 2.0.33 - 2024-11-19
 
 ### Fixed
