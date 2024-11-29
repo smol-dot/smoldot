@@ -86,6 +86,8 @@ impl JitPrototype {
         config.wasm_memory64(false);
         config.wasm_tail_call(false);
         config.wasm_component_model(false);
+        config.wasm_wide_arithmetic(false);
+        config.wasm_extended_const(false);
 
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
