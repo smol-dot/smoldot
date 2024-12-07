@@ -52,7 +52,7 @@
 //! identities of the other nodes of the peer-to-peer network.
 //!
 //! Assuming that all the network identities that exist are distributed uniformly, the k-buckets
-//! will hold more network identities that are close to the the local node's network identity, and
+//! will hold more network identities that are close to the local node's network identity, and
 //! fewer network identities that are far away. In other words, the k-buckets store the neighbors
 //! of the local node, and a few far-away nodes.
 //!
