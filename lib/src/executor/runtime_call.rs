@@ -1487,7 +1487,7 @@ impl Inner {
                 }
             }
 
-            // If the the runtime requests the trie root hash of the main trie, we must first
+            // If the runtime requests the trie root hash of the main trie, we must first
             // recalculate the trie root hash of every single child trie that has been modified
             // since the previous trie root hash calculation.
             // This is also done if execution is finished, in order for the diff provided as
