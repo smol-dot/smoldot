@@ -3153,6 +3153,13 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                     platform.now() - runtime_call_duration_before;
                 continue;
             }
+            executor::runtime_call::RuntimeCall::EcdsaPublicKeyRecover(r) => {
+                let runtime_call_duration_before = platform.now();
+                call = r.verify_and_resume();
+                timing.virtual_machine_call_duration +=
+                    platform.now() - runtime_call_duration_before;
+                continue;
+            }
             executor::runtime_call::RuntimeCall::LogEmit(r) => {
                 // Logs are ignored.
                 let runtime_call_duration_before = platform.now();
