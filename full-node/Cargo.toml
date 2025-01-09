@@ -16,7 +16,7 @@ path = "bin/main.rs"
 [dependencies]
 async-channel = { version = "2.3.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
-clap = { version = "4.5.20", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
+clap = { version = "4.5.26", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
 ctrlc = "3.4.0"
 derive_more = { version = "1.0", default-features = false, features = ["full"] }
 directories = "5.0.1"
