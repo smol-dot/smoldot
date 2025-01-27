@@ -406,7 +406,7 @@ export interface AddChainOptions {
      * inspecting the chain specification of that parachain (i.e. the `chainSpec` field).
      *
      * This poses a problem in situations where the same client is shared between multiple different
-     * applications: multiple applications could add mutiple different chains with the same `id`,
+     * applications: multiple applications could add multiple different chains with the same `id`,
      * creating an ambiguity, or an application could register malicious chains with small variations
      * of a popular chain's `id` and try to benefit from a typo in a legitimate application's
      * `relayChain`.
