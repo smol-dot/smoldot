@@ -542,7 +542,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
             // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
-            // has succeeeded or not.
+            // has succeeded or not.
             state.bufferIndices[0] = new TextEncoder().encode(chainSpec)
             state.bufferIndices[1] = new TextEncoder().encode(databaseContent)
             const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)

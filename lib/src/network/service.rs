@@ -62,7 +62,7 @@
 //! Once a connection has been established (which is indicated by a [`Event::HandshakeFinished`]
 //! event), one can open a gossip link to this peer using [`ChainNetwork::gossip_open`].
 //!
-//! In order to faciliate this process, the [`ChainNetwork`] provides a "desired gossip links"
+//! In order to facilitate this process, the [`ChainNetwork`] provides a "desired gossip links"
 //! system. Use [`ChainNetwork::gossip_insert_desired`] and [`ChainNetwork::gossip_remove_desired`]
 //! to insert or remove `(ChainId, PeerId, GossipKind)` tuples into the state machine. You can
 //! then use [`ChainNetwork::unconnected_desired`] to obtain a list of [`PeerId`]s that are marked

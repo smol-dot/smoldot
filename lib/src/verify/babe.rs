@@ -350,7 +350,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         // we have checked that the parent's slot number is superior or equal to the epoch
         // start slot number, and we have checked that the epoch cannot transition if the
         // slot number of the block is inferior to the next epoch start. Consequently, the
-        // substraction below cannot underflow.
+        // subtraction below cannot underflow.
         (slot_number - epoch_start_slot) / config.slots_per_epoch // `slots_per_epoch` is a `NonZero` type
     } else {
         0

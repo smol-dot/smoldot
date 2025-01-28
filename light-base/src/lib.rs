@@ -598,7 +598,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // consumed below.
         let chain_spec_chain_id = chain_spec.id().to_owned();
 
-        // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
+        // The key generated here uniquely identifies this chain within smoldot. Multiple chains
         // having the same key will use the same services.
         //
         // This struct is extremely important from a security perspective. We want multiple
