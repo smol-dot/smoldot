@@ -59,6 +59,24 @@ pub fn parse_jsonrpc_client_to_server(
     Ok((request_id, call))
 }
 
+/// Parses a JSON call (usually sent from a JSON-RPC client and received by a JSON-RPC server)
+/// from the method name and parameters.
+///
+/// The parameters are encoded in JSON. For example, `parameters_json` might be `["hello"]`.
+pub fn parse_jsonrpc_client_to_server_method_name_and_parameters<'a>(
+    name: &'a str,
+    parameters_json: Option<&'a str>,
+) -> Result<MethodCall<'a>, MethodError<'a>> {
+    MethodCall::from_defs(name, parameters_json)
+}
+
+pub fn parse_jsonrpc_response<'a>(
+    request_method_name: &'_ str,
+    response_json: &'a str,
+) -> Result<Response<'a>, ()> {
+    Response::parse_from_request_method(request_method_name, response_json)
+}
+
 /// Error produced by [`parse_jsonrpc_client_to_server`].
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum ParseClientToServerError<'a> {
@@ -377,6 +395,17 @@ macro_rules! define_methods {
                     )*
                 }
             }
+
+            fn parse_from_request_method(request_method_name: &str, response_json: &str) -> Result<Self, ()> {
+                match request_method_name {
+                    $(
+                        stringify!($name) => {
+                            Ok($rp_name::$name(serde_json::from_str(response_json).unwrap()))
+                        }
+                    )*
+                    _ => Err(())
+                }
+            }
         }
     };
 }
@@ -414,9 +443,9 @@ define_methods! {
     chain_subscribeAllHeads() -> Cow<'a, str>,
     chain_subscribeFinalizedHeads() -> Cow<'a, str> [chain_subscribeFinalisedHeads],
     chain_subscribeNewHeads() -> Cow<'a, str> [subscribe_newHead, chain_subscribeNewHead],
-    chain_unsubscribeAllHeads(subscription: String) -> bool,
-    chain_unsubscribeFinalizedHeads(subscription: String) -> bool [chain_unsubscribeFinalisedHeads],
-    chain_unsubscribeNewHeads(subscription: String) -> bool [unsubscribe_newHead, chain_unsubscribeNewHead],
+    chain_unsubscribeAllHeads(subscription: Cow<'a, str>) -> bool,
+    chain_unsubscribeFinalizedHeads(subscription: Cow<'a, str>) -> bool [chain_unsubscribeFinalisedHeads],
+    chain_unsubscribeNewHeads(subscription: Cow<'a, str>) -> bool [unsubscribe_newHead, chain_unsubscribeNewHead],
     childstate_getKeys() -> (), // TODO:
     childstate_getStorage() -> (), // TODO:
     childstate_getStorageHash() -> (), // TODO:
@@ -540,6 +569,40 @@ define_methods! {
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
+}
+
+impl<'a> ServerToClient<'a> {
+    /// Returns the subscription identifier stored in the request.
+    pub fn subscription(&self) -> &Cow<'a, str> {
+        match self {
+            ServerToClient::author_extrinsicUpdate { subscription, .. } => subscription,
+            ServerToClient::chain_finalizedHead { subscription, .. } => subscription,
+            ServerToClient::chain_newHead { subscription, .. } => subscription,
+            ServerToClient::chain_allHead { subscription, .. } => subscription,
+            ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
+            ServerToClient::state_storage { subscription, .. } => subscription,
+            ServerToClient::chainHead_v1_followEvent { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_v1_watchEvent { subscription, .. } => subscription,
+            ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
+        }
+    }
+
+    /// Modifies the subscription identifier stored in the request.
+    pub fn set_subscription(&mut self, new_value: Cow<'a, str>) {
+        let sub = match self {
+            ServerToClient::author_extrinsicUpdate { subscription, .. } => subscription,
+            ServerToClient::chain_finalizedHead { subscription, .. } => subscription,
+            ServerToClient::chain_newHead { subscription, .. } => subscription,
+            ServerToClient::chain_allHead { subscription, .. } => subscription,
+            ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
+            ServerToClient::state_storage { subscription, .. } => subscription,
+            ServerToClient::chainHead_v1_followEvent { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_v1_watchEvent { subscription, .. } => subscription,
+            ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
+        };
+
+        *sub = new_value;
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1049,7 +1112,7 @@ pub struct SystemHealth {
     pub should_have_peers: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SystemPeer {
     #[serde(rename = "peerId")]
     pub peer_id: String, // Example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
@@ -1060,7 +1123,7 @@ pub struct SystemPeer {
     pub best_number: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SystemPeerRole {
     #[serde(rename = "AUTHORITY")]
     Authority,
@@ -1135,6 +1198,23 @@ impl serde::Serialize for RpcMethods {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for RpcMethods {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct SerdeRpcMethods {
+            methods: Vec<String>,
+        }
+
+        let serde_methods = <SerdeRpcMethods as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(RpcMethods {
+            methods: serde_methods.methods,
+        })
+    }
+}
+
 impl serde::Serialize for Block {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1167,6 +1247,32 @@ impl serde::Serialize for Block {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Block {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct SerdeBlock {
+            block: SerdeBlockInner,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SerdeBlockInner {
+            extrinsics: Vec<HexString>,
+            header: Header,
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
+        }
+
+        let serde_block = <SerdeBlock as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Block {
+            extrinsics: serde_block.block.extrinsics,
+            header: serde_block.block.header,
+            justifications: todo!(), // TODO:
+        })
+    }
+}
+
 impl serde::Serialize for RuntimeDispatchInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1191,6 +1297,16 @@ impl serde::Serialize for RuntimeDispatchInfo {
             partial_fee: self.partial_fee.to_string(),
         }
         .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RuntimeDispatchInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // TODO:
+        todo!()
     }
 }
 
