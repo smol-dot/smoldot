@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-full-node"
-version = "0.9.0"
+version = "0.9.1"
 description = "Substrate/Polkadot full node using smoldot"
 authors.workspace = true
 license.workspace = true
