@@ -906,24 +906,6 @@ pub enum ExecHint {
         ),
         feature = "wasmtime"
     ))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(
-            any(
-                all(
-                    target_arch = "x86_64",
-                    any(
-                        target_os = "windows",
-                        all(target_os = "linux", target_env = "gnu"),
-                        target_os = "macos"
-                    )
-                ),
-                all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
-                all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
-            ),
-            feature = "wasmtime"
-        )))
-    )]
     ForceWasmtime,
 }
 

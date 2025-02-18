@@ -69,7 +69,6 @@
 // TODO: better docs
 
 #![cfg(feature = "database-sqlite")]
-#![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
 use crate::{
     chain::chain_information,
