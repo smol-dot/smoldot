@@ -41,7 +41,6 @@
 //! >           This keystore, being newly-written, doesn't have to follow them.
 
 #![cfg(feature = "std")]
-#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 

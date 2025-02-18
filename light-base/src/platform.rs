@@ -24,7 +24,6 @@ use futures_util::future;
 pub use smoldot::libp2p::read_write;
 
 #[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use smoldot::libp2p::with_buffers;
 
 // TODO: this module should probably not be public?
@@ -34,7 +33,6 @@ pub mod default;
 mod with_prefix;
 
 #[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use default::DefaultPlatform;
 
 pub use with_prefix::WithPrefix;

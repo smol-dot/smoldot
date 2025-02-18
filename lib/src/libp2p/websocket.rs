@@ -19,7 +19,6 @@
 //! socket through the `AsyncRead` and `AsyncWrite` traits.
 
 #![cfg(feature = "std")]
-#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
 
