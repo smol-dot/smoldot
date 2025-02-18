@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #![cfg(feature = "std")]
-#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 //! Implementation of the [`PlatformRef`] trait that leverages the operating system.
 //!
