@@ -85,7 +85,7 @@ pub(super) struct SerializedChainInformationV1 {
 
 impl SerializedChainInformationV1 {
     pub(super) fn new(
-        from: chain_information::ChainInformationRef<'_>,
+        from: chain_information::ChainInformationRef,
         block_number_bytes: usize,
         finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
     ) -> Self {

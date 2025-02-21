@@ -531,7 +531,7 @@ struct WasmSection<'a> {
 }
 
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section(bytes: &[u8]) -> nom::IResult<&[u8], Option<WasmSection<'_>>> {
+fn wasm_section(bytes: &[u8]) -> nom::IResult<&[u8], Option<WasmSection>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(

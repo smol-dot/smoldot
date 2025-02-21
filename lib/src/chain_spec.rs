@@ -249,7 +249,7 @@ impl ChainSpec {
     ///
     /// Bootnode addresses that have failed to be parsed are returned as well in the form of
     /// a [`Bootnode::UnrecognizedFormat`].
-    pub fn boot_nodes(&self) -> impl ExactSizeIterator<Item = Bootnode<'_>> {
+    pub fn boot_nodes(&self) -> impl ExactSizeIterator<Item = Bootnode> {
         // Note that we intentionally don't expose types found in the `libp2p` module in order to
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {

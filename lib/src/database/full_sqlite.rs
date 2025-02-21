@@ -1464,7 +1464,7 @@ impl SqliteFullDatabase {
 }
 
 impl fmt::Debug for SqliteFullDatabase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("SqliteFullDatabase").finish()
     }
 }

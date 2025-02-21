@@ -83,13 +83,13 @@ pub enum ProtocolName<'a> {
 }
 
 impl<'a> fmt::Debug for ProtocolName<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 impl<'a> fmt::Display for ProtocolName<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for chunk in encode_protocol_name(*self) {
             f.write_str(chunk.as_ref())?;
         }
@@ -99,7 +99,7 @@ impl<'a> fmt::Display for ProtocolName<'a> {
 
 /// Turns a [`ProtocolName`] into its string version. Returns a list of objects that, when
 /// concatenated together, forms the string version of the [`ProtocolName`].
-pub fn encode_protocol_name(protocol: ProtocolName<'_>) -> impl Iterator<Item = impl AsRef<str>> {
+pub fn encode_protocol_name(protocol: ProtocolName) -> impl Iterator<Item = impl AsRef<str>> {
     let (genesis_hash, fork_id, base_protocol_name) = match protocol {
         ProtocolName::Identify => return either::Left(iter::once(Cow::Borrowed("/ipfs/id/1.0.0"))),
         ProtocolName::Ping => return either::Left(iter::once(Cow::Borrowed("/ipfs/ping/1.0.0"))),
@@ -165,7 +165,7 @@ pub fn encode_protocol_name(protocol: ProtocolName<'_>) -> impl Iterator<Item = 
 }
 
 /// Turns a [`ProtocolName`] into a string.
-pub fn encode_protocol_name_string(protocol: ProtocolName<'_>) -> String {
+pub fn encode_protocol_name_string(protocol: ProtocolName) -> String {
     encode_protocol_name(protocol).fold(String::with_capacity(128), |mut a, b| {
         a.push_str(b.as_ref());
         a

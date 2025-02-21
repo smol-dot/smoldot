@@ -51,7 +51,7 @@ pub struct Config<'a> {
 }
 
 /// Start a new scanning process.
-pub fn prefix_scan(config: Config<'_>) -> PrefixScan {
+pub fn prefix_scan(config: Config) -> PrefixScan {
     PrefixScan {
         trie_root_hash: config.trie_root_hash,
         full_storage_values_required: config.full_storage_values_required,

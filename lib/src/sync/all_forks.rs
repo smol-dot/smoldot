@@ -486,7 +486,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef<'_>> {
+    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
         self.chain.iter_unordered()
     }
 
@@ -494,9 +494,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
-    pub fn non_finalized_blocks_ancestry_order(
-        &self,
-    ) -> impl Iterator<Item = header::HeaderRef<'_>> {
+    pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
         self.chain.iter_ancestry_order()
     }
 

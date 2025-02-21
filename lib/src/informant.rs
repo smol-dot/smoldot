@@ -89,7 +89,7 @@ pub struct RelayChain<'a> {
 }
 
 impl<'a> fmt::Display for InformantLine<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // TODO: lots of allocations in here
         // TODO: this bar is actually harder to implement than expected; clean up code
 
@@ -193,7 +193,7 @@ impl<'a> fmt::Display for InformantLine<'a> {
 pub struct HashDisplay<'a>(pub &'a [u8]);
 
 impl<'a> fmt::Display for HashDisplay<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "0x")?;
         if self.0.len() >= 2 {
             let val = u16::from_be_bytes(<[u8; 2]>::try_from(&self.0[..2]).unwrap());
@@ -215,7 +215,7 @@ impl<'a> fmt::Display for HashDisplay<'a> {
 pub struct BytesDisplay(pub u64);
 
 impl fmt::Display for BytesDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut value = self.0 as f64;
 
         if value < 1000.0 {
@@ -265,7 +265,7 @@ impl fmt::Display for BytesDisplay {
 struct BlockNumberDisplay(u64);
 
 impl fmt::Display for BlockNumberDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "#{}", self.0)?;
         Ok(())
     }

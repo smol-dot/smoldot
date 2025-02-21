@@ -253,7 +253,7 @@ impl StorageChanges {
     /// [`StorageChanges`] was created using [`StorageChanges::empty`].
     pub fn trie_changes_iter_ordered(
         &self,
-    ) -> Option<impl Iterator<Item = (Option<&[u8]>, &[Nibble], TrieChange<'_>)>> {
+    ) -> Option<impl Iterator<Item = (Option<&[u8]>, &[Nibble], TrieChange)>> {
         if !self.calculate_trie_changes {
             return None;
         }
@@ -324,7 +324,7 @@ impl StorageChanges {
 }
 
 impl fmt::Debug for StorageChanges {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(trie_changes) = self.trie_changes_iter_ordered() {
             f.debug_map()
                 .entries(trie_changes.map(|(child_trie, key, change)| {
@@ -409,7 +409,7 @@ pub enum TrieChange<'a> {
 }
 
 impl<'a> fmt::Debug for TrieChange<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TrieChange::Remove => f.debug_tuple("Remove").finish(),
             TrieChange::InsertUpdate {
@@ -451,7 +451,7 @@ pub enum TrieChangeStorageValue<'a> {
 }
 
 impl<'a> fmt::Debug for TrieChangeStorageValue<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TrieChangeStorageValue::Unmodified => f.debug_tuple("Unmodified").finish(),
             TrieChangeStorageValue::Modified { new_value: None } => {

@@ -483,7 +483,7 @@ struct Entry {
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
             .entries(self.iter_ordered().map(
                 |(
@@ -495,7 +495,7 @@ impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
                 )| {
                     struct DummyHash<'a>(&'a [u8]);
                     impl<'a> fmt::Debug for DummyHash<'a> {
-                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                             if self.0.is_empty() {
                                 write!(f, "∅")?
                             }
@@ -508,7 +508,7 @@ impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
 
                     struct DummyNibbles<'a, T: AsRef<[u8]>>(EntryKeyIter<'a, T>);
                     impl<'a, T: AsRef<[u8]>> fmt::Debug for DummyNibbles<'a, T> {
-                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                             let mut any_written = false;
                             for nibble in self.0.clone() {
                                 any_written = true;
@@ -596,7 +596,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
         &self,
-    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> {
+    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue)> {
         self.iter_ordered().filter_map(
             |(
                 EntryKey {
@@ -1376,7 +1376,7 @@ pub enum StorageValue<'a> {
 }
 
 impl<'a> fmt::Debug for StorageValue<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             StorageValue::Known { value, inline } if value.len() <= 48 => {
                 write!(
@@ -1532,7 +1532,7 @@ impl<'a, T> Clone for EntryKeyIter<'a, T> {
 }
 
 impl<'a, T: AsRef<[u8]>> fmt::Debug for EntryKeyIter<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut any_printed = false;
         for nibble in self.clone() {
             any_printed = true;
@@ -1695,13 +1695,13 @@ impl<'a, T> Clone for Children<'a, T> {
 }
 
 impl<'a, T> fmt::Debug for Children<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Binary::fmt(&self, f)
     }
 }
 
 impl<'a, T> fmt::Binary for Children<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for child in &self.children {
             let chr = match child {
                 Child::InProof { .. } | Child::AbsentFromProof { .. } => '1',

@@ -1742,13 +1742,13 @@ impl<TNow, TSub> fmt::Debug for Yamux<TNow, TSub>
 where
     TSub: fmt::Debug,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         struct List<'a, TNow, TSub>(&'a Yamux<TNow, TSub>);
         impl<'a, TNow, TSub> fmt::Debug for List<'a, TNow, TSub>
         where
             TSub: fmt::Debug,
         {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.debug_list()
                     .entries(self.0.inner.substreams.values().map(|v| &v.user_data))
                     .finish()
@@ -2139,7 +2139,7 @@ impl<'a, TNow, TSub> fmt::Debug for SubstreamReadWrite<'a, TNow, TSub>
 where
     TNow: Clone + cmp::Ord,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("SubstreamReadWrite")
             .field("substream_id", &self.substream_id)
             .finish()

@@ -3640,13 +3640,13 @@ impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
     }
 }
@@ -3667,13 +3667,13 @@ impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self.as_ref(), f)
     }
 }

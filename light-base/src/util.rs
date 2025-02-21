@@ -24,7 +24,7 @@ pub fn truncated_str(input: impl Iterator<Item = char> + Clone, limit: usize) ->
     struct Iter<I>(I, usize);
 
     impl<I: Iterator<Item = char> + Clone> fmt::Display for Iter<I> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             let mut counter = 0;
             for c in self.0.clone() {
                 f.write_char(c)?;
