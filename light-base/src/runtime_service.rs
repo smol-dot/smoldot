@@ -2941,7 +2941,7 @@ fn download_runtime<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     block_hash: [u8; 32],
     scale_encoded_header: &[u8],
-) -> impl future::Future<
+) -> impl Future<
     Output = Result<
         (
             Option<Vec<u8>>,
@@ -2951,7 +2951,7 @@ fn download_runtime<TPlat: PlatformRef>(
         ),
         RuntimeDownloadError,
     >,
-> {
+> + use<TPlat> {
     // In order to perform the download, we need to known the state root hash of the
     // block in question, which requires decoding the block. If the decoding fails,
     // we report that the asynchronous operation has failed with the hope that this

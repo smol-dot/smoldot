@@ -76,13 +76,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 > + Send,
         >,
     >;
-    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + use<'a>>>;
+    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + 'a>>;
     type NextSubstreamFuture<'a> = pin::Pin<
         Box<
             dyn future::Future<
                     Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>,
                 > + Send
-                + use<'a>,
+                + 'a,
         >,
     >;
 
