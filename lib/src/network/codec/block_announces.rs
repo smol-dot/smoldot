@@ -90,9 +90,7 @@ pub struct BlockAnnounceRef<'a> {
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announce(
-    announce: BlockAnnounceRef,
-) -> impl Iterator<Item = impl AsRef<[u8]>> {
+pub fn encode_block_announce(announce: BlockAnnounceRef) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
 
     [
