@@ -23,7 +23,7 @@ use super::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{fmt, future, mem, pin, ptr, slice, task};
+use core::{fmt, future, mem, pin, slice, task};
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
@@ -735,7 +735,7 @@ impl Jit {
         // execution might be able to progress, hence the lack of need for a waker.
         match Future::poll(
             function_call.as_mut(),
-            &mut task::Context::from_waker(&noop_waker()),
+            &mut task::Context::from_waker(task::Waker::noop()),
         ) {
             task::Poll::Ready((store, Ok(val))) => {
                 self.inner = JitInner::Done(store);
@@ -928,7 +928,7 @@ impl Jit {
                 // execution might be able to progress, hence the lack of need for a waker.
                 match Future::poll(
                     function_call.as_mut(),
-                    &mut task::Context::from_waker(&noop_waker()),
+                    &mut task::Context::from_waker(task::Waker::noop()),
                 ) {
                     task::Poll::Ready(_) => unreachable!(),
                     task::Poll::Pending => {
