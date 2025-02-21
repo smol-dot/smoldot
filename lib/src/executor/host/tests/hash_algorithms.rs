@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::super::{
-    vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior,
+    Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior, vm::ExecHint,
 };
 use super::with_core_version_custom_sections;
 
@@ -298,7 +298,9 @@ gen_test!(
 gen_test!(
     ext_hashing_twox_128_version_1,
     16,
-    [104, 105, 30, 178, 52, 103, 171, 69, 199, 183, 31, 36, 197, 3, 27, 176]
+    [
+        104, 105, 30, 178, 52, 103, 171, 69, 199, 183, 31, 36, 197, 3, 27, 176
+    ]
 );
 
 gen_test!(

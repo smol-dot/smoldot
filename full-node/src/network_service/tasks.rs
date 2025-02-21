@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{LogCallback, LogLevel};
-use core::future::Future;
 use futures_lite::future;
 use futures_util::StreamExt as _;
 use smol::{
@@ -201,7 +200,7 @@ pub(super) async fn connection_task(
 /// protocols aren't supported.
 pub(super) fn multiaddr_to_socket(
     addr: &Multiaddr,
-) -> Result<impl Future<Output = Result<impl AsyncReadWrite, io::Error>>, ()> {
+) -> Result<impl Future<Output = Result<impl AsyncReadWrite + use<>, io::Error>> + use<>, ()> {
     let mut iter = addr.iter().fuse();
     let proto1 = iter.next().ok_or(())?;
     let proto2 = iter.next().ok_or(())?;

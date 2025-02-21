@@ -57,7 +57,7 @@ pub fn decode_find_node_response(
         Err(_) => {
             return Err(DecodeFindNodeResponseError::ProtobufDecode(
                 ProtobufDecodeError,
-            ))
+            ));
         }
     };
 

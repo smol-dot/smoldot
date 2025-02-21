@@ -87,7 +87,7 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZero, ops, time::Duration};
-use hashbrown::{hash_map::Entry, HashMap};
+use hashbrown::{HashMap, hash_map::Entry};
 use itertools::Itertools as _;
 use platform::PlatformRef;
 use smoldot::{

@@ -312,19 +312,21 @@ fn insert_branch() {
     .insert_storage_value()
     .insert((), ());
 
-    assert!(!trie
-        .node(
-            [
-                Nibble::try_from(1).unwrap(),
-                Nibble::try_from(2).unwrap(),
-                Nibble::try_from(3).unwrap(),
-            ]
-            .iter()
-            .cloned(),
-        )
-        .into_occupied()
-        .unwrap()
-        .has_storage_value());
+    assert!(
+        !trie
+            .node(
+                [
+                    Nibble::try_from(1).unwrap(),
+                    Nibble::try_from(2).unwrap(),
+                    Nibble::try_from(3).unwrap(),
+                ]
+                .iter()
+                .cloned(),
+            )
+            .into_occupied()
+            .unwrap()
+            .has_storage_value()
+    );
 }
 
 #[test]
@@ -385,11 +387,12 @@ fn remove_prefix_basic() {
     );
 
     assert_eq!(trie.len(), 1);
-    assert!(trie
-        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
-        .into_occupied()
-        .unwrap()
-        .has_storage_value());
+    assert!(
+        trie.node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+            .into_occupied()
+            .unwrap()
+            .has_storage_value()
+    );
 }
 
 #[test]
@@ -512,11 +515,12 @@ fn remove_prefix_exact() {
     );
 
     assert_eq!(trie.len(), 1);
-    assert!(trie
-        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
-        .into_occupied()
-        .unwrap()
-        .has_storage_value());
+    assert!(
+        trie.node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+            .into_occupied()
+            .unwrap()
+            .has_storage_value()
+    );
 }
 
 #[test]
@@ -548,8 +552,8 @@ fn remove_prefix_doesnt_match_anything() {
     );
 
     assert_eq!(trie.len(), 1);
-    assert!(trie
-        .node(
+    assert!(
+        trie.node(
             [
                 Nibble::try_from(1).unwrap(),
                 Nibble::try_from(2).unwrap(),
@@ -560,7 +564,8 @@ fn remove_prefix_doesnt_match_anything() {
         )
         .into_occupied()
         .unwrap()
-        .has_storage_value());
+        .has_storage_value()
+    );
 }
 
 #[test]
@@ -593,8 +598,8 @@ fn remove_prefix_nothing_to_remove() {
     );
 
     assert_eq!(trie.len(), 1);
-    assert!(trie
-        .node(
+    assert!(
+        trie.node(
             [
                 Nibble::try_from(1).unwrap(),
                 Nibble::try_from(2).unwrap(),
@@ -605,7 +610,8 @@ fn remove_prefix_nothing_to_remove() {
         )
         .into_occupied()
         .unwrap()
-        .has_storage_value());
+        .has_storage_value()
+    );
 }
 
 #[test]

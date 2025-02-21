@@ -17,7 +17,7 @@
 
 use std::iter;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::Rng as _;
 
 fn benchmark_proof_decode(c: &mut Criterion) {

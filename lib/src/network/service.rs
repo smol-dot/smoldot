@@ -419,7 +419,7 @@ where
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 return Err(AddChainError::Duplicate {
                     existing_identical: ChainId(*entry.get()),
-                })
+                });
             }
         }
 
@@ -650,7 +650,7 @@ where
     }
 
     /// Returns the list of all the chains that have been added.
-    pub fn chains(&'_ self) -> impl ExactSizeIterator<Item = ChainId> + '_ {
+    pub fn chains(&self) -> impl ExactSizeIterator<Item = ChainId> {
         self.chains.iter().map(|(idx, _)| ChainId(idx))
     }
 
@@ -899,7 +899,7 @@ where
         &self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &PeerId> {
         self.gossip_desired_peers_by_chain
             .range(
                 (chain_id.0, kind, PeerIndex(usize::MIN))
@@ -923,7 +923,7 @@ where
     ///
     /// > **Note**: Connections that are currently in the process of shutting down are also
     /// >           ignored for the purpose of this function.
-    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone + '_ {
+    pub fn unconnected_desired(&self) -> impl ExactSizeIterator<Item = &PeerId> + Clone {
         self.unconnected_desired
             .iter()
             .map(|peer_index| &self.peers[peer_index.0])
@@ -932,8 +932,8 @@ where
     /// Returns the list of [`PeerId`]s that are marked as desired, and for which a healthy
     /// connection exists, but for which no substream connection attempt exists.
     pub fn connected_unopened_gossip_desired(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, ChainId, GossipKind)> + Clone {
         self.connected_unopened_gossip_desired.iter().map(
             move |(peer_index, chain_id, gossip_kind)| {
                 (&self.peers[peer_index.0], *chain_id, *gossip_kind)
@@ -944,8 +944,8 @@ where
     /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
     /// exists but that are not marked as desired.
     pub fn opened_gossip_undesired(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, ChainId, GossipKind)> + Clone {
         self.opened_gossip_undesired
             .iter()
             .map(move |(chain_id, peer_index, gossip_kind)| {
@@ -961,9 +961,9 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn opened_gossip_undesired_by_chain(
-        &'_ self,
+        &self,
         chain_id: ChainId,
-    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone + '_ {
+    ) -> impl Iterator<Item = (&PeerId, GossipKind)> + Clone {
         // TODO: optimize and add an ExactSizeIterator bound to the return value, and update the users to use len() instead of count()
         self.opened_gossip_undesired
             .iter()
@@ -1653,7 +1653,7 @@ where
                                         chain_id: ChainId(chain_index),
                                         config,
                                         substream_id,
-                                    })
+                                    });
                                 }
                                 Err(error) => {
                                     let _ = self.substreams.remove(&substream_id);
@@ -2051,26 +2051,29 @@ where
                             // This can only happen if we have a block announces substream with
                             // that peer, otherwise the substream opening attempt should have
                             // been cancelled.
-                            debug_assert!(self
-                                .notification_substreams_by_peer_id
-                                .range(
-                                    (
-                                        NotificationsProtocol::BlockAnnounces { chain_index },
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::OPEN_MIN_VALUE,
-                                        SubstreamId::MIN
-                                    )
-                                        ..=(
+                            debug_assert!(
+                                self.notification_substreams_by_peer_id
+                                    .range(
+                                        (
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::OPEN_MAX_VALUE,
-                                            SubstreamId::MAX
+                                            NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                            SubstreamId::MIN
                                         )
-                                )
-                                .next()
-                                .is_some());
+                                            ..=(
+                                                NotificationsProtocol::BlockAnnounces {
+                                                    chain_index
+                                                },
+                                                peer_index,
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                                SubstreamId::MAX
+                                            )
+                                    )
+                                    .next()
+                                    .is_some()
+                            );
 
                             // If the substream failed to open, we simply try again.
                             // Trying again means that we might be hammering the remote with
@@ -2245,28 +2248,31 @@ where
                                     state.established && !state.shutting_down
                                 })
                             {
-                                debug_assert!(self
-                                    .notification_substreams_by_peer_id
-                                    .range(
-                                        (
-                                            NotificationsProtocol::BlockAnnounces { chain_index },
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::MIN,
-                                            SubstreamId::MIN,
-                                        )
-                                            ..=(
+                                debug_assert!(
+                                    self.notification_substreams_by_peer_id
+                                        .range(
+                                            (
                                                 NotificationsProtocol::BlockAnnounces {
                                                     chain_index
                                                 },
                                                 peer_index,
                                                 SubstreamDirection::Out,
-                                                NotificationsSubstreamState::MAX,
-                                                SubstreamId::MAX,
-                                            ),
-                                    )
-                                    .next()
-                                    .is_none());
+                                                NotificationsSubstreamState::MIN,
+                                                SubstreamId::MIN,
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::BlockAnnounces {
+                                                        chain_index
+                                                    },
+                                                    peer_index,
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::MAX,
+                                                    SubstreamId::MAX,
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                );
 
                                 let _was_inserted =
                                     self.connected_unopened_gossip_desired.insert((
@@ -2706,7 +2712,7 @@ where
                                     return Some(Event::ProtocolError {
                                         error: ProtocolError::BadGrandpaNotification(err),
                                         peer_id: self.peers[peer_index.0].clone(),
-                                    })
+                                    });
                                 }
                             };
 
@@ -2720,7 +2726,7 @@ where
                                             block_number_bytes: self.chains[chain_index]
                                                 .block_number_bytes,
                                         },
-                                    })
+                                    });
                                 }
                                 codec::GrandpaNotificationRef::Neighbor(n) => {
                                     return Some(Event::GrandpaNeighborPacket {
@@ -2731,7 +2737,7 @@ where
                                             set_id: n.set_id,
                                             commit_finalized_height: n.commit_finalized_height,
                                         },
-                                    })
+                                    });
                                 }
                                 _ => {
                                     // Any other type of message is currently ignored. Support
@@ -3278,10 +3284,10 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn gossip_connected_peers(
-        &'_ self,
+        &self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &PeerId> {
         assert!(self.chains.contains(chain_id.0));
         let GossipKind::ConsensusTransactions = kind;
 
@@ -3322,7 +3328,7 @@ where
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn gossip_is_connected(
-        &'_ self,
+        &self,
         chain_id: ChainId,
         target: &PeerId,
         kind: GossipKind,

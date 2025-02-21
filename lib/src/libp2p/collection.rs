@@ -63,8 +63,8 @@ use core::{
     time::Duration,
 };
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use super::peer_id::PeerId;

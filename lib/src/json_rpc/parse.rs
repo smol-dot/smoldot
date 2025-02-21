@@ -621,10 +621,12 @@ mod tests {
 
     #[test]
     fn parse_response_missing_id() {
-        assert!(super::parse_response(
-            r#"{"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"} }"#
-        )
-        .is_err());
+        assert!(
+            super::parse_response(
+                r#"{"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"} }"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -675,6 +677,9 @@ mod tests {
     #[test]
     fn build_parse_error() {
         let response = super::build_parse_error_response();
-        assert_eq!(response, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}");
+        assert_eq!(
+            response,
+            "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"
+        );
     }
 }

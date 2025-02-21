@@ -85,12 +85,14 @@ fn out_of_memory_access() {
             0x06, 0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
         ];
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes[..],
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0)
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes[..],
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            })
+            .is_err()
+        );
     }
 }
 
@@ -102,12 +104,14 @@ fn has_start_function() {
             0x02, 0x09, 0x01, 0x01, 0x71, 0x03, 0x69, 0x6d, 0x70, 0x00, 0x00, 0x08, 0x01, 0x00,
         ];
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes[..],
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0)
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes[..],
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            })
+            .is_err()
+        );
     }
 }
 
@@ -120,12 +124,14 @@ fn unsupported_type() {
             0x00, 0x00,
         ];
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes[..],
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0)
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes[..],
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            })
+            .is_err()
+        );
     }
 }
 
@@ -997,12 +1003,14 @@ fn feature_disabled_signext() {
             continue;
         }
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1028,12 +1036,14 @@ fn feature_disabled_saturated_float_to_int() {
             continue;
         }
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1053,12 +1063,14 @@ fn feature_disabled_threads() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1075,12 +1087,14 @@ fn feature_disabled_reference_type() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1100,12 +1114,14 @@ fn feature_disabled_bulk_memory() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1124,12 +1140,14 @@ fn feature_disabled_multi_value() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1145,12 +1163,14 @@ fn feature_disabled_memory64() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1173,12 +1193,14 @@ fn feature_disabled_mutable_globals() {
             continue;
         }
 
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1208,12 +1230,14 @@ fn feature_disabled_tail_call() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 
@@ -1267,12 +1291,14 @@ fn feature_disabled_simd128() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
-        assert!(super::VirtualMachinePrototype::new(super::Config {
-            module_bytes: &module_bytes,
-            exec_hint,
-            symbols: &mut |_, _, _| Ok(0),
-        })
-        .is_err());
+        assert!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0),
+            })
+            .is_err()
+        );
     }
 }
 

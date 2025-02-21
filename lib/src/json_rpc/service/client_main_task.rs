@@ -500,10 +500,12 @@ impl ClientMainTask {
 
                     // Allocate the new subscription ID.
                     let subscription_id = self.allocate_subscription_id();
-                    debug_assert!(!self
-                        .inner
-                        .active_subscriptions
-                        .contains_key(&subscription_id));
+                    debug_assert!(
+                        !self
+                            .inner
+                            .active_subscriptions
+                            .contains_key(&subscription_id)
+                    );
 
                     // Insert an "kill channel" in the local state. This kill channel is shared
                     // with the subscription object and is used to notify when a subscription
@@ -693,7 +695,7 @@ impl ClientMainTask {
 }
 
 impl fmt::Debug for ClientMainTask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ClientMainTask").finish()
     }
 }
@@ -919,7 +921,7 @@ impl SerializedRequestsIo {
 }
 
 impl fmt::Debug for SerializedRequestsIo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("SerializedRequestsIo").finish()
     }
 }
@@ -1004,7 +1006,7 @@ impl RequestProcess {
     /// Indicate the response to the request to the [`ClientMainTask`].
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
-    pub fn respond(mut self, response: methods::Response<'_>) {
+    pub fn respond(mut self, response: methods::Response) {
         let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .0;
@@ -1075,7 +1077,7 @@ impl RequestProcess {
 }
 
 impl fmt::Debug for RequestProcess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.request, f)
     }
 }
@@ -1217,7 +1219,7 @@ impl SubscriptionStartProcess {
 }
 
 impl fmt::Debug for SubscriptionStartProcess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.request, f)
     }
 }
@@ -1357,7 +1359,7 @@ impl Subscription {
 }
 
 impl fmt::Debug for Subscription {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Subscription")
             .field(&self.subscription_id)
             .finish()

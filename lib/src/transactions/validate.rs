@@ -175,7 +175,7 @@ pub enum TransactionValidityError {
 pub fn validate_transaction_runtime_parameters_v2<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, &[])
 }
 
@@ -184,7 +184,7 @@ pub fn validate_transaction_runtime_parameters_v3<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
     block_hash: &'a [u8; 32],
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, block_hash)
 }
 
@@ -192,7 +192,7 @@ fn validate_transaction_runtime_parameters_inner<'a>(
     scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
     block_hash: &'a [u8],
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
     // `(source, tx, block_hash)`. The encoding is performed manually in order to avoid
     // performing redundant data copies.

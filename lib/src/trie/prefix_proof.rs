@@ -51,7 +51,7 @@ pub struct Config<'a> {
 }
 
 /// Start a new scanning process.
-pub fn prefix_scan(config: Config<'_>) -> PrefixScan {
+pub fn prefix_scan(config: Config) -> PrefixScan {
     PrefixScan {
         trie_root_hash: config.trie_root_hash,
         full_storage_values_required: config.full_storage_values_required,
@@ -87,9 +87,7 @@ enum QueryTy {
 
 impl PrefixScan {
     /// Returns the list of keys whose storage proof must be queried.
-    pub fn requested_keys(
-        &'_ self,
-    ) -> impl Iterator<Item = impl Iterator<Item = nibble::Nibble> + '_> + '_ {
+    pub fn requested_keys(&self) -> impl Iterator<Item = impl Iterator<Item = nibble::Nibble>> {
         self.next_queries.iter().map(|(l, _)| l.iter().copied())
     }
 

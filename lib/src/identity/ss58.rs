@@ -44,7 +44,7 @@ pub struct Decoded<P> {
 pub struct ChainPrefix(u16);
 
 impl fmt::Debug for ChainPrefix {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
 }
@@ -101,7 +101,7 @@ pub fn encode(decoded: Decoded<impl AsRef<[u8]>>) -> String {
 }
 
 /// Decodes an SS58 address from a string.
-pub fn decode(encoded: &'_ str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
+pub fn decode(encoded: &str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
     let mut bytes = bs58::decode(encoded)
         .into_vec()
         .map_err(|err| DecodeError::InvalidBs58(Bs58DecodeError(err)))?;

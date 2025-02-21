@@ -129,7 +129,7 @@ impl<T> ForkTree<T> {
 
     /// Returns an iterator to all the node values. The returned items are guaranteed to be in an
     /// order in which the parents are found before their children.
-    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = (NodeIndex, &'_ T)> + '_ {
+    pub fn iter_ancestry_order(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
         iter::successors(self.first_root.map(NodeIndex), move |n| {
             self.ancestry_order_next(*n)
         })
@@ -209,7 +209,7 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn ancestors(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
         iter::successors(Some(node), move |n| self.nodes[n.0].parent.map(NodeIndex)).skip(1)
     }
 
@@ -229,7 +229,7 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn children(&self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
         let first = match node {
             Some(n) => self.nodes[n.0].first_child,
             None => self.first_root,
@@ -386,12 +386,12 @@ impl<T> ForkTree<T> {
     /// Panics if one of the [`NodeIndex`]s is invalid.
     ///
     pub fn ascend_and_descend(
-        &'_ self,
+        &self,
         node1: NodeIndex,
         node2: NodeIndex,
     ) -> (
-        impl Iterator<Item = NodeIndex> + Clone + '_,
-        impl Iterator<Item = NodeIndex> + Clone + '_,
+        impl Iterator<Item = NodeIndex> + Clone,
+        impl Iterator<Item = NodeIndex> + Clone,
     ) {
         let common_ancestor = self.common_ancestor(node1, node2);
 
@@ -421,9 +421,9 @@ impl<T> ForkTree<T> {
     /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn node_to_root_path(
-        &'_ self,
+        &self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
+    ) -> impl Iterator<Item = NodeIndex> + Clone {
         iter::successors(Some(node_index), move |n| {
             self.nodes[n.0].parent.map(NodeIndex)
         })
@@ -436,9 +436,9 @@ impl<T> ForkTree<T> {
     /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn root_to_node_path(
-        &'_ self,
+        &self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
+    ) -> impl Iterator<Item = NodeIndex> + Clone {
         debug_assert!(self.nodes.get(usize::MAX).is_none());
 
         // First element is an invalid key, each successor is the last element of
@@ -622,10 +622,11 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             }
 
             // Actually remove the node.
-            debug_assert!(self
-                .tree
-                .first_root
-                .map_or(true, |n| n != maybe_removed_node_index.0));
+            debug_assert!(
+                self.tree
+                    .first_root
+                    .map_or(true, |n| n != maybe_removed_node_index.0)
+            );
             let iter_node = self.tree.nodes.remove(maybe_removed_node_index.0);
 
             break Some(PrunedNode {
@@ -654,10 +655,11 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
             debug_assert!(self.tree.first_root.is_some());
         }
 
-        debug_assert!(self
-            .tree
-            .first_root
-            .map_or(true, |fr| self.tree.nodes.contains(fr)));
+        debug_assert!(
+            self.tree
+                .first_root
+                .map_or(true, |fr| self.tree.nodes.contains(fr))
+        );
 
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
 

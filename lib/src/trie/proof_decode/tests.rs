@@ -247,47 +247,51 @@ fn next_key_works() {
         Err(super::IncompleteProofError())
     ));
 
-    assert!(decoded
-        .next_key(
-            EXAMPLE_PROOF_STATE_ROOT,
-            [
-                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
-                4, 6, 4, 0xe, 3, 3, 3, 9, 7
-            ]
-            .into_iter()
-            .map(|n| Nibble::try_from(n).unwrap()),
-            true,
-            [
-                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
-                4, 6, 4, 0xe, 3, 3, 3, 9, 7, 0
-            ]
-            .into_iter()
-            .map(|n| Nibble::try_from(n).unwrap()),
-            true
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        decoded
+            .next_key(
+                EXAMPLE_PROOF_STATE_ROOT,
+                [
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap()),
+                true,
+                [
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7, 0
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap()),
+                true
+            )
+            .unwrap()
+            .is_none()
+    );
 
-    assert!(decoded
-        .next_key(
-            EXAMPLE_PROOF_STATE_ROOT,
-            [
-                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
-                4, 6, 4, 0xe, 3, 3, 3, 9, 7
-            ]
-            .into_iter()
-            .map(|n| Nibble::try_from(n).unwrap()),
-            true,
-            [
-                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
-                4, 6, 4, 0xe, 3, 3, 3, 0xa
-            ]
-            .into_iter()
-            .map(|n| Nibble::try_from(n).unwrap()),
-            true
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        decoded
+            .next_key(
+                EXAMPLE_PROOF_STATE_ROOT,
+                [
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap()),
+                true,
+                [
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 0xa
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap()),
+                true
+            )
+            .unwrap()
+            .is_none()
+    );
 
     // TODO: more tests
 }
@@ -336,25 +340,29 @@ fn closest_descendant_merkle_value_works() {
         Err(super::IncompleteProofError())
     ));
 
-    assert!(decoded
-        .closest_descendant_merkle_value(
-            EXAMPLE_PROOF_STATE_ROOT,
-            [super::nibble::Nibble::try_from(0xe).unwrap()].into_iter()
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                [super::nibble::Nibble::try_from(0xe).unwrap()].into_iter()
+            )
+            .unwrap()
+            .is_none()
+    );
 
-    assert!(decoded
-        .closest_descendant_merkle_value(
-            EXAMPLE_PROOF_STATE_ROOT,
-            [
-                super::nibble::Nibble::try_from(0xe).unwrap(),
-                super::nibble::Nibble::try_from(0).unwrap()
-            ]
-            .into_iter()
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                [
+                    super::nibble::Nibble::try_from(0xe).unwrap(),
+                    super::nibble::Nibble::try_from(0).unwrap()
+                ]
+                .into_iter()
+            )
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         decoded
@@ -372,23 +380,27 @@ fn closest_descendant_merkle_value_works() {
         ][..]
     );
 
-    assert!(decoded
-        .closest_descendant_merkle_value(
-            EXAMPLE_PROOF_STATE_ROOT,
-            trie::bytes_to_nibbles(
-                [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 228].into_iter()
+    assert!(
+        decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                trie::bytes_to_nibbles(
+                    [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 228].into_iter()
+                )
             )
-        )
-        .unwrap()
-        .is_none());
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
                 trie::bytes_to_nibbles(
-                    [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151]
-                        .into_iter()
+                    [
+                        156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151
+                    ]
+                    .into_iter()
                 )
             )
             .unwrap()
@@ -399,21 +411,23 @@ fn closest_descendant_merkle_value_works() {
         ][..]
     );
 
-    assert!(decoded
-        .closest_descendant_merkle_value(
-            EXAMPLE_PROOF_STATE_ROOT,
-            trie::bytes_to_nibbles(
-                [
-                    156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151, 99, 230,
-                    211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129, 125, 112, 129, 84,
-                    37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71, 158, 223, 124, 253, 90, 163,
-                    83, 87, 89, 10, 207, 229, 209, 26, 128, 77, 148, 78, 0
-                ]
-                .into_iter()
+    assert!(
+        decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                trie::bytes_to_nibbles(
+                    [
+                        156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151, 99,
+                        230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129, 125, 112,
+                        129, 84, 37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71, 158, 223, 124,
+                        253, 90, 163, 83, 87, 89, 10, 207, 229, 209, 26, 128, 77, 148, 78, 0
+                    ]
+                    .into_iter()
+                )
             )
-        )
-        .unwrap()
-        .is_none());
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         decoded
@@ -516,15 +530,17 @@ fn very_small_root_node_decodes() {
 
     let proof = super::decode_and_verify_proof(super::Config { proof }).unwrap();
 
-    assert!(proof
-        .closest_descendant_merkle_value(
-            &[
-                83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193, 110,
-                145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
-            ],
-            iter::empty()
-        )
-        .is_ok());
+    assert!(
+        proof
+            .closest_descendant_merkle_value(
+                &[
+                    83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193,
+                    110, 145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
+                ],
+                iter::empty()
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -537,15 +553,17 @@ fn identical_inline_nodes() {
     })
     .unwrap();
 
-    assert!(proof
-        .closest_descendant_merkle_value(
-            &[
-                15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78, 28,
-                137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
-            ],
-            iter::empty()
-        )
-        .is_ok());
+    assert!(
+        proof
+            .closest_descendant_merkle_value(
+                &[
+                    15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78,
+                    28, 137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
+                ],
+                iter::empty()
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -2341,15 +2359,17 @@ fn invalid_nodes_are_ignored() {
 
     let decoded_proof = super::decode_and_verify_proof(super::Config { proof }).unwrap();
 
-    assert!(decoded_proof
-        .closest_descendant_merkle_value(
-            &[
-                250, 90, 64, 163, 99, 146, 173, 5, 126, 222, 6, 39, 161, 170, 189, 182, 82, 178,
-                16, 36, 159, 119, 199, 211, 66, 172, 109, 244, 187, 161, 173, 95,
-            ],
-            core::iter::empty()
-        )
-        .is_ok());
+    assert!(
+        decoded_proof
+            .closest_descendant_merkle_value(
+                &[
+                    250, 90, 64, 163, 99, 146, 173, 5, 126, 222, 6, 39, 161, 170, 189, 182, 82,
+                    178, 16, 36, 159, 119, 199, 211, 66, 172, 109, 244, 187, 161, 173, 95,
+                ],
+                core::iter::empty()
+            )
+            .is_ok()
+    );
 }
 
 #[test]

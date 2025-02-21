@@ -70,7 +70,7 @@ use core::{cmp, iter, mem, num::NonZero, ops, pin::Pin, time::Duration};
 use derive_more::derive;
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, Stream, StreamExt as _};
+use futures_util::{Stream, StreamExt as _, future, stream};
 use itertools::Itertools as _;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -78,7 +78,7 @@ use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    trie::{self, proof_decode, Nibble},
+    trie::{self, Nibble, proof_decode},
 };
 
 /// Configuration for a runtime service.
@@ -944,7 +944,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                         match async_op {
                             async_tree::NextNecessaryAsyncOp::Ready(dl) => {
-                                break WakeUpReason::StartDownload(dl.id, dl.block_index)
+                                break WakeUpReason::StartDownload(dl.id, dl.block_index);
                             }
                             async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                                 if let Some(when) = when {
@@ -962,7 +962,7 @@ async fn run_background<TPlat: PlatformRef>(
                         Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                             match tree.try_advance_output() {
                                 Some(update) => {
-                                    break WakeUpReason::TreeAdvanceFinalizedKnown(update)
+                                    break WakeUpReason::TreeAdvanceFinalizedKnown(update);
                                 }
                                 None => wait.await,
                             }
@@ -970,7 +970,7 @@ async fn run_background<TPlat: PlatformRef>(
                         Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                             match tree.try_advance_output() {
                                 Some(update) => {
-                                    break WakeUpReason::TreeAdvanceFinalizedUnknown(update)
+                                    break WakeUpReason::TreeAdvanceFinalizedUnknown(update);
                                 }
                                 None => wait.await,
                             }
@@ -2941,7 +2941,7 @@ fn download_runtime<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     block_hash: [u8; 32],
     scale_encoded_header: &[u8],
-) -> impl future::Future<
+) -> impl Future<
     Output = Result<
         (
             Option<Vec<u8>>,
@@ -2951,7 +2951,7 @@ fn download_runtime<TPlat: PlatformRef>(
         ),
         RuntimeDownloadError,
     >,
-> {
+> + use<TPlat> {
     // In order to perform the download, we need to known the state root hash of the
     // block in question, which requires decoding the block. If the decoding fails,
     // we report that the asynchronous operation has failed with the hope that this
@@ -3005,7 +3005,7 @@ fn download_runtime<TPlat: PlatformRef>(
                         storage_heap_pages,
                         code_merkle_value,
                         code_closest_ancestor_excluding,
-                    ))
+                    ));
                 }
                 sync_service::StorageQueryProgress::Progress {
                     request_index: 0,
@@ -3039,7 +3039,7 @@ fn download_runtime<TPlat: PlatformRef>(
                 }
                 sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
                 sync_service::StorageQueryProgress::Error(error) => {
-                    break Err(RuntimeDownloadError::StorageQuery(error))
+                    break Err(RuntimeDownloadError::StorageQuery(error));
                 }
             }
         }
@@ -3194,7 +3194,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                         Err(SingleRuntimeCallAttemptError::Inaccessible(
                             RuntimeCallInaccessibleError::MissingProofEntry,
                         )),
-                    )
+                    );
                 }
                 Ok(None) => None,
                 Ok(Some((value, _))) => match <&[u8; 32]>::try_from(value) {
@@ -3205,7 +3205,7 @@ async fn runtime_call_single_attempt<TPlat: PlatformRef>(
                             Err(SingleRuntimeCallAttemptError::Inaccessible(
                                 RuntimeCallInaccessibleError::MissingProofEntry,
                             )),
-                        )
+                        );
                     }
                 },
             }

@@ -36,9 +36,7 @@
 
 use smol::{future, net::UdpSocket};
 use smoldot::libp2p::PeerId;
-use std::{
-    convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZero, pin::Pin, sync::Arc,
-};
+use std::{convert::TryFrom as _, io, net::SocketAddr, num::NonZero, pin::Pin, sync::Arc};
 
 /// Configuration for a [`JaegerService`].
 pub struct Config<'a> {

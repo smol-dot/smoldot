@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::super::{
-    vm, vm::ExecHint, Config, HeapPages, HostVmPrototype, ModuleFormatError, NewErr,
+    Config, HeapPages, HostVmPrototype, ModuleFormatError, NewErr, vm, vm::ExecHint,
 };
 use super::with_core_version_custom_sections;
 
@@ -217,13 +217,15 @@ fn rococo_genesis_works() {
     let module_bytes = &include_bytes!("./rococo-genesis.wasm")[..];
 
     for exec_hint in ExecHint::available_engines() {
-        assert!(HostVmPrototype::new(Config {
-            allow_unresolved_imports: true,
-            exec_hint,
-            heap_pages: HeapPages::new(1024),
-            module: &module_bytes,
-        })
-        .is_ok());
+        assert!(
+            HostVmPrototype::new(Config {
+                allow_unresolved_imports: true,
+                exec_hint,
+                heap_pages: HeapPages::new(1024),
+                module: &module_bytes,
+            })
+            .is_ok()
+        );
     }
 }
 

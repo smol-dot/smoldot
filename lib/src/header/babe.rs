@@ -63,9 +63,7 @@ impl<'a> BabeConsensusLogRef<'a> {
 
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
-    pub fn scale_encoding(
-        &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         let index = iter::once(match self {
             BabeConsensusLogRef::NextEpochData(_) => [1],
             BabeConsensusLogRef::OnDisabled(_) => [2],
@@ -163,7 +161,7 @@ impl<'a> BabeNextEpochRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let header = util::encode_scale_compact_usize(self.authorities.len());
         iter::once(either::Left(header))
             .chain(
@@ -289,7 +287,7 @@ impl<'a> BabeAuthorityRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         iter::once(either::Right(self.public_key))
             .chain(iter::once(either::Left(self.weight.to_le_bytes())))
     }
@@ -438,9 +436,7 @@ impl<'a> BabePreDigestRef<'a> {
 
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
-    pub fn scale_encoding(
-        &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         let index = iter::once(match self {
             BabePreDigestRef::Primary(_) => [1],
             BabePreDigestRef::SecondaryPlain(_) => [2],
@@ -532,7 +528,7 @@ impl<'a> BabePrimaryPreDigestRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let header = iter::once(either::Left(self.authority_index.to_le_bytes()))
             .chain(iter::once(either::Right(self.slot_number.to_le_bytes())))
             .map(either::Left);
@@ -660,7 +656,7 @@ impl<'a> BabeSecondaryVRFPreDigestRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let header = iter::once(either::Left(self.authority_index.to_le_bytes()))
             .chain(iter::once(either::Right(self.slot_number.to_le_bytes())))
             .map(either::Left);

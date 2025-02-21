@@ -16,10 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::borrow::Cow;
-use core::{
-    fmt, future::Future, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration,
-};
-use futures_util::future;
+use core::{fmt, net::IpAddr, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
 
 pub use smoldot::libp2p::read_write;
 
@@ -146,11 +143,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// >           difficult if not impossible to implement this trait on `Future`s. It is for
     /// >           the same reason that the `std::thread::spawn` function of the standard library
     /// >           doesn't require its parameter to implement `UnwindSafe`.
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    );
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static);
 
     /// Emit a log line.
     ///

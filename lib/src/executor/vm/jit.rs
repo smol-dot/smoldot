@@ -23,7 +23,7 @@ use super::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{fmt, future, mem, pin, ptr, slice, task};
+use core::{fmt, future, mem, pin, slice, task};
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
@@ -115,7 +115,7 @@ impl JitPrototype {
                                     return Err(NewErr::UnresolvedFunctionImport {
                                         module_name: import.module().to_owned(),
                                         function: import.name().to_owned(),
-                                    })
+                                    });
                                 }
                             };
 
@@ -295,13 +295,13 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = match future::Future::poll(
+        let instance = match Future::poll(
             pin::pin!(wasmtime::Instance::new_async(
                 &mut store,
                 &base_components.module,
                 &imports
             )),
-            &mut task::Context::from_waker(&noop_waker()),
+            &mut task::Context::from_waker(task::Waker::noop()),
         ) {
             task::Poll::Pending => return Err(NewErr::StartFunctionNotSupported), // TODO: hacky error value, as the error could also be different
             task::Poll::Ready(Ok(i)) => i,
@@ -408,10 +408,10 @@ impl Prepare {
 
     /// See [`super::Prepare::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let memory_slice = self.inner.memory.data(&self.inner.store);
 
         let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
@@ -620,7 +620,7 @@ enum JitInner {
     Done(wasmtime::Store<()>),
 }
 
-type BoxFuture<T> = pin::Pin<Box<dyn future::Future<Output = T> + Send>>;
+type BoxFuture<T> = pin::Pin<Box<dyn Future<Output = T> + Send>>;
 type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
@@ -733,9 +733,9 @@ impl Jit {
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
         // execution might be able to progress, hence the lack of need for a waker.
-        match future::Future::poll(
+        match Future::poll(
             function_call.as_mut(),
-            &mut task::Context::from_waker(&noop_waker()),
+            &mut task::Context::from_waker(task::Waker::noop()),
         ) {
             task::Poll::Ready((store, Ok(val))) => {
                 self.inner = JitInner::Done(store);
@@ -804,10 +804,10 @@ impl Jit {
 
     /// See [`super::VirtualMachine::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let memory_slice = match &self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => self.memory.data(store),
             JitInner::Executing(_) => {
@@ -926,9 +926,9 @@ impl Jit {
                 // `MemoryGrowRequired`, perform the grow, and switch back to `WithinFunctionCall`.
                 // The `Future` is polled with a no-op waker. We are in total control of when the
                 // execution might be able to progress, hence the lack of need for a waker.
-                match future::Future::poll(
+                match Future::poll(
                     function_call.as_mut(),
-                    &mut task::Context::from_waker(&noop_waker()),
+                    &mut task::Context::from_waker(task::Waker::noop()),
                 ) {
                     task::Poll::Ready(_) => unreachable!(),
                     task::Poll::Pending => {
@@ -963,16 +963,3 @@ impl fmt::Debug for Jit {
 // anyway.
 // TODO: maybe find a way to remove this unsafe implementation
 unsafe impl Sync for Jit {}
-
-fn noop_waker() -> task::Waker {
-    // Safety: all the requirements in the documentation of wakers (e.g. thread safety) is
-    // irrelevant here due to the implementation being trivial.
-    unsafe {
-        fn clone(_: *const ()) -> task::RawWaker {
-            task::RawWaker::new(ptr::null(), &VTABLE)
-        }
-        fn noop(_: *const ()) {}
-        static VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(clone, noop, noop, noop);
-        task::Waker::from_raw(task::RawWaker::new(ptr::null(), &VTABLE))
-    }
-}

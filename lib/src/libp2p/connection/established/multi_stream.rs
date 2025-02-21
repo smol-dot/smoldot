@@ -18,7 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
+    super::super::read_write::ReadWrite, Config, Event, SubstreamId, SubstreamIdInner, substream,
 };
 use crate::{libp2p::connection::webrtc_framing, util};
 
@@ -279,7 +279,7 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         let substream = self.in_substreams.get_mut(substream_id).unwrap();
 

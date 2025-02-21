@@ -106,13 +106,13 @@ pub enum FromBytesError {
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for Multihash<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let base58 = bs58::encode(self.0.as_ref()).into_string();
         write!(f, "{base58}")
     }

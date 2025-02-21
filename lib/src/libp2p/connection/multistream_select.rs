@@ -418,7 +418,7 @@ mod tests {
     use alloc::collections::VecDeque;
     use core::{cmp, mem};
 
-    use super::{super::super::read_write::ReadWrite, write_message, Config, Message, Negotiation};
+    use super::{super::super::read_write::ReadWrite, Config, Message, Negotiation, write_message};
 
     #[test]
     fn encode() {

@@ -81,7 +81,7 @@ use core::{cmp, iter, num::NonZero, pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _, future};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -1469,7 +1469,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
     {
         Ok(r) => r,
         Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
-            return Err(ValidationError::ObsoleteSubscription)
+            return Err(ValidationError::ObsoleteSubscription);
         }
         Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => unreachable!(),
     };
@@ -1500,29 +1500,29 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::RuntimeCallError::Execution(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::Crash) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Crash),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::Inaccessible(errors)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
-            ))
+            ));
         }
         Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(
                     ValidateTransactionError::ApiVersionRequirementUnfulfilled,
                 ),
-            ))
+            ));
         }
     };
 

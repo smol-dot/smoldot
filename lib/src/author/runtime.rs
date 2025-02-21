@@ -36,7 +36,7 @@
 //!   This must be done once per extrinsic returned by the previous step, plus once for each
 //!   transaction to push in the block.
 //! - A runtime call to `BlockBuilder_finalize_block`, which returns the newly-created unsealed
-//! block header.
+//!   block header.
 //!
 //! The body of the newly-generated block consists in the extrinsics pushed using
 //! `BlockBuilder_apply_extrinsic` (including the intrinsics).
@@ -54,7 +54,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{iter, mem};
+use core::{iter, mem, slice};
 
 pub use runtime_call::{
     Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
@@ -164,6 +164,11 @@ pub enum Error {
 
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
+    let consensus_digest = match config.consensus_digest_log_item {
+        ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
+        ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
+    };
+
     let init_result = runtime_call::run(runtime_call::Config {
         function_to_call: "Core_initialize_block",
         parameter: {
@@ -177,16 +182,12 @@ pub fn build_block(config: Config) -> BlockBuild {
                         return BlockBuild::Finished(Err((
                             Error::BlockHeightOverflow,
                             config.parent_runtime,
-                        )))
+                        )));
                     }
                 },
                 extrinsics_root: &[0; 32],
                 state_root: &[0; 32],
-                digest: header::DigestRef::from_slice(&[match config.consensus_digest_log_item {
-                    ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
-                    ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
-                }])
-                .unwrap(),
+                digest: header::DigestRef::from_slice(slice::from_ref(&consensus_digest)).unwrap(),
             }
             .scale_encoding(config.block_number_bytes)
         },
@@ -276,7 +277,7 @@ impl BlockBuild {
                     return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::StorageGet(inner)), _) => {
-                    return BlockBuild::StorageGet(StorageGet(inner, shared))
+                    return BlockBuild::StorageGet(StorageGet(inner, shared));
                 }
                 (
                     Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
@@ -284,13 +285,13 @@ impl BlockBuild {
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                         inner, shared,
-                    ))
+                    ));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::NextKey(inner)), _) => {
-                    return BlockBuild::NextKey(NextKey(inner, shared))
+                    return BlockBuild::NextKey(NextKey(inner, shared));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::OffchainStorageSet(inner)), _) => {
-                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
+                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared));
                 }
 
                 (
@@ -325,7 +326,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 
@@ -353,7 +354,7 @@ impl BlockBuild {
                     inner = Inner::Runtime(match init_result {
                         Ok(vm) => vm,
                         Err((err, proto)) => {
-                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)))
+                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)));
                         }
                     });
                 }
@@ -388,7 +389,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 Error::InherentExtrinsicDispatchError { extrinsic, error },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Ok(Err(error)) => {
                             return BlockBuild::Finished(Err((
@@ -397,13 +398,13 @@ impl BlockBuild {
                                     error,
                                 },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Err(err) => {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     }
 
@@ -424,7 +425,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 
@@ -621,12 +622,12 @@ pub struct StorageGet(runtime_call::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -647,12 +648,12 @@ pub struct ClosestDescendantMerkleValue(runtime_call::ClosestDescendantMerkleVal
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -680,12 +681,12 @@ pub struct NextKey(runtime_call::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -703,7 +704,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -724,14 +725,14 @@ pub struct OffchainStorageSet(runtime_call::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         self.0.value()
     }
 

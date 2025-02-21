@@ -27,9 +27,9 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, database_thread, jaeger_service};
 
-use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::{self, SelectAll};
@@ -473,7 +473,7 @@ impl NetworkService {
                     loop {
                         match tcp_listener.accept().await {
                             Ok((socket, socket_addr)) => {
-                                break Some(((socket, socket_addr), tcp_listener))
+                                break Some(((socket, socket_addr), tcp_listener));
                             }
                             Err(error) => {
                                 // Errors here can happen if the accept failed, for example
@@ -930,7 +930,7 @@ async fn background_task(mut inner: Inner) {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
                                         chain_id,
-                                    )
+                                    );
                                 }
                                 basic_peering_strategy::AssignablePeer::AllPeersBanned {
                                     next_unban,

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, consensus_service, database_thread, network_service};
 use futures_channel::oneshot;
 use futures_util::FutureExt;
 use smol::{
@@ -24,14 +24,13 @@ use smol::{
 };
 use smoldot::json_rpc::{methods, service};
 use std::{
-    future::Future,
     io, mem,
     net::SocketAddr,
     num::NonZero,
     pin::Pin,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -125,7 +124,7 @@ impl JsonRpcService {
                             return Err(InitError::ListenError {
                                 bind_address: *addr,
                                 error,
-                            })
+                            });
                         }
                     };
 
@@ -135,7 +134,7 @@ impl JsonRpcService {
                     return Err(InitError::ListenError {
                         bind_address: *addr,
                         error,
-                    })
+                    });
                 }
             },
             None => (None, None),

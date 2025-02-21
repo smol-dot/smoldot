@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{prefix_scan, Config, ResumeOutcome};
+use super::{Config, ResumeOutcome, prefix_scan};
 
 // TODO: more tests
 

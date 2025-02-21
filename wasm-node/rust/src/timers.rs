@@ -28,7 +28,7 @@ use alloc::collections::BTreeSet;
 use async_lock::Mutex;
 use core::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
-    future, mem,
+    mem,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
@@ -93,7 +93,7 @@ impl Delay {
     }
 }
 
-impl future::Future for Delay {
+impl Future for Delay {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {

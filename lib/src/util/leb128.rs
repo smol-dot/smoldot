@@ -132,7 +132,7 @@ pub(crate) fn nom_leb128_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
                 return Err(nom::Err::Error(nom::error::make_error(
                     bytes,
                     nom::error::ErrorKind::LengthValue,
-                )))
+                )));
             }
         };
 

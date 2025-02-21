@@ -32,8 +32,8 @@
 use smoldot::{
     identity::seed_phrase,
     libp2p::{
-        multiaddr::{Multiaddr, Protocol},
         PeerId,
+        multiaddr::{Multiaddr, Protocol},
     },
 };
 use std::{io, net::SocketAddr, path::PathBuf};

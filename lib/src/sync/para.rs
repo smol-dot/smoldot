@@ -62,7 +62,7 @@ pub enum OccupiedCoreAssumption {
 
 impl OccupiedCoreAssumption {
     /// Returns the SCALE encoding of this type.
-    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone {
+    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone + use<> {
         match self {
             OccupiedCoreAssumption::Included => [0],
             OccupiedCoreAssumption::TimedOut => [1],
@@ -112,7 +112,7 @@ pub struct PersistedValidationDataRef<'a> {
 /// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PersistedValidationDataRef, E> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PersistedValidationDataRef<'a>, E> {
     nom::combinator::map(
         nom::sequence::tuple((
             crate::util::nom_bytes_decode,

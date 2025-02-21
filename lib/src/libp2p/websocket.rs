@@ -20,7 +20,7 @@
 
 #![cfg(feature = "std")]
 
-use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
+use futures_util::{AsyncRead, AsyncWrite, Future as _, future};
 
 use core::{
     cmp, mem,
@@ -63,7 +63,7 @@ pub async fn websocket_client_handshake<T: AsyncRead + AsyncWrite + Send + Unpin
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
                 format!("Status code {status_code}"),
-            ))
+            ));
         }
         Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err)),
     };
@@ -117,7 +117,7 @@ enum Write<T> {
 impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connection<T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut Context,
         out_buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         assert_ne!(out_buf.len(), 0);
@@ -164,7 +164,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connectio
 impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncWrite for Connection<T> {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut Context,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         loop {
@@ -233,7 +233,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncWrite for Connecti
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
         loop {
             match mem::replace(&mut self.sender, Write::Poisoned) {
                 Write::Idle(mut socket) => {
@@ -290,7 +290,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncWrite for Connecti
         }
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
         loop {
             match mem::replace(&mut self.sender, Write::Poisoned) {
                 Write::Idle(mut socket) => {

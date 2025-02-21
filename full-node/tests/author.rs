@@ -26,10 +26,9 @@ fn basic_block_generated() {
             chain: smoldot_full_node::ChainConfig {
                 chain_spec: (&include_bytes!("./substrate-node-template.json")[..]).into(),
                 additional_bootnodes: Vec::new(),
-                keystore_memory: vec![smoldot::identity::seed_phrase::decode_sr25519_private_key(
-                    "//Alice",
-                )
-                .unwrap()],
+                keystore_memory: vec![
+                    smoldot::identity::seed_phrase::decode_sr25519_private_key("//Alice").unwrap(),
+                ],
                 sqlite_database_path: None,
                 sqlite_cache_size: 256 * 1024 * 1024,
                 keystore_path: None,

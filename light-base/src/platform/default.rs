@@ -36,8 +36,8 @@
 //!
 
 use super::{
-    with_buffers, Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress,
-    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
+    Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, SubstreamDirection, with_buffers,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
@@ -48,7 +48,7 @@ use core::{
     str,
     time::Duration,
 };
-use futures_util::{future, FutureExt as _};
+use futures_util::{FutureExt as _, future};
 use smoldot::libp2p::websocket;
 use std::{
     io,
@@ -143,11 +143,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         smol::Timer::at(when).map(|_| ())
     }
 
-    fn spawn_task(
-        &self,
-        _task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, _task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         // In order to make sure that the execution threads don't stop if there are still
         // tasks to execute, we hold a copy of the `Arc<DefaultPlatform>` inside of the task until
         // it is finished.
@@ -308,7 +304,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         match *c {}
     }
 
-    fn next_substream(&self, c: &'_ mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream(&self, c: &mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}

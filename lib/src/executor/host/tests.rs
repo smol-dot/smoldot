@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior};
+use super::{Config, HeapPages, HostVm, HostVmPrototype, StorageProofSizeBehavior, vm::ExecHint};
 
 mod hash_algorithms;
 mod initialization;

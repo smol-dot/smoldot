@@ -38,7 +38,7 @@ use core::cmp;
 use smoldot::{
     chain,
     database::finalized_serialize,
-    libp2p::{multiaddr, PeerId},
+    libp2p::{PeerId, multiaddr},
 };
 
 use crate::{network_service, platform, runtime_service, sync_service};
