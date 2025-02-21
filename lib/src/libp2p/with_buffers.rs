@@ -113,10 +113,11 @@ where
     ) -> Result<ReadWriteAccess<TNow>, &io::Error> {
         let this = self.project();
 
-        debug_assert!(this
-            .read_write_now
-            .as_ref()
-            .map_or(true, |old_now| *old_now <= now));
+        debug_assert!(
+            this.read_write_now
+                .as_ref()
+                .map_or(true, |old_now| *old_now <= now)
+        );
         *this.read_write_wake_up_after = None;
         *this.read_write_now = Some(now.clone());
 

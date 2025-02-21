@@ -38,7 +38,7 @@
 //! Once decoded, one can examine the content of the proof, in other words the list of storage
 //! items and values.
 
-use super::{nibble, trie_node, TrieEntryVersion};
+use super::{TrieEntryVersion, nibble, trie_node};
 
 use alloc::vec::Vec;
 use core::{fmt, iter, ops};

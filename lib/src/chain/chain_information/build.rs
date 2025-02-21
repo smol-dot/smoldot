@@ -508,7 +508,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::WasmStart { call, error }),
                         virtual_machine,
-                    }
+                    };
                 }
             };
 
@@ -527,7 +527,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::MultipleConsensusAlgorithms),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
                 (
@@ -665,7 +665,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::InvalidChainInformation(err)),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
             };
 
@@ -815,24 +815,24 @@ impl ChainInformationBuild {
                             error: err.detail,
                         }),
                         virtual_machine: err.prototype,
-                    }
+                    };
                 }
                 runtime_call::RuntimeCall::StorageGet(call) => {
                     break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::NextKey(call) => {
                     break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::ClosestDescendantMerkleValue(call) => {
                     break ChainInformationBuild::InProgress(
                         InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                             call, inner,
                         )),
-                    )
+                    );
                 }
                 runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();

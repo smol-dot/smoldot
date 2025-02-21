@@ -18,8 +18,8 @@
 #![cfg(test)]
 
 use super::{
-    open, Config, ConfigTy, DatabaseOpen, InsertTrieNode, InsertTrieNodeStorageValue,
-    StorageAccessError,
+    Config, ConfigTy, DatabaseOpen, InsertTrieNode, InsertTrieNodeStorageValue, StorageAccessError,
+    open,
 };
 use crate::{header, trie};
 
@@ -464,14 +464,15 @@ fn storage_get_partial() {
         Err(StorageAccessError::IncompleteStorage)
     ));
 
-    assert!(db
-        .block_storage_get(
+    assert!(
+        db.block_storage_get(
             &db.block_hash_by_number(0).unwrap().next().unwrap(),
             iter::empty::<iter::Empty<_>>(),
             [1, 1, 2].into_iter(),
         )
         .unwrap()
-        .is_none());
+        .is_none()
+    );
 
     assert!(matches!(
         db.block_storage_get(
@@ -524,34 +525,37 @@ fn storage_get_partial() {
         b"world"
     );
 
-    assert!(db
-        .block_storage_get(
+    assert!(
+        db.block_storage_get(
             &db.block_hash_by_number(0).unwrap().next().unwrap(),
             iter::empty::<iter::Empty<_>>(),
             [1, 1, 2].into_iter(),
         )
         .unwrap()
-        .is_none());
+        .is_none()
+    );
 
-    assert!(db
-        .block_storage_get(
+    assert!(
+        db.block_storage_get(
             &db.block_hash_by_number(0).unwrap().next().unwrap(),
             iter::empty::<iter::Empty<_>>(),
             [1, 1, 1, 2].into_iter(),
         )
         .unwrap()
-        .is_none());
+        .is_none()
+    );
 
     // The empty key is specifically tested due to SQLite having some weird behaviors mixing
     // null and empty bytes.
-    assert!(db
-        .block_storage_get(
+    assert!(
+        db.block_storage_get(
             &db.block_hash_by_number(0).unwrap().next().unwrap(),
             iter::empty::<iter::Empty<_>>(),
             [].into_iter(),
         )
         .unwrap()
-        .is_none());
+        .is_none()
+    );
 }
 
 #[test]

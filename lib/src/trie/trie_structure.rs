@@ -22,7 +22,7 @@
 
 // TODO: the API of `TrieStructure` is rather wonky and could be simplified
 
-use super::nibble::{bytes_to_nibbles, Nibble};
+use super::nibble::{Nibble, bytes_to_nibbles};
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
 use core::{cmp, fmt, iter, mem, ops};
@@ -347,7 +347,7 @@ impl<TUd> TrieStructure<TUd> {
             None => {
                 return ExistingNodeInnerResult::NotFound {
                     closest_ancestor: None,
-                }
+                };
             }
         };
         debug_assert!(self.nodes.get(current_index).unwrap().parent.is_none());
@@ -376,7 +376,7 @@ impl<TUd> TrieStructure<TUd> {
                     return ExistingNodeInnerResult::Found {
                         node_index: current_index,
                         has_storage_value: current.has_storage_value,
-                    }
+                    };
                 }
             };
 

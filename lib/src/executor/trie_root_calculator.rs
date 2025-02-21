@@ -146,11 +146,12 @@ impl ClosestDescendant {
         closest_descendant: Option<impl Iterator<Item = Nibble>>,
     ) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
-        debug_assert!(self
-            .inner
-            .stack
-            .last()
-            .map_or(true, |n| n.children.len() != 16));
+        debug_assert!(
+            self.inner
+                .stack
+                .last()
+                .map_or(true, |n| n.children.len() != 16)
+        );
 
         // Length of the key of the currently-iterated node.
         let iter_key_len = self

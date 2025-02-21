@@ -47,7 +47,7 @@ pub fn parse_jsonrpc_client_to_server(
         None => {
             return Err(ParseClientToServerError::UnknownNotification {
                 notification_name: call_def.method,
-            })
+            });
         }
     };
 
@@ -137,9 +137,7 @@ pub enum MethodError<'a> {
         actual: usize,
     },
     /// One of the parameters of the function call is invalid.
-    #[display(
-        "Parameter of index {parameter_index} is invalid when calling {rpc_method}: {error}"
-    )]
+    #[display("Parameter of index {parameter_index} is invalid when calling {rpc_method}: {error}")]
     InvalidParameter {
         /// Name of the JSON-RPC method that was attempted to be called.
         rpc_method: &'static str,

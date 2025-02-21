@@ -115,7 +115,7 @@ impl JitPrototype {
                                     return Err(NewErr::UnresolvedFunctionImport {
                                         module_name: import.module().to_owned(),
                                         function: import.name().to_owned(),
-                                    })
+                                    });
                                 }
                             };
 

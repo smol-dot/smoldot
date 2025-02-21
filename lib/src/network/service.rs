@@ -419,7 +419,7 @@ where
             hashbrown::hash_map::Entry::Occupied(entry) => {
                 return Err(AddChainError::Duplicate {
                     existing_identical: ChainId(*entry.get()),
-                })
+                });
             }
         }
 
@@ -1653,7 +1653,7 @@ where
                                         chain_id: ChainId(chain_index),
                                         config,
                                         substream_id,
-                                    })
+                                    });
                                 }
                                 Err(error) => {
                                     let _ = self.substreams.remove(&substream_id);
@@ -2051,26 +2051,29 @@ where
                             // This can only happen if we have a block announces substream with
                             // that peer, otherwise the substream opening attempt should have
                             // been cancelled.
-                            debug_assert!(self
-                                .notification_substreams_by_peer_id
-                                .range(
-                                    (
-                                        NotificationsProtocol::BlockAnnounces { chain_index },
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::OPEN_MIN_VALUE,
-                                        SubstreamId::MIN
-                                    )
-                                        ..=(
+                            debug_assert!(
+                                self.notification_substreams_by_peer_id
+                                    .range(
+                                        (
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::OPEN_MAX_VALUE,
-                                            SubstreamId::MAX
+                                            NotificationsSubstreamState::OPEN_MIN_VALUE,
+                                            SubstreamId::MIN
                                         )
-                                )
-                                .next()
-                                .is_some());
+                                            ..=(
+                                                NotificationsProtocol::BlockAnnounces {
+                                                    chain_index
+                                                },
+                                                peer_index,
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::OPEN_MAX_VALUE,
+                                                SubstreamId::MAX
+                                            )
+                                    )
+                                    .next()
+                                    .is_some()
+                            );
 
                             // If the substream failed to open, we simply try again.
                             // Trying again means that we might be hammering the remote with
@@ -2245,28 +2248,31 @@ where
                                     state.established && !state.shutting_down
                                 })
                             {
-                                debug_assert!(self
-                                    .notification_substreams_by_peer_id
-                                    .range(
-                                        (
-                                            NotificationsProtocol::BlockAnnounces { chain_index },
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::MIN,
-                                            SubstreamId::MIN,
-                                        )
-                                            ..=(
+                                debug_assert!(
+                                    self.notification_substreams_by_peer_id
+                                        .range(
+                                            (
                                                 NotificationsProtocol::BlockAnnounces {
                                                     chain_index
                                                 },
                                                 peer_index,
                                                 SubstreamDirection::Out,
-                                                NotificationsSubstreamState::MAX,
-                                                SubstreamId::MAX,
-                                            ),
-                                    )
-                                    .next()
-                                    .is_none());
+                                                NotificationsSubstreamState::MIN,
+                                                SubstreamId::MIN,
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::BlockAnnounces {
+                                                        chain_index
+                                                    },
+                                                    peer_index,
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::MAX,
+                                                    SubstreamId::MAX,
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                );
 
                                 let _was_inserted =
                                     self.connected_unopened_gossip_desired.insert((
@@ -2706,7 +2712,7 @@ where
                                     return Some(Event::ProtocolError {
                                         error: ProtocolError::BadGrandpaNotification(err),
                                         peer_id: self.peers[peer_index.0].clone(),
-                                    })
+                                    });
                                 }
                             };
 
@@ -2720,7 +2726,7 @@ where
                                             block_number_bytes: self.chains[chain_index]
                                                 .block_number_bytes,
                                         },
-                                    })
+                                    });
                                 }
                                 codec::GrandpaNotificationRef::Neighbor(n) => {
                                     return Some(Event::GrandpaNeighborPacket {
@@ -2731,7 +2737,7 @@ where
                                             set_id: n.set_id,
                                             commit_finalized_height: n.commit_finalized_height,
                                         },
-                                    })
+                                    });
                                 }
                                 _ => {
                                     // Any other type of message is currently ignored. Support

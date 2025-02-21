@@ -30,9 +30,9 @@ use std::{
 };
 
 use crate::{
-    consensus_service, database_thread,
+    LogCallback, LogLevel, consensus_service, database_thread,
     json_rpc_service::{legacy_api_subscriptions, runtime_caches_service},
-    network_service, LogCallback, LogLevel,
+    network_service,
 };
 
 pub struct Config {

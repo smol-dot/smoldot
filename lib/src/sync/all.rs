@@ -1045,7 +1045,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync: self.warp_sync,
                     ready_to_transition: self.ready_to_transition,
                     shared: self.shared,
-                })
+                });
             }
             all_forks::ProcessOne::FinalityProofVerify(inner) => {
                 return ProcessOne::VerifyFinalityProof(FinalityProofVerify {
@@ -1053,7 +1053,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync: self.warp_sync,
                     ready_to_transition: self.ready_to_transition,
                     shared: self.shared,
-                })
+                });
             }
         }
 

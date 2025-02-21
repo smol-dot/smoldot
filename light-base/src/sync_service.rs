@@ -41,7 +41,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{codec, service},
-    trie::{self, prefix_proof, proof_decode, Nibble},
+    trie::{self, Nibble, prefix_proof, proof_decode},
 };
 
 mod parachain;

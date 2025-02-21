@@ -36,8 +36,8 @@
 //!
 
 use super::{
-    with_buffers, Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress,
-    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
+    Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, SubstreamDirection, with_buffers,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
@@ -48,7 +48,7 @@ use core::{
     str,
     time::Duration,
 };
-use futures_util::{future, FutureExt as _};
+use futures_util::{FutureExt as _, future};
 use smoldot::libp2p::websocket;
 use std::{
     io,

@@ -692,10 +692,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(ed25519_zebra::VerificationKey::try_from(public_key)
-                .unwrap()
-                .verify(&ed25519_zebra::Signature::from(signature), b"hello world")
-                .is_ok());
+            assert!(
+                ed25519_zebra::VerificationKey::try_from(public_key)
+                    .unwrap()
+                    .verify(&ed25519_zebra::Signature::from(signature), b"hello world")
+                    .is_ok()
+            );
         });
     }
 
@@ -726,14 +728,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(schnorrkel::PublicKey::from_bytes(&public_key)
-                .unwrap()
-                .verify_simple(
-                    b"substrate",
-                    b"hello world",
-                    &schnorrkel::Signature::from_bytes(&signature).unwrap()
-                )
-                .is_ok());
+            assert!(
+                schnorrkel::PublicKey::from_bytes(&public_key)
+                    .unwrap()
+                    .verify_simple(
+                        b"substrate",
+                        b"hello world",
+                        &schnorrkel::Signature::from_bytes(&signature).unwrap()
+                    )
+                    .is_ok()
+            );
         });
     }
 }

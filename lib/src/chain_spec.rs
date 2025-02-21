@@ -36,8 +36,8 @@
 
 use crate::{
     chain::chain_information::{
-        build, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationFinality, ValidChainInformation, ValidityError,
+        BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality, ValidChainInformation, ValidityError, build,
     },
     executor, libp2p, trie,
 };
@@ -103,7 +103,7 @@ impl ChainSpec {
         let genesis_storage = match self.genesis_storage() {
             GenesisStorage::Items(items) => items,
             GenesisStorage::TrieRootHash(_) => {
-                return Err(FromGenesisStorageError::UnknownStorageItems)
+                return Err(FromGenesisStorageError::UnknownStorageItems);
             }
         };
 

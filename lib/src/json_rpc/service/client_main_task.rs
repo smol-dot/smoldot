@@ -500,10 +500,12 @@ impl ClientMainTask {
 
                     // Allocate the new subscription ID.
                     let subscription_id = self.allocate_subscription_id();
-                    debug_assert!(!self
-                        .inner
-                        .active_subscriptions
-                        .contains_key(&subscription_id));
+                    debug_assert!(
+                        !self
+                            .inner
+                            .active_subscriptions
+                            .contains_key(&subscription_id)
+                    );
 
                     // Insert an "kill channel" in the local state. This kill channel is shared
                     // with the subscription object and is used to notify when a subscription

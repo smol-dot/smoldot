@@ -506,7 +506,7 @@ where
                                 Some(Event::NotificationsOutResult {
                                     result: Err(NotificationsOutErr::NegotiationError(err)),
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -689,7 +689,7 @@ where
                                 Some(Event::Response {
                                     response: Err(RequestError::ProtocolNotAvailable),
                                 }),
-                            )
+                            );
                         }
                         Err(err) => {
                             return (
@@ -697,7 +697,7 @@ where
                                 Some(Event::Response {
                                     response: Err(RequestError::NegotiationError(err)),
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -731,7 +731,7 @@ where
                                     Some(Event::Response {
                                         response: Err(RequestError::SubstreamClosed),
                                     }),
-                                )
+                                );
                             }
                         }
                     } else {
@@ -792,7 +792,7 @@ where
                                     error: InboundError::SubstreamClosed,
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 } else {
@@ -806,7 +806,7 @@ where
                                     error: InboundError::RequestInLebError(error),
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -856,7 +856,7 @@ where
                                     error: InboundError::SubstreamClosed,
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 } else {
@@ -870,7 +870,7 @@ where
                                     error: InboundError::NotificationsInError { error },
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 }

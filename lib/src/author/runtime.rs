@@ -177,7 +177,7 @@ pub fn build_block(config: Config) -> BlockBuild {
                         return BlockBuild::Finished(Err((
                             Error::BlockHeightOverflow,
                             config.parent_runtime,
-                        )))
+                        )));
                     }
                 },
                 extrinsics_root: &[0; 32],
@@ -276,7 +276,7 @@ impl BlockBuild {
                     return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::StorageGet(inner)), _) => {
-                    return BlockBuild::StorageGet(StorageGet(inner, shared))
+                    return BlockBuild::StorageGet(StorageGet(inner, shared));
                 }
                 (
                     Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
@@ -284,13 +284,13 @@ impl BlockBuild {
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                         inner, shared,
-                    ))
+                    ));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::NextKey(inner)), _) => {
-                    return BlockBuild::NextKey(NextKey(inner, shared))
+                    return BlockBuild::NextKey(NextKey(inner, shared));
                 }
                 (Inner::Runtime(runtime_call::RuntimeCall::OffchainStorageSet(inner)), _) => {
-                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
+                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared));
                 }
 
                 (
@@ -325,7 +325,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 
@@ -353,7 +353,7 @@ impl BlockBuild {
                     inner = Inner::Runtime(match init_result {
                         Ok(vm) => vm,
                         Err((err, proto)) => {
-                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)))
+                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)));
                         }
                     });
                 }
@@ -388,7 +388,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 Error::InherentExtrinsicDispatchError { extrinsic, error },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Ok(Err(error)) => {
                             return BlockBuild::Finished(Err((
@@ -397,13 +397,13 @@ impl BlockBuild {
                                     error,
                                 },
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                         Err(err) => {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     }
 
@@ -424,7 +424,7 @@ impl BlockBuild {
                             return BlockBuild::Finished(Err((
                                 err,
                                 success.virtual_machine.into_prototype(),
-                            )))
+                            )));
                         }
                     };
 

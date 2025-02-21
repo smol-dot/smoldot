@@ -43,7 +43,7 @@
 
 #![allow(dead_code)] // TODO: remove this after `all.rs` implements full node; right now many methods here are useless because expected to be used only for full node code
 
-use alloc::collections::{btree_map::Entry, BTreeMap};
+use alloc::collections::{BTreeMap, btree_map::Entry};
 use core::{fmt, iter, mem};
 
 /// Collection of pending blocks.

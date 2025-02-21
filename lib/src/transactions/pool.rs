@@ -85,7 +85,7 @@
 //!
 
 use alloc::{
-    collections::{btree_set, BTreeSet},
+    collections::{BTreeSet, btree_set},
     vec::Vec,
 };
 use core::{fmt, iter, mem, ops};
@@ -481,11 +481,12 @@ impl<TTx> Pool<TTx> {
         num_to_retract: u64,
     ) -> impl Iterator<Item = (TransactionId, u64)> {
         // Checks that there's no transaction included above `self.best_block_height`.
-        debug_assert!(self
-            .by_height
-            .range((self.best_block_height + 1, TransactionId(usize::MIN),)..,)
-            .next()
-            .is_none());
+        debug_assert!(
+            self.by_height
+                .range((self.best_block_height + 1, TransactionId(usize::MIN),)..,)
+                .next()
+                .is_none()
+        );
 
         // Update `best_block_height` as first step, in order to panic sooner in case of underflow.
         self.best_block_height = self.best_block_height.checked_sub(num_to_retract).unwrap();

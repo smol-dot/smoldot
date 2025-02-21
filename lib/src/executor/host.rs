@@ -333,17 +333,17 @@ impl HostVmPrototype {
             Err(runtime_version::FindEmbeddedRuntimeVersionError::FindSections(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::FindSections(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeVersionDecode) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeVersionDecode,
-                ))
+                ));
             }
         };
 
@@ -428,7 +428,7 @@ impl HostVmPrototype {
                             match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
                                 Ok(v) => v,
                                 Err(_) => {
-                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode));
                                 }
                             };
 
@@ -444,7 +444,7 @@ impl HostVmPrototype {
                     HostVm::LogEmit(log) => vm = log.resume(),
 
                     HostVm::Error { error, .. } => {
-                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)));
                     }
 
                     // Getting the runtime version is a very core operation, and very few
@@ -813,7 +813,7 @@ impl ReadyToRun {
                 return HostVm::Error {
                     error: Error::Trap(err),
                     prototype: self.inner.into_prototype(),
-                }
+                };
             }
 
             Err(vm::RunErr::BadValueTy { .. }) => {
@@ -986,7 +986,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -1004,7 +1004,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -2164,7 +2164,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -2188,7 +2188,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::FreeError { pointer },
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -3807,7 +3807,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3858,7 +3858,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3901,7 +3901,7 @@ impl Inner {
                 return Err(Error::OutOfMemory {
                     function: function_name,
                     requested_size: size,
-                })
+                });
             }
         };
 

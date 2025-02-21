@@ -36,14 +36,14 @@ use core::{iter, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 use smoldot::{
     header,
     informant::HashDisplay,
     json_rpc::{self, methods, parse},
-    libp2p::{multiaddr, PeerId},
+    libp2p::{PeerId, multiaddr},
     network::codec,
 };
 
@@ -4787,9 +4787,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 *current_finalized_block = finalized_hash;
                 *finalized_heads_subscriptions_stale = true;
 
-                debug_assert!(pruned_blocks
-                    .iter()
-                    .all(|hash| pinned_blocks.contains_key(hash)));
+                debug_assert!(
+                    pruned_blocks
+                        .iter()
+                        .all(|hash| pinned_blocks.contains_key(hash))
+                );
 
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.

@@ -20,8 +20,8 @@ use crate::finality::decode;
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 /// Configuration for a commit verification process.
@@ -452,7 +452,7 @@ pub fn verify_justification<'a>(
             hashbrown::hash_map::Entry::Vacant(_) => {
                 return Err(JustificationVerifyError::NotAuthority {
                     authority_key: *precommit.authority_public_key,
-                })
+                });
             }
         }
 

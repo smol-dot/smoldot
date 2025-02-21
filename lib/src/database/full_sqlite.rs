@@ -81,7 +81,7 @@ use core::{fmt, iter};
 use parking_lot::Mutex;
 use rusqlite::OptionalExtension as _;
 
-pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
+pub use open::{Config, ConfigTy, DatabaseEmpty, DatabaseOpen, open};
 
 mod open;
 mod tests;

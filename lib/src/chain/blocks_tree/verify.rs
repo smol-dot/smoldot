@@ -21,8 +21,8 @@
 use crate::{chain::chain_information, header, verify};
 
 use super::{
-    fmt, Arc, BestScore, Block, BlockConsensus, BlockFinality, Duration, Finality,
-    FinalizedConsensus, NonFinalizedTree, Vec,
+    Arc, BestScore, Block, BlockConsensus, BlockFinality, Duration, Finality, FinalizedConsensus,
+    NonFinalizedTree, Vec, fmt,
 };
 
 impl<T> NonFinalizedTree<T> {
@@ -106,10 +106,12 @@ impl<T> NonFinalizedTree<T> {
                         ref finalized_scheduled_change,
                         ref finalized_triggered_authorities,
                     } => {
-                        debug_assert!(finalized_scheduled_change
-                            .as_ref()
-                            .map(|(n, _)| *n >= decoded_header.number)
-                            .unwrap_or(true));
+                        debug_assert!(
+                            finalized_scheduled_change
+                                .as_ref()
+                                .map(|(n, _)| *n >= decoded_header.number)
+                                .unwrap_or(true)
+                        );
                         BlockFinality::Grandpa {
                             prev_auth_change_trigger_number: None,
                             triggers_change: false,
@@ -159,7 +161,7 @@ impl<T> NonFinalizedTree<T> {
                     now_from_unix_epoch,
                 },
                 (FinalizedConsensus::Unknown, None) => {
-                    return Err(HeaderVerifyError::UnknownConsensusEngine)
+                    return Err(HeaderVerifyError::UnknownConsensusEngine);
                 }
                 _ => {
                     return Err(HeaderVerifyError::ConsensusMismatch);
@@ -420,14 +422,18 @@ impl<T> NonFinalizedTree<T> {
                 }
 
                 // Some sanity checks.
-                debug_assert!(scheduled_change
-                    .as_ref()
-                    .map(|(n, _)| *n > decoded_header.number)
-                    .unwrap_or(true));
-                debug_assert!(parent_prev_auth_change_trigger_number
-                    .as_ref()
-                    .map(|n| *n < decoded_header.number)
-                    .unwrap_or(true));
+                debug_assert!(
+                    scheduled_change
+                        .as_ref()
+                        .map(|(n, _)| *n > decoded_header.number)
+                        .unwrap_or(true)
+                );
+                debug_assert!(
+                    parent_prev_auth_change_trigger_number
+                        .as_ref()
+                        .map(|n| *n < decoded_header.number)
+                        .unwrap_or(true)
+                );
 
                 BlockFinality::Grandpa {
                     prev_auth_change_trigger_number: if *parent_triggers_change {

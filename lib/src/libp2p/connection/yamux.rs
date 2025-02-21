@@ -48,8 +48,8 @@ use alloc::{
 use core::{cmp, fmt, mem, num::NonZero, ops};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use header::GoAwayErrorCode;
@@ -1605,11 +1605,13 @@ where
             panic!()
         }
 
-        debug_assert!(!self
-            .inner
-            .substreams_wake_up
-            .iter()
-            .any(|(_, s)| s == &id.0));
+        debug_assert!(
+            !self
+                .inner
+                .substreams_wake_up
+                .iter()
+                .any(|(_, s)| s == &id.0)
+        );
         debug_assert!(!self.inner.window_frames_to_send.contains_key(&id.0));
         debug_assert!(!self.inner.substreams_write_ready.contains(&id.0));
 
@@ -2095,22 +2097,28 @@ where
         {
             let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
             debug_assert!(_was_inserted);
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_wake_up
-                .iter()
-                .any(|(_, s)| *s == self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_write_ready
-                .contains(&self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .window_frames_to_send
-                .contains_key(&self.substream_id));
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_wake_up
+                    .iter()
+                    .any(|(_, s)| *s == self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_write_ready
+                    .contains(&self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .window_frames_to_send
+                    .contains_key(&self.substream_id)
+            );
         }
 
         self.yamux
@@ -2179,9 +2187,7 @@ pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a substream ID that is of the same side as the local side.
-    #[display(
-        "Received a SYN flag with a substream ID that is of the same side as the local side"
-    )]
+    #[display("Received a SYN flag with a substream ID that is of the same side as the local side")]
     InvalidInboundStreamId { stream_id: NonZero<u32> },
     /// Received a SYN flag with a known substream ID.
     #[display("Received a SYN flag with a known substream ID")]

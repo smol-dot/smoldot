@@ -326,7 +326,7 @@ impl<I: ExactSizeIterator<Item = u8>> ExactSizeIterator for BytesToNibbles<I> {}
 
 #[cfg(test)]
 mod tests {
-    use super::{bytes_to_nibbles, Nibble, NibbleFromU8Error};
+    use super::{Nibble, NibbleFromU8Error, bytes_to_nibbles};
 
     #[test]
     fn nibble_try_from() {

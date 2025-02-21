@@ -24,14 +24,13 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLevel};
+use crate::{LogCallback, LogLevel, database_thread, jaeger_service, network_service};
 
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
 use futures_util::{
-    future,
+    SinkExt as _, StreamExt as _, future,
     stream::{self, FuturesUnordered},
-    SinkExt as _, StreamExt as _,
 };
 use hashbrown::HashSet;
 use rand::seq::IteratorRandom;
@@ -227,7 +226,7 @@ impl ConsensusService {
                         match database.to_chain_information(&finalized_block_hash) {
                             Ok(info) => info,
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                                return Err(InitError::DatabaseCorruption(err))
+                                return Err(InitError::DatabaseCorruption(err));
                             }
                             Err(full_sqlite::StorageAccessError::IncompleteStorage)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -240,7 +239,7 @@ impl ConsensusService {
                         Ok(Some((code, _))) => code,
                         Ok(None) => return Err(InitError::FinalizedCodeMissing),
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseCorruption(err))
+                            return Err(InitError::DatabaseCorruption(err));
                         }
                         Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -253,7 +252,7 @@ impl ConsensusService {
                         Ok(Some((hp, _))) => Some(hp),
                         Ok(None) => None,
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseCorruption(err))
+                            return Err(InitError::DatabaseCorruption(err));
                         }
                         Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -1138,23 +1137,25 @@ impl SyncBackground {
                                     request: all::DesiredRequest::StorageGetMerkleProof {
                                         block_hash: missing_item.hash,
                                         state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
-                                        keys: vec![trie::nibbles_to_bytes_suffix_extend(
-                                            missing_item
-                                                .trie_node_key_nibbles
-                                                .into_iter()
-                                                // In order to download more than one item at a time,
-                                                // we add some randomly-generated nibbles to the
-                                                // requested key. The request will target the missing
-                                                // key plus a few other random keys.
-                                                .chain((0..32).map(|_| {
-                                                    rand::Rng::gen_range(
-                                                        &mut rand::thread_rng(),
-                                                        0..16,
-                                                    )
-                                                }))
-                                                .map(|n| trie::Nibble::try_from(n).unwrap()),
-                                        )
-                                        .collect::<Vec<_>>()],
+                                        keys: vec![
+                                            trie::nibbles_to_bytes_suffix_extend(
+                                                missing_item
+                                                    .trie_node_key_nibbles
+                                                    .into_iter()
+                                                    // In order to download more than one item at a time,
+                                                    // we add some randomly-generated nibbles to the
+                                                    // requested key. The request will target the missing
+                                                    // key plus a few other random keys.
+                                                    .chain((0..32).map(|_| {
+                                                        rand::Rng::gen_range(
+                                                            &mut rand::thread_rng(),
+                                                            0..16,
+                                                        )
+                                                    }))
+                                                    .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                            )
+                                            .collect::<Vec<_>>(),
+                                        ],
                                     },
                                     database_catch_up_type: DbCatchUpType::Database,
                                 };
@@ -3042,12 +3043,12 @@ pub async fn execute_block_and_insert(
             Err(RuntimeCallError::RuntimeStartError(error)) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::RuntimeStartError(error),
-                ))
+                ));
             }
             Err(RuntimeCallError::RuntimeExecutionError(error)) => {
                 return Err(ExecuteBlockError::InvalidBlock(
                     ExecuteBlockInvalidBlockError::RuntimeExecutionError(error),
-                ))
+                ));
             }
             Err(RuntimeCallError::DatabaseParentAccess(error)) => {
                 return Err(ExecuteBlockError::VerificationFailure(
@@ -3058,17 +3059,17 @@ pub async fn execute_block_and_insert(
                             parameter: call_parameter.to_owned(),
                         },
                     },
-                ))
+                ));
             }
             Err(RuntimeCallError::ForbiddenHostFunction) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
-                ))
+                ));
             }
             Err(RuntimeCallError::DatabaseInvalidStateTrieVersion) => {
                 return Err(ExecuteBlockError::VerificationFailure(
                     ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
-                ))
+                ));
             }
         }
     }
@@ -3086,7 +3087,7 @@ pub async fn execute_block_and_insert(
                 Some(None) => {
                     return Err(ExecuteBlockError::InvalidBlock(
                         ExecuteBlockInvalidBlockError::EmptyCode,
-                    ))
+                    ));
                 }
                 None => {
                     let parent_block_hash = *parent_block_hash;
@@ -3104,7 +3105,7 @@ pub async fn execute_block_and_insert(
                         Ok(None) => {
                             return Err(ExecuteBlockError::VerificationFailure(
                                 ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase,
-                            ))
+                            ));
                         }
                         Err(error) => return Err(ExecuteBlockError::VerificationFailure(
                             ExecuteBlockVerificationFailureError::DatabaseParentAccess {

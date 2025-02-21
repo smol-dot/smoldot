@@ -217,7 +217,7 @@ macro_rules! decode_scale_compact {
                             return Err(nom::Err::Error(nom::error::make_error(
                                 bytes,
                                 nom::error::ErrorKind::Satisfy,
-                            )))
+                            )));
                         }
                     };
                     Ok((&bytes[4..], value))

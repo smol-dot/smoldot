@@ -18,7 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
+    super::super::read_write::ReadWrite, Config, Event, SubstreamId, SubstreamIdInner, substream,
 };
 use crate::{libp2p::connection::webrtc_framing, util};
 

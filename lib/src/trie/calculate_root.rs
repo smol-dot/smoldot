@@ -79,10 +79,10 @@
 //!
 
 use super::{
-    branch_search,
-    nibble::{nibbles_to_bytes_suffix_extend, Nibble},
-    trie_node, HashFunction, TrieEntryVersion, EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
-    EMPTY_KECCAK256_TRIE_MERKLE_VALUE,
+    EMPTY_BLAKE2_TRIE_MERKLE_VALUE, EMPTY_KECCAK256_TRIE_MERKLE_VALUE, HashFunction,
+    TrieEntryVersion, branch_search,
+    nibble::{Nibble, nibbles_to_bytes_suffix_extend},
+    trie_node,
 };
 
 use alloc::vec::Vec;

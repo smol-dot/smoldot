@@ -50,14 +50,14 @@
 use crate::util;
 use alloc::{
     borrow::ToOwned as _,
-    collections::{btree_map, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map},
     vec::Vec,
 };
 use core::{hash::Hash, iter, ops};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use crate::libp2p::PeerId;
@@ -1018,7 +1018,7 @@ mod tests {
         BasicPeeringStrategy, Config, InsertAddressConnectionsResult, InsertAddressResult,
         InsertChainPeerResult,
     };
-    use crate::network::service::{peer_id::PublicKey, PeerId};
+    use crate::network::service::{PeerId, peer_id::PublicKey};
     use core::time::Duration;
 
     #[test]

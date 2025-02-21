@@ -570,7 +570,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -594,7 +594,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -619,7 +619,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -661,7 +661,7 @@ where
             } => {
                 return NextNecessaryAsyncOpInternal::NotReady {
                     when: timeout.clone(),
-                }
+                };
             }
             _ => return NextNecessaryAsyncOpInternal::NotReady { when: None },
         };
@@ -736,10 +736,11 @@ where
         // When this block is inserted, value to use for `input_best_block_weight`.
         let input_best_block_weight = if is_new_best {
             let id = self.input_best_block_next_weight;
-            debug_assert!(self
-                .non_finalized_blocks
-                .iter_unordered()
-                .all(|(_, b)| b.input_best_block_weight < id));
+            debug_assert!(
+                self.non_finalized_blocks
+                    .iter_unordered()
+                    .all(|(_, b)| b.input_best_block_weight < id)
+            );
             self.input_best_block_next_weight += 1;
             id
         } else {
@@ -841,10 +842,11 @@ where
         }
 
         // Minor sanity checks.
-        debug_assert!(self
-            .non_finalized_blocks
-            .iter_unordered()
-            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
+        debug_assert!(
+            self.non_finalized_blocks
+                .iter_unordered()
+                .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight)
+        );
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
@@ -865,11 +867,12 @@ where
         // otherwise the state of the tree will be corrupted.
         // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
         // is part of the public API of this method.
-        assert!(self
-            .input_best_block_index
-            .map_or(false, |current_input_best| self
-                .non_finalized_blocks
-                .is_ancestor(node_to_finalize, current_input_best)));
+        assert!(
+            self.input_best_block_index
+                .map_or(false, |current_input_best| self
+                    .non_finalized_blocks
+                    .is_ancestor(node_to_finalize, current_input_best))
+        );
 
         self.input_finalized_index = Some(node_to_finalize);
     }
@@ -955,11 +958,7 @@ where
                             // silently while the public API gives the impression that all
                             // `TAsync`s are always returned.
                             // TODO: solve that
-                            if reported {
-                                Some(user_data)
-                            } else {
-                                None
-                            }
+                            if reported { Some(user_data) } else { None }
                         }
                         _ => None,
                     };

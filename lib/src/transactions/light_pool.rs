@@ -824,9 +824,10 @@ where
         } else {
             let index = *self.blocks_by_id.get(new_finalized_block_hash).unwrap();
             // TODO: check ancestry of previously finalized too
-            assert!(self
-                .blocks_tree
-                .is_ancestor(index, self.best_block_index.unwrap()));
+            assert!(
+                self.blocks_tree
+                    .is_ancestor(index, self.best_block_index.unwrap())
+            );
             index
         };
 

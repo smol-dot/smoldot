@@ -46,7 +46,7 @@ fn perform_handshake(
     alice_config: Config<Duration>,
     bob_config: Config<Duration>,
 ) -> TwoEstablished {
-    use super::super::{single_stream_handshake, NoiseKey};
+    use super::super::{NoiseKey, single_stream_handshake};
 
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);

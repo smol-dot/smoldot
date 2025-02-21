@@ -607,9 +607,11 @@ mod tests {
             // Verify the correctness of the proof.
             let proof =
                 proof_decode::decode_and_verify_proof(proof_decode::Config { proof }).unwrap();
-            assert!(proof
-                .closest_descendant_merkle_value(&trie_root_hash, iter::empty())
-                .is_ok());
+            assert!(
+                proof
+                    .closest_descendant_merkle_value(&trie_root_hash, iter::empty())
+                    .is_ok()
+            );
         }
     }
 

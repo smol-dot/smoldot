@@ -837,7 +837,7 @@ impl HandshakeInProgress {
                             return Ok(NoiseHandshake::InProgress(self));
                         }
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                            return Err(HandshakeError::ReadClosed)
+                            return Err(HandshakeError::ReadClosed);
                         }
                     }
                 };
@@ -854,7 +854,7 @@ impl HandshakeInProgress {
                         return Ok(NoiseHandshake::InProgress(self));
                     }
                     Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                        return Err(HandshakeError::ReadClosed)
+                        return Err(HandshakeError::ReadClosed);
                     }
                 };
 
@@ -880,7 +880,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     });
@@ -922,7 +922,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -1001,7 +1001,7 @@ impl HandshakeInProgress {
                             match parser(&libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };
@@ -1046,7 +1046,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -1103,7 +1103,7 @@ impl HandshakeInProgress {
                             match parser(&libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };

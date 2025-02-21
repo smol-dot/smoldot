@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{trie_root_calculator, Config, InProgress, TrieEntryVersion};
+use super::{Config, InProgress, TrieEntryVersion, trie_root_calculator};
 use crate::{executor::storage_diff::TrieDiff, trie};
 use core::{iter, ops};
 

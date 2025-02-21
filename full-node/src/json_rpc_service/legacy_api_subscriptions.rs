@@ -19,7 +19,7 @@ use hashbrown::HashMap;
 use smol::stream::StreamExt as _;
 use smoldot::{
     chain::fork_tree,
-    executor::{host::HostVmPrototype, CoreVersion},
+    executor::{CoreVersion, host::HostVmPrototype},
     trie,
 };
 use std::{collections::BTreeSet, iter, mem, num::NonZero, ops, pin::Pin, sync::Arc};

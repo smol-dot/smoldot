@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::super::{
-    vm, vm::ExecHint, Config, Error, HeapPages, HostVm, HostVmPrototype, NewErr, StartErr,
-    StorageProofSizeBehavior,
+    Config, Error, HeapPages, HostVm, HostVmPrototype, NewErr, StartErr, StorageProofSizeBehavior,
+    vm, vm::ExecHint,
 };
 use super::with_core_version_custom_sections;
 

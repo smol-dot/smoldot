@@ -118,8 +118,8 @@ pub mod trie_structure;
 use alloc::collections::BTreeSet;
 
 pub use nibble::{
-    all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
-    nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
+    BytesToNibbles, Nibble, NibbleFromU8Error, all_nibbles, bytes_to_nibbles,
+    nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend, nibbles_to_bytes_truncate,
 };
 
 /// The format of the nodes of trie has two different versions.
@@ -289,7 +289,7 @@ pub fn ordered_root(
 
 #[cfg(test)]
 mod tests {
-    use super::{trie_node, HashFunction};
+    use super::{HashFunction, trie_node};
     use core::iter;
 
     #[test]

@@ -701,9 +701,11 @@ where
                 extra_open_substreams,
                 ..
             } => {
-                assert!(opened_substream
-                    .as_ref()
-                    .map_or(true, |(open, _)| *open != id));
+                assert!(
+                    opened_substream
+                        .as_ref()
+                        .map_or(true, |(open, _)| *open != id)
+                );
                 // TODO: add a limit to the number allowed?
                 let _was_in = extra_open_substreams.insert(id, outbound);
                 assert!(_was_in.is_none());

@@ -47,8 +47,10 @@ impl<T> NonFinalizedTree<T> {
                 ops::Bound::Unbounded,
             ))
             .map(|(_prev_auth_change_trigger_number, block_index)| {
-                debug_assert!(_prev_auth_change_trigger_number
-                    .map_or(false, |n| n > self.finalized_block_number));
+                debug_assert!(
+                    _prev_auth_change_trigger_number
+                        .map_or(false, |n| n > self.finalized_block_number)
+                );
                 let block = self
                     .blocks
                     .get(*block_index)
@@ -157,10 +159,10 @@ impl<T> NonFinalizedTree<T> {
                 verify::CommitVerify::FinishedUnknown => {
                     return Err(CommitVerifyError::NotEnoughKnownBlocks {
                         target_block_number: decoded_commit.target_number,
-                    })
+                    });
                 }
                 verify::CommitVerify::Finished(Err(error)) => {
-                    return Err(CommitVerifyError::VerificationFailed(error))
+                    return Err(CommitVerifyError::VerificationFailed(error));
                 }
                 verify::CommitVerify::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
@@ -241,10 +243,10 @@ impl<T> NonFinalizedTree<T> {
             } => {
                 match target_number.cmp(&self.finalized_block_number) {
                     cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
-                        return Err(FinalityVerifyError::EqualToFinalized)
+                        return Err(FinalityVerifyError::EqualToFinalized);
                     }
                     cmp::Ordering::Equal => {
-                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash)
+                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
                     }
                     cmp::Ordering::Less => return Err(FinalityVerifyError::BelowFinalized),
                     _ => {}
@@ -334,9 +336,11 @@ impl<T> NonFinalizedTree<T> {
                 debug_assert!(
                     *after_finalized_block_authorities_set_id <= *after_block_authorities_set_id
                 );
-                debug_assert!(scheduled_change
-                    .as_ref()
-                    .map_or(true, |(n, _)| *n > new_finalized_block.number));
+                debug_assert!(
+                    scheduled_change
+                        .as_ref()
+                        .map_or(true, |(n, _)| *n > new_finalized_block.number)
+                );
 
                 *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
                 *finalized_triggered_authorities = triggered_authorities.clone();

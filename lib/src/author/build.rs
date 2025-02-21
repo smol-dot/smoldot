@@ -536,7 +536,7 @@ impl Shared {
                             break BuilderAuthoring::Error {
                                 parent_runtime: block.parent_runtime,
                                 error: Error::InvalidHeaderGenerated,
-                            }
+                            };
                         }
                     };
 
@@ -559,7 +559,7 @@ impl Shared {
                     break BuilderAuthoring::Error {
                         parent_runtime,
                         error: Error::Runtime(error),
-                    }
+                    };
                 }
                 runtime::BlockBuild::InherentExtrinsics(a) => {
                     // Injecting the inherent is guaranteed to be done only once per block.
@@ -575,21 +575,21 @@ impl Shared {
                             inner: resume,
                             shared: self,
                         },
-                    }
+                    };
                 }
                 runtime::BlockBuild::StorageGet(inner) => {
-                    break BuilderAuthoring::StorageGet(StorageGet(inner, self))
+                    break BuilderAuthoring::StorageGet(StorageGet(inner, self));
                 }
                 runtime::BlockBuild::ClosestDescendantMerkleValue(inner) => {
                     break BuilderAuthoring::ClosestDescendantMerkleValue(
                         ClosestDescendantMerkleValue(inner, self),
-                    )
+                    );
                 }
                 runtime::BlockBuild::NextKey(inner) => {
-                    break BuilderAuthoring::NextKey(NextKey(inner, self))
+                    break BuilderAuthoring::NextKey(NextKey(inner, self));
                 }
                 runtime::BlockBuild::OffchainStorageSet(inner) => {
-                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self))
+                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self));
                 }
             }
         }

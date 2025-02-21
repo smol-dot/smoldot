@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{start_branch_search, BranchSearch, Config};
+use super::{BranchSearch, Config, start_branch_search};
 use crate::trie;
 
 use rand::distributions::{Distribution as _, Uniform};

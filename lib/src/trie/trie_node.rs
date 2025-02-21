@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{nibble, HashFunction};
+use super::{HashFunction, nibble};
 use alloc::vec::Vec;
 use core::{cmp, fmt, iter, slice};
 
@@ -673,12 +673,14 @@ mod tests {
 
     #[test]
     fn no_children_no_storage_value() {
-        assert!(super::encode(super::Decoded {
-            children: [None::<&'static [u8]>; 16],
-            storage_value: super::StorageValue::None,
-            partial_key: core::iter::empty()
-        })
-        .is_ok());
+        assert!(
+            super::encode(super::Decoded {
+                children: [None::<&'static [u8]>; 16],
+                storage_value: super::StorageValue::None,
+                partial_key: core::iter::empty()
+            })
+            .is_ok()
+        );
 
         assert!(matches!(
             super::encode(super::Decoded {

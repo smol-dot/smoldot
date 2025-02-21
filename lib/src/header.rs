@@ -770,14 +770,14 @@ impl<'a> DigestRef<'a> {
                     aura_predigest_index = Some(item_num);
                 }
                 DigestItemRef::AuraPreDigest(_) => {
-                    return Err(Error::MultipleAuraPreRuntimeDigests)
+                    return Err(Error::MultipleAuraPreRuntimeDigests);
                 }
                 DigestItemRef::AuraConsensus(_) => {}
                 DigestItemRef::BabePreDigest(_) if babe_predigest_index.is_none() => {
                     babe_predigest_index = Some(item_num);
                 }
                 DigestItemRef::BabePreDigest(_) => {
-                    return Err(Error::MultipleBabePreRuntimeDigests)
+                    return Err(Error::MultipleBabePreRuntimeDigests);
                 }
                 DigestItemRef::BabeConsensus(BabeConsensusLogRef::NextEpochData(_))
                     if babe_next_epoch_data_index.is_none() =>

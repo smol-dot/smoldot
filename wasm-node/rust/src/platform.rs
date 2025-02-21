@@ -19,7 +19,7 @@ use crate::{bindings, timers::Delay};
 
 use futures_lite::future::FutureExt as _;
 
-use smoldot_light::platform::{read_write, SubstreamDirection};
+use smoldot_light::platform::{SubstreamDirection, read_write};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},

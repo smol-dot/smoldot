@@ -96,7 +96,7 @@ impl InterpreterPrototype {
                                 return Err(NewErr::UnresolvedFunctionImport {
                                     module_name: import.module().to_owned(),
                                     function: import.name().to_owned(),
-                                })
+                                });
                             }
                         };
 
@@ -121,7 +121,7 @@ impl InterpreterPrototype {
                 }
                 wasmi::ExternType::Memory(_) => {}
                 wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
-                    return Err(NewErr::ImportTypeNotSupported)
+                    return Err(NewErr::ImportTypeNotSupported);
                 }
             }
         }

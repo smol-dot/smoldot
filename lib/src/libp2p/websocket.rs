@@ -20,7 +20,7 @@
 
 #![cfg(feature = "std")]
 
-use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
+use futures_util::{AsyncRead, AsyncWrite, Future as _, future};
 
 use core::{
     cmp, mem,
@@ -63,7 +63,7 @@ pub async fn websocket_client_handshake<T: AsyncRead + AsyncWrite + Send + Unpin
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
                 format!("Status code {status_code}"),
-            ))
+            ));
         }
         Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err)),
     };

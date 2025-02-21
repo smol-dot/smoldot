@@ -42,7 +42,7 @@
 
 use crate::{
     log,
-    platform::{self, address_parse, PlatformRef},
+    platform::{self, PlatformRef, address_parse},
 };
 
 use alloc::{
@@ -57,7 +57,7 @@ use alloc::{
 use core::{cmp, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, StreamExt as _};
+use futures_util::{StreamExt as _, future, stream};
 use hashbrown::{HashMap, HashSet};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -974,7 +974,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
                                         chain_id,
-                                    )
+                                    );
                                 }
                                 basic_peering_strategy::AssignablePeer::AllPeersBanned {
                                     next_unban,

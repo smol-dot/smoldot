@@ -52,8 +52,8 @@
 
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
-    substream::{self, RespondInRequestError},
     Config, Event, SubstreamId, SubstreamIdInner,
+    substream::{self, RespondInRequestError},
 };
 
 use alloc::{boxed::Box, string::String, vec::Vec};

@@ -32,8 +32,8 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{num::NonZero, pin::Pin, str, task};
-use futures_util::{stream, Stream as _, StreamExt as _};
-use smoldot_light::{platform::PlatformRef, HandleRpcError};
+use futures_util::{Stream as _, StreamExt as _, stream};
+use smoldot_light::{HandleRpcError, platform::PlatformRef};
 
 pub mod bindings;
 

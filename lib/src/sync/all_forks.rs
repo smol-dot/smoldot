@@ -2216,7 +2216,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         return (
                             self.parent,
                             FinalityProofVerifyOutcome::GrandpaCommitError(err),
-                        )
+                        );
                     }
                 }
             }
@@ -2242,7 +2242,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         return (
                             self.parent,
                             FinalityProofVerifyOutcome::JustificationError(err),
-                        )
+                        );
                     }
                 }
             }
