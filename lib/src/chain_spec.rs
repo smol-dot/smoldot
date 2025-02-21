@@ -417,7 +417,7 @@ impl<'a> GenesisStorageItems<'a> {
         key_before: impl Iterator<Item = u8>,
         or_equal: bool,
         prefix: impl Iterator<Item = u8>,
-    ) -> Option<impl Iterator<Item = u8> + 'a> {
+    ) -> Option<impl Iterator<Item = u8>> {
         let lower_bound = if or_equal {
             Bound::Included(structs::HexString(key_before.collect::<Vec<_>>()))
         } else {
@@ -489,7 +489,7 @@ impl LightSyncState {
             })
             .collect();
 
-        epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
+        epochs.sort_unstable_by_key(|(block_num, _)| **block_num);
 
         // TODO: it seems that multiple identical epochs can be found in the list ; figure out why Substrate does that and fix it
         epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);

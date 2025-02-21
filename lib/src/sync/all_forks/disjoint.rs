@@ -158,7 +158,7 @@ impl<TBl> DisjointBlocks<TBl> {
     pub fn remove_below_height(
         &mut self,
         threshold: u64,
-    ) -> impl ExactSizeIterator<Item = (u64, [u8; 32], TBl)> {
+    ) -> impl ExactSizeIterator<Item = (u64, [u8; 32], TBl)> + use<TBl> {
         let above_threshold = self.blocks.split_off(&(threshold, [0; 32]));
         let below_threshold = mem::replace(&mut self.blocks, above_threshold);
         below_threshold

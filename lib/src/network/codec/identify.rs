@@ -77,7 +77,7 @@ pub fn build_identify_response<'a>(
         impl Iterator<Item = &'a [u8]> + 'a,
         impl Iterator<Item = &'a str> + 'a,
     >,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     protobuf::string_tag_encode(5, config.protocol_version)
         .map(either::Left)
         .map(either::Left)

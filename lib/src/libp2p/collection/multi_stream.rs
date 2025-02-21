@@ -691,7 +691,7 @@ where
     pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: ref mut opened_substream @ None,
+                opened_substream: opened_substream @ None,
                 ..
             } if outbound => {
                 *opened_substream = Some((id, webrtc_framing::WebRtcFraming::new()));

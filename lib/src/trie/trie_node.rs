@@ -35,7 +35,7 @@ pub fn encode<'a>(
         impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
         impl AsRef<[u8]> + Clone + 'a,
     >,
-) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a + Clone> + Clone + 'a, EncodeError> {
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone, EncodeError> {
     // The return value is composed of three parts:
     // - Before the storage value.
     // - The storage value (which can be empty).

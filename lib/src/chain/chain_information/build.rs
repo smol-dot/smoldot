@@ -389,7 +389,9 @@ impl NextKey {
 }
 
 impl ChainInformationBuild {
-    fn necessary_calls(inner: &ChainInformationBuildInner) -> impl Iterator<Item = RuntimeCall> {
+    fn necessary_calls(
+        inner: &ChainInformationBuildInner,
+    ) -> impl Iterator<Item = RuntimeCall> + use<> {
         let aura_api_authorities =
             if inner.runtime_has_aura && inner.aura_autorities_call_output.is_none() {
                 Some(RuntimeCall::AuraApiAuthorities)

@@ -45,10 +45,10 @@ pub(crate) fn enum_tag_encode(
     varint_zigzag_tag_encode(field, enum_value).map(|b| [b])
 }
 
-pub(crate) fn message_tag_encode<'a>(
+pub(crate) fn message_tag_encode(
     field: u64,
-    inner_message: impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    inner_message: impl Iterator<Item = impl AsRef<[u8]>>,
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     // We have to buffer the inner message into a `Vec` in order to determine its length. The
     // alternative would have been to require a `Clone` bound on the inner message iterator, but
     // that would be overly restrictive.
@@ -66,19 +66,19 @@ pub(crate) fn message_tag_encode<'a>(
         .chain(iter::once(either::Left(inner_message)))
 }
 
-pub(crate) fn bytes_tag_encode<'a>(
+pub(crate) fn bytes_tag_encode(
     field: u64,
-    data: impl AsRef<[u8]> + Clone + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    data: impl AsRef<[u8]> + Clone,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
     // Protobuf only allows 2 GiB of data.
     debug_assert!(data.as_ref().len() <= 2 * 1024 * 1024 * 1024);
     delimited_tag_encode(field, data)
 }
 
-pub(crate) fn string_tag_encode<'a>(
+pub(crate) fn string_tag_encode(
     field: u64,
-    data: impl AsRef<str> + Clone + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    data: impl AsRef<str> + Clone,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
     #[derive(Clone)]
     struct Wrapper<T>(T);
     impl<T: AsRef<str>> AsRef<[u8]> for Wrapper<T> {
@@ -98,10 +98,10 @@ pub(crate) fn varint_zigzag_tag_encode(field: u64, value: u64) -> impl Iterator<
     tag_encode(field, 0).chain(leb128::encode(value))
 }
 
-pub(crate) fn delimited_tag_encode<'a>(
+pub(crate) fn delimited_tag_encode(
     field: u64,
-    data: impl AsRef<[u8]> + Clone + 'a,
-) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    data: impl AsRef<[u8]> + Clone,
+) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
     tag_encode(field, 2)
         .chain(leb128::encode_usize(data.as_ref().len()))
         .map(|v| either::Right([v]))

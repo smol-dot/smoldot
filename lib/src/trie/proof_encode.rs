@@ -111,7 +111,7 @@ impl ProofBuilder {
         // whether a separate storage node should be included in the proof.
         let storage_value_node = match (&decoded_node_value.storage_value, &unhashed_storage_value)
         {
-            (trie_node::StorageValue::Unhashed(ref in_node_value), Some(ref user_provided)) => {
+            (trie_node::StorageValue::Unhashed(in_node_value), Some(user_provided)) => {
                 assert_eq!(in_node_value, user_provided);
                 None
             }

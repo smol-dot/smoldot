@@ -631,7 +631,7 @@ impl<TUd> TrieStructure<TUd> {
         &'a self,
         start_bound: ops::Bound<&'a [u8]>, // TODO: why does this require a `'a` lifetime? I don't get it
         end_bound: ops::Bound<&'a [u8]>,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + use<'a, TUd> {
         let start_bound = match start_bound {
             ops::Bound::Included(key) => {
                 ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
@@ -660,7 +660,7 @@ impl<TUd> TrieStructure<TUd> {
         &'a self,
         start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
         end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> {
         self.range_inner(start_bound, end_bound).map(NodeIndex)
     }
 
@@ -669,7 +669,7 @@ impl<TUd> TrieStructure<TUd> {
         &'a self,
         start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
         end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
-    ) -> impl Iterator<Item = usize> + 'a {
+    ) -> impl Iterator<Item = usize> {
         // Start by processing the end bound to obtain an "end key".
         // This end key is always assumed to be excluded. In other words, only keys strictly
         // inferior to the end key are returned. If the user provides `Included`, we modify the key

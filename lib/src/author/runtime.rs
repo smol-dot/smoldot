@@ -36,7 +36,7 @@
 //!   This must be done once per extrinsic returned by the previous step, plus once for each
 //!   transaction to push in the block.
 //! - A runtime call to `BlockBuilder_finalize_block`, which returns the newly-created unsealed
-//! block header.
+//!   block header.
 //!
 //! The body of the newly-generated block consists in the extrinsics pushed using
 //! `BlockBuilder_apply_extrinsic` (including the intrinsics).
@@ -54,7 +54,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{iter, mem};
+use core::{iter, mem, slice};
 
 pub use runtime_call::{
     Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
@@ -164,6 +164,11 @@ pub enum Error {
 
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
+    let consensus_digest = match config.consensus_digest_log_item {
+        ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
+        ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
+    };
+
     let init_result = runtime_call::run(runtime_call::Config {
         function_to_call: "Core_initialize_block",
         parameter: {
@@ -182,11 +187,7 @@ pub fn build_block(config: Config) -> BlockBuild {
                 },
                 extrinsics_root: &[0; 32],
                 state_root: &[0; 32],
-                digest: header::DigestRef::from_slice(&[match config.consensus_digest_log_item {
-                    ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
-                    ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
-                }])
-                .unwrap(),
+                digest: header::DigestRef::from_slice(slice::from_ref(&consensus_digest)).unwrap(),
             }
             .scale_encoding(config.block_number_bytes)
         },

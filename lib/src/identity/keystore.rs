@@ -428,7 +428,7 @@ impl Keystore {
         public_key: &'a [u8; 32],
         label: &'static [u8],
         transcript_items: impl Iterator<Item = (&'static [u8], either::Either<&'a [u8], u64>)> + 'a,
-    ) -> impl core::future::Future<Output = Result<VrfSignature, SignVrfError>> + 'a {
+    ) -> impl Future<Output = Result<VrfSignature, SignVrfError>> {
         async move {
             let mut guarded = self.guarded.lock().await;
             let key = guarded

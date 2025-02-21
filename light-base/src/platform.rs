@@ -81,7 +81,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// Object that dereferences to [`read_write::ReadWrite`] and gives access to the stream's
     /// buffers. See the [`read_write`] module for more information.
     /// See also [`PlatformRef::read_write_access`].
-    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
+    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + use<'a>;
 
     /// Reference to an error that happened on a stream.
     ///
@@ -97,11 +97,11 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         + Send
         + 'static;
     /// `Future` returned by [`PlatformRef::wait_read_write_again`].
-    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + use<'a>;
     /// `Future` returned by [`PlatformRef::next_substream`].
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
         + Send
-        + 'a;
+        + use<'a>;
 
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.

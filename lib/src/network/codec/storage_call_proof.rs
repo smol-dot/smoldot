@@ -34,7 +34,7 @@ pub struct StorageProofRequestConfig<TKeysIter> {
 /// Builds the bytes corresponding to a storage proof request.
 pub fn build_storage_proof_request<'a>(
     config: StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + 'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     protobuf::message_tag_encode(
         2,
         protobuf::bytes_tag_encode(2, config.block_hash)
@@ -66,7 +66,7 @@ pub struct CallProofRequestConfig<'a, I> {
 /// Builds the bytes corresponding to a call proof request.
 pub fn build_call_proof_request<'a>(
     config: CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     // TODO: don't allocate here
     let parameter = config
         .parameter_vectored

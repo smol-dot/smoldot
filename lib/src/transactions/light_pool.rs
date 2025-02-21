@@ -817,7 +817,7 @@ where
     pub fn set_finalized_block(
         &mut self,
         new_finalized_block_hash: &[u8; 32],
-    ) -> impl Iterator<Item = ([u8; 32], TBl)> {
+    ) -> impl Iterator<Item = ([u8; 32], TBl)> + use<TTx, TBl, TErr> {
         let new_finalized_block_index = if *new_finalized_block_hash == self.blocks_tree_root_hash {
             assert!(self.finalized_block_index.is_none());
             return Vec::new().into_iter();
@@ -940,8 +940,8 @@ where
     ///
     /// Also removes the transactions from the pool that were included in these blocks.
     pub fn prune_finalized_with_body(
-        &'_ mut self,
-    ) -> impl Iterator<Item = PruneBodyFinalized<TTx, TBl>> + '_ {
+        &mut self,
+    ) -> impl Iterator<Item = PruneBodyFinalized<TTx, TBl>> + use<TTx, TBl, TErr> {
         // TODO: optimize?
 
         let finalized_block_index = match self.finalized_block_index {

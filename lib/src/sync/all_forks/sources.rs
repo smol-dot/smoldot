@@ -332,7 +332,7 @@ impl<TSrc> AllForksSources<TSrc> {
         &'a self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + 'a {
+    ) -> impl Iterator<Item = SourceId> + use<'a, TSrc> {
         assert!(height > self.finalized_block_height);
         self.known_blocks2
             .range((height, *hash, SourceId(u64::MIN))..=(height, *hash, SourceId(u64::MAX)))

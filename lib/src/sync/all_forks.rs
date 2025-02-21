@@ -613,7 +613,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &'a self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + 'a {
+    ) -> impl Iterator<Item = SourceId> + use<'a, TBl, TRq, TSrc> {
         self.inner.blocks.knows_non_finalized_block(height, hash)
     }
 

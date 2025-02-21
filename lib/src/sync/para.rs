@@ -62,7 +62,7 @@ pub enum OccupiedCoreAssumption {
 
 impl OccupiedCoreAssumption {
     /// Returns the SCALE encoding of this type.
-    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone {
+    pub fn scale_encoded(&self) -> impl AsRef<[u8]> + Clone + use<> {
         match self {
             OccupiedCoreAssumption::Included => [0],
             OccupiedCoreAssumption::TimedOut => [1],

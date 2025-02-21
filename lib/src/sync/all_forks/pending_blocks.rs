@@ -426,7 +426,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         &'a self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + 'a {
+    ) -> impl Iterator<Item = SourceId> + use<'a, TBl, TRq, TSrc> {
         self.sources.knows_non_finalized_block(height, hash)
     }
 
@@ -465,7 +465,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     pub fn set_finalized_block_height(
         &mut self,
         height: u64,
-    ) -> impl ExactSizeIterator<Item = TBl> {
+    ) -> impl ExactSizeIterator<Item = TBl> + use<TBl, TRq, TSrc> {
         self.sources.set_finalized_block_height(height);
         self.blocks
             .remove_below_height(height + 1)

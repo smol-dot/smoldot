@@ -21,9 +21,9 @@ use core::fmt::{self, Write as _};
 /// yielding iterator to the given number of elements, and if the limit is reached adds a `…` at
 /// the end.
 pub fn truncated_str<'a>(
-    input: impl Iterator<Item = char> + Clone + 'a,
+    input: impl Iterator<Item = char> + Clone + use<'a>,
     limit: usize,
-) -> impl fmt::Display + 'a {
+) -> impl fmt::Display + use<'a> {
     struct Iter<I>(I, usize);
 
     impl<I: Iterator<Item = char> + Clone> fmt::Display for Iter<I> {

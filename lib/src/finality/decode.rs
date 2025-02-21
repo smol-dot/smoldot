@@ -181,7 +181,7 @@ enum PrecommitsRefInner<'a> {
 }
 
 impl<'a> PrecommitsRef<'a> {
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + 'a {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + use<'a> {
         match self.inner {
             PrecommitsRefInner::Undecoded {
                 data,
