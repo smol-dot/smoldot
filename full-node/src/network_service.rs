@@ -29,7 +29,7 @@
 
 use crate::{LogCallback, LogLevel, database_thread, jaeger_service};
 
-use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::{self, SelectAll};

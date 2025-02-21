@@ -190,7 +190,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: Pin<Box<dyn future::Future<Output = ()> + Send>>,
+    next_start_parahead_fetch: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {

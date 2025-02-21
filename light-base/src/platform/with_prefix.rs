@@ -67,11 +67,7 @@ impl<T: PlatformRef> PlatformRef for WithPrefix<T> {
         self.inner.sleep_until(when)
     }
 
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl futures_util::future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         self.inner
             .spawn_task(Cow::Owned(format!("{}-{}", self.prefix, task_name)), task)
     }

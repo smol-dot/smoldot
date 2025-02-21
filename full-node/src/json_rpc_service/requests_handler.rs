@@ -23,7 +23,6 @@ use smoldot::{
     trie,
 };
 use std::{
-    future::Future,
     iter,
     pin::{self, Pin},
     sync::Arc,

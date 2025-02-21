@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{LogCallback, LogLevel};
-use core::future::Future;
 use futures_lite::future;
 use futures_util::StreamExt as _;
 use smol::{

@@ -24,7 +24,6 @@ use smol::{
 };
 use smoldot::json_rpc::{methods, service};
 use std::{
-    future::Future,
     io, mem,
     net::SocketAddr,
     num::NonZero,

@@ -143,11 +143,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         smol::Timer::at(when).map(|_| ())
     }
 
-    fn spawn_task(
-        &self,
-        _task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, _task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         // In order to make sure that the execution threads don't stop if there are still
         // tasks to execute, we hold a copy of the `Arc<DefaultPlatform>` inside of the task until
         // it is finished.

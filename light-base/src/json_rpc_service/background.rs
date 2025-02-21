@@ -125,8 +125,7 @@ struct Background<TPlat: PlatformRef> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Tasks that are spawned by the service and running in the background.
-    background_tasks:
-        stream::FuturesUnordered<Pin<Box<dyn future::Future<Output = Event<TPlat>> + Send>>>,
+    background_tasks: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event<TPlat>> + Send>>>,
 
     /// Channel where serialized JSON-RPC requests are pulled from.
     requests_rx: Pin<Box<async_channel::Receiver<String>>>,
@@ -264,7 +263,7 @@ enum RuntimeServiceSubscription<TPlat: PlatformRef> {
 
     /// Waiting for the runtime service to start the subscription. Can potentially take a long
     /// time.
-    Pending(Pin<Box<dyn future::Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
+    Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
 
     /// Subscription not requested yet. Should transition to
     /// [`RuntimeServiceSubscription::Pending`] as soon as possible.

@@ -166,7 +166,7 @@ where
 impl<TSocketFut, TSocket, TNow> WithBuffers<TSocketFut, TSocket, TNow>
 where
     TSocket: AsyncRead + AsyncWrite,
-    TSocketFut: future::Future<Output = Result<TSocket, io::Error>>,
+    TSocketFut: Future<Output = Result<TSocket, io::Error>>,
     TNow: Clone + Ord,
 {
     /// Waits until [`WithBuffers::read_write_access`] should be called again.
@@ -179,7 +179,7 @@ where
         self: Pin<&mut Self>,
         timer_builder: impl FnOnce(TNow) -> F,
     ) where
-        F: future::Future<Output = ()>,
+        F: Future<Output = ()>,
     {
         let mut this = self.project();
 
@@ -218,7 +218,7 @@ where
             // If still `true` at the end of the function, `Poll::Pending` is returned.
             let mut pending = true;
 
-            match future::Future::poll(Pin::new(&mut timer), cx) {
+            match Future::poll(Pin::new(&mut timer), cx) {
                 Poll::Pending => {}
                 Poll::Ready(()) => {
                     pending = false;
@@ -226,7 +226,7 @@ where
             }
 
             match this.socket.as_mut().project() {
-                SocketProj::Pending(future) => match future::Future::poll(future, cx) {
+                SocketProj::Pending(future) => match Future::poll(future, cx) {
                     Poll::Pending => {}
                     Poll::Ready(Ok(socket)) => {
                         this.socket.set(Socket::Resolved(socket));

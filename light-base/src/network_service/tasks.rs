@@ -244,7 +244,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     // Stream that yields an item whenever a substream is ready to be read-written.
     // TODO: we box the future because of the type checker being annoying
     let mut when_substreams_rw_ready = FuturesUnordered::<
-        pin::Pin<Box<dyn future::Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
+        pin::Pin<Box<dyn Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
     >::new();
     // Identifier to assign to the next substream.
     // TODO: weird API

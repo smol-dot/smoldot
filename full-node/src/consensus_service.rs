@@ -51,9 +51,7 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
-    cmp,
-    future::Future,
-    iter,
+    cmp, iter,
     num::NonZero,
     pin::Pin,
     sync::Arc,

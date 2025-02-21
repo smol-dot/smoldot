@@ -32,7 +32,7 @@ use alloc::{
     borrow::ToOwned as _, boxed::Box, collections::VecDeque, format, string::String, sync::Arc,
     vec::Vec,
 };
-use core::{cmp, fmt, future::Future, mem, num::NonZero, pin::Pin, time::Duration};
+use core::{cmp, fmt, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;

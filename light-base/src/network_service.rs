@@ -798,7 +798,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: sort by ChainId instead of using a Vec?
     event_senders: either::Either<
         Vec<(ChainId, async_channel::Sender<Event>)>,
-        Pin<Box<dyn future::Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
+        Pin<Box<dyn Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
     >,
 
     /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.

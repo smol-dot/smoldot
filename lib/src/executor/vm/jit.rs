@@ -295,7 +295,7 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = match future::Future::poll(
+        let instance = match Future::poll(
             pin::pin!(wasmtime::Instance::new_async(
                 &mut store,
                 &base_components.module,
@@ -620,7 +620,7 @@ enum JitInner {
     Done(wasmtime::Store<()>),
 }
 
-type BoxFuture<T> = pin::Pin<Box<dyn future::Future<Output = T> + Send>>;
+type BoxFuture<T> = pin::Pin<Box<dyn Future<Output = T> + Send>>;
 type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
@@ -733,7 +733,7 @@ impl Jit {
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
         // execution might be able to progress, hence the lack of need for a waker.
-        match future::Future::poll(
+        match Future::poll(
             function_call.as_mut(),
             &mut task::Context::from_waker(&noop_waker()),
         ) {
@@ -926,7 +926,7 @@ impl Jit {
                 // `MemoryGrowRequired`, perform the grow, and switch back to `WithinFunctionCall`.
                 // The `Future` is polled with a no-op waker. We are in total control of when the
                 // execution might be able to progress, hence the lack of need for a waker.
-                match future::Future::poll(
+                match Future::poll(
                     function_call.as_mut(),
                     &mut task::Context::from_waker(&noop_waker()),
                 ) {
