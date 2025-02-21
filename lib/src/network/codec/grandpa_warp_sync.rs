@@ -95,7 +95,7 @@ pub fn decode_grandpa_warp_sync_response(
 
 fn decode_fragments<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Vec<GrandpaWarpSyncResponseFragment<'a>>> {
     nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
         nom::multi::many_m_n(num_elems, num_elems, decode_fragment(block_number_bytes))
     })
@@ -103,7 +103,7 @@ fn decode_fragments<'a>(
 
 fn decode_fragment<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaWarpSyncResponseFragment<'a>> {
     nom::combinator::map(
         nom::sequence::tuple((
             nom::combinator::recognize(move |s| {

@@ -112,7 +112,7 @@ pub struct PersistedValidationDataRef<'a> {
 /// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PersistedValidationDataRef, E> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PersistedValidationDataRef<'a>, E> {
     nom::combinator::map(
         nom::sequence::tuple((
             crate::util::nom_bytes_decode,
