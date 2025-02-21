@@ -595,7 +595,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: ordering between trie roots unspecified
     // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
-        &'_ self,
+        &self,
     ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> {
         self.iter_ordered().filter_map(
             |(
@@ -628,7 +628,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     // TODO: ordering between trie roots unspecified
     pub fn iter_ordered(
-        &'_ self,
+        &self,
     ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> {
         let proof = self.proof.as_ref();
 
@@ -815,7 +815,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// This function will return `Ok` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
     pub fn trie_node_info(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
     ) -> Result<TrieNodeInfo<'_, T>, IncompleteProofError> {
@@ -968,10 +968,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: accept param as iterator rather than slice?
     pub fn storage_value(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         key: &[u8],
-    ) -> Result<Option<(&'_ [u8], TrieEntryVersion)>, IncompleteProofError> {
+    ) -> Result<Option<(&[u8], TrieEntryVersion)>, IncompleteProofError> {
         match self
             .trie_node_info(
                 trie_root_merkle_value,
@@ -1006,7 +1006,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns `Ok(None)` if the proof indicates that there is no next key (within the given
     /// prefix).
     pub fn next_key(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         key_before: impl Iterator<Item = nibble::Nibble>,
         mut or_equal: bool,
@@ -1273,10 +1273,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// value.
     /// Returns `Ok(None)` if the proof indicates that there is no descendant.
     pub fn closest_descendant_merkle_value(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
-    ) -> Result<Option<&'_ [u8]>, IncompleteProofError> {
+    ) -> Result<Option<&[u8]>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // Find the starting point of the requested trie.
@@ -1680,7 +1680,7 @@ impl<'a, T> Children<'a, T> {
     }
 
     /// Returns an iterator of 16 items, one for each child.
-    pub fn children(&'_ self) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> {
+    pub fn children(&self) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> {
         self.children.iter().cloned()
     }
 }

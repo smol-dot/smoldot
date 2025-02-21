@@ -346,7 +346,7 @@ impl Header {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of the header.
     pub fn scale_encoding(
-        &'_ self,
+        &self,
         block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         HeaderRef::from(self).scale_encoding(block_number_bytes)

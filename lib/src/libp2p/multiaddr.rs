@@ -59,7 +59,7 @@ impl Multiaddr<Vec<u8>> {
         let remain = {
             let mut iter = nom::combinator::iterator(
                 &self.bytes[..],
-                nom::combinator::recognize(protocol::<&'_ [u8], nom::error::Error<&'_ [u8]>>),
+                nom::combinator::recognize(protocol::<&[u8], nom::error::Error<&[u8]>>),
             );
 
             let bytes_prefix = iter.last().unwrap().len();
@@ -96,11 +96,9 @@ impl<T: AsRef<[u8]>> Multiaddr<T> {
     }
 
     /// Returns the list of components of the multiaddress.
-    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> {
-        let mut iter = nom::combinator::iterator(
-            self.bytes.as_ref(),
-            protocol::<_, nom::error::Error<&'_ [u8]>>,
-        );
+    pub fn iter(&self) -> impl Iterator<Item = Protocol<&[u8]>> {
+        let mut iter =
+            nom::combinator::iterator(self.bytes.as_ref(), protocol::<_, nom::error::Error<&[u8]>>);
         iter::from_fn(move || (&mut iter).next())
     }
 }

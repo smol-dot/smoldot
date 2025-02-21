@@ -223,14 +223,14 @@ impl<T> NonFinalizedTree<T> {
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
     fn verify_grandpa_finality_inner(
-        &'_ self,
+        &self,
         target_hash: &[u8; 32],
         target_number: u64,
     ) -> Result<
         (
             fork_tree::NodeIndex,
             u64,
-            impl Iterator<Item = &'_ [u8]> + Clone,
+            impl Iterator<Item = &[u8]> + Clone,
         ),
         FinalityVerifyError,
     > {

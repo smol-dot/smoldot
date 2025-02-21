@@ -408,7 +408,7 @@ impl Prepare {
 
     /// See [`super::Prepare::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
@@ -804,7 +804,7 @@ impl Jit {
 
     /// See [`super::VirtualMachine::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {

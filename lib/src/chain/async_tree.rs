@@ -271,7 +271,7 @@ where
     ///
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
     /// is the finalized block, which is out of scope of this data structure.
-    pub fn output_best_block_index(&self) -> Option<(NodeIndex, &'_ TAsync)> {
+    pub fn output_best_block_index(&self) -> Option<(NodeIndex, &TAsync)> {
         self.output_best_block_index.map(|best_block_index| {
             (
                 best_block_index,
@@ -352,7 +352,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
+    pub fn ancestors(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.ancestors(node)
     }
 
@@ -362,7 +362,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
+    pub fn children(&self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.children(node)
     }
 
@@ -382,7 +382,7 @@ where
     /// Similar to [`AsyncTree::input_output_iter_unordered`], except that the returned items are
     /// guaranteed to be in an order in which the parents are found before their children.
     pub fn input_output_iter_ancestry_order(
-        &'_ self,
+        &self,
     ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_ancestry_order()
@@ -409,7 +409,7 @@ where
     ///
     /// Does not include the finalized output block itself, but includes all descendants of it.
     pub fn input_output_iter_unordered(
-        &'_ self,
+        &self,
     ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_unordered()

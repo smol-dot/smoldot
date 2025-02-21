@@ -101,7 +101,7 @@ pub fn encode(decoded: Decoded<impl AsRef<[u8]>>) -> String {
 }
 
 /// Decodes an SS58 address from a string.
-pub fn decode(encoded: &'_ str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
+pub fn decode(encoded: &str) -> Result<Decoded<impl AsRef<[u8]>>, DecodeError> {
     let mut bytes = bs58::decode(encoded)
         .into_vec()
         .map_err(|err| DecodeError::InvalidBs58(Bs58DecodeError(err)))?;

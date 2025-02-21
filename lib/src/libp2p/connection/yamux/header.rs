@@ -178,7 +178,7 @@ pub struct YamuxHeaderDecodeError {
     offset: usize,
 }
 
-fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
+fn decode(bytes: &[u8]) -> nom::IResult<&[u8], DecodedYamuxHeader> {
     nom::sequence::preceded(
         nom::bytes::streaming::tag(&[0]),
         nom::branch::alt((
@@ -258,7 +258,7 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
     )(bytes)
 }
 
-fn flags(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], (bool, bool, bool, bool)> {
+fn flags(bytes: &[u8]) -> nom::IResult<&[u8], (bool, bool, bool, bool)> {
     nom::combinator::map_opt(nom::number::streaming::be_u16, |flags| {
         let syn = (flags & 0x1) != 0;
         let ack = (flags & 0x2) != 0;

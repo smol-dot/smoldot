@@ -314,7 +314,7 @@ impl fmt::Debug for MerkleValueOutput {
 /// Decodes a node value found in a proof into its components.
 ///
 /// This can decode nodes no matter their version or hash algorithm.
-pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>, &'_ [u8]>, Error> {
+pub fn decode(mut node_value: &[u8]) -> Result<Decoded<DecodedPartialKey<'_>, &[u8]>, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
     }

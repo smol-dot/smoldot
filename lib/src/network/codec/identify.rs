@@ -121,9 +121,9 @@ pub fn build_identify_response<'a>(
 
 /// Decodes a response to an identify request.
 pub fn decode_identify_response(
-    response_bytes: &'_ [u8],
+    response_bytes: &[u8],
 ) -> Result<
-    IdentifyResponse<'_, vec::IntoIter<&'_ [u8]>, vec::IntoIter<&'_ str>>,
+    IdentifyResponse<'_, vec::IntoIter<&[u8]>, vec::IntoIter<&str>>,
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(

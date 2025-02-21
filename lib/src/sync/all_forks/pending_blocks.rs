@@ -321,12 +321,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns the list of sources in this state machine.
-    pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> {
+    pub fn sources(&self) -> impl ExactSizeIterator<Item = SourceId> {
         self.sources.keys()
     }
 
     /// Returns the list of all user datas of all sources.
-    pub fn sources_user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> {
+    pub fn sources_user_data_iter_mut(&mut self) -> impl ExactSizeIterator<Item = &mut TSrc> {
         self.sources.user_data_iter_mut().map(|s| &mut s.user_data)
     }
 
@@ -675,7 +675,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// > **Note**: The naming of this function assumes that all blocks that are referenced by
     /// >           this data structure but absent from this data structure are known by the
     /// >           API user.
-    pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = TreeRoot> {
+    pub fn unverified_leaves(&self) -> impl Iterator<Item = TreeRoot> {
         self.blocks.good_tree_roots().filter(move |pending| {
             match self
                 .blocks
@@ -711,7 +711,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// >           data structure from reaching unreasonable sizes. Please keep in mind, however,
     /// >           that removing blocks will lead to redownloading these blocks later. In other
     /// >           words, it is better to keep these blocks.
-    pub fn unnecessary_unverified_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> {
+    pub fn unnecessary_unverified_blocks(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
         // TODO: this entire function is O(n) everywhere
 
         // List of blocks that have a bad parent.
@@ -868,7 +868,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> {
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = (RequestId, &TRq)> {
         // TODO: more than that?
         self.requests
             .iter()
@@ -905,7 +905,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// >           requests per source, as this is out of scope of this module. However, there is
     /// >           limit to the number of simultaneous requests per block. See
     /// >           [`Config::max_requests_per_block`].
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = DesiredRequest> {
+    pub fn desired_requests(&self) -> impl Iterator<Item = DesiredRequest> {
         self.desired_requests_inner(None)
     }
 
@@ -920,7 +920,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     pub fn source_desired_requests(
-        &'_ self,
+        &self,
         source_id: SourceId,
     ) -> impl Iterator<Item = RequestParams> {
         self.desired_requests_inner(Some(source_id)).map(move |rq| {
@@ -939,7 +939,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     fn desired_requests_inner(
-        &'_ self,
+        &self,
         force_source: Option<SourceId>,
     ) -> impl Iterator<Item = DesiredRequest> {
         // TODO: could provide more optimized requests by avoiding potentially overlapping requests (e.g. if blocks #4 and #5 are unknown, ask for block #5 with num_blocks=2), but this is complicated because peers aren't obligated to respond with the given number of blocks

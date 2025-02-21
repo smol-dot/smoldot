@@ -246,7 +246,7 @@ where
     /// Returns a list of transactions whose state is "not validated", and their user data.
     ///
     /// These transactions should always be validated against the current best block.
-    pub fn unvalidated_transactions(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
+    pub fn unvalidated_transactions(&self) -> impl Iterator<Item = (TransactionId, &TTx)> {
         let best_block_relative_height = match self.best_block_index {
             Some(idx) => self.blocks_tree.get(idx).unwrap().relative_block_height,
             None => self.blocks_tree_root_relative_height,
@@ -268,16 +268,14 @@ where
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn transactions_iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
+    pub fn transactions_iter(&self) -> impl Iterator<Item = (TransactionId, &TTx)> {
         self.transactions
             .iter()
             .map(|(id, tx)| (TransactionId(id), &tx.user_data))
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn transactions_iter_mut(
-        &'_ mut self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> {
+    pub fn transactions_iter_mut(&mut self) -> impl Iterator<Item = (TransactionId, &mut TTx)> {
         self.transactions
             .iter_mut()
             .map(|(id, tx)| (TransactionId(id), &mut tx.user_data))
@@ -305,7 +303,7 @@ where
     }
 
     /// Tries to find the transactions in the pool whose bytes are `scale_encoded`.
-    pub fn find_transaction(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> {
+    pub fn find_transaction(&self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> {
         let hash = blake2_hash(scale_encoded);
         self.by_hash
             .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
@@ -372,8 +370,8 @@ where
     /// >           possible for the transaction to become valid again in the future if a reorg
     /// >           happens and removes the block the transaction was validated against.
     pub fn invalid_transactions_best_block(
-        &'_ self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> {
+        &self,
+    ) -> impl Iterator<Item = (TransactionId, &TTx, &TErr)> {
         // Note that this iterates over all transactions every time, which seems unoptimal, but
         // is also way easier to implement and probably doesn't cost too much in practice.
         self.transactions
@@ -393,8 +391,8 @@ where
     /// >           block it was verified against. In other words, it can assumed that transactions
     /// >           returned here will never be valid.
     pub fn invalid_transactions_finalized_block(
-        &'_ self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> {
+        &self,
+    ) -> impl Iterator<Item = (TransactionId, &TTx, &TErr)> {
         // Note that this iterates over all transactions every time, which seems unoptimal, but
         // is also way easier to implement and probably doesn't cost too much in practice.
         self.transactions.iter().filter_map(move |(tx_id, tx)| {
@@ -680,7 +678,7 @@ where
     // TODO: return something more precise in case the block in which a transaction is included is updated?
     #[must_use = "`set_block_body` returns the list of transactions that are now included in the chain"]
     pub fn set_block_body(
-        &'_ mut self,
+        &mut self,
         block_hash: &[u8; 32],
         body: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> impl Iterator<Item = (TransactionId, usize)> {
@@ -780,7 +778,7 @@ where
     /// Blocks that were inserted when there wasn't any transaction in the pool are never
     /// returned.
     // TODO: return whether in best chain
-    pub fn missing_block_bodies(&'_ self) -> impl Iterator<Item = (&'_ [u8; 32], &'_ TBl)> {
+    pub fn missing_block_bodies(&self) -> impl Iterator<Item = (&[u8; 32], &TBl)> {
         self.blocks_tree
             .iter_unordered()
             .filter_map(move |(_, block)| {

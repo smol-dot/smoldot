@@ -279,7 +279,7 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         let substream = self.in_substreams.get_mut(substream_id).unwrap();
 

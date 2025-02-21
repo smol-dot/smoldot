@@ -163,7 +163,7 @@ impl UnsignedNoiseKey {
     }
 
     /// Returns the data that has to be signed.
-    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    pub fn payload_to_sign(&self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         [
             &b"noise-libp2p-static-key:"[..],
             &self.public_key.as_bytes()[..],
@@ -1201,7 +1201,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         decrypted_buffers: impl Iterator<Item = Vec<u8>>,
     ) -> Result<impl Iterator<Item = Vec<u8>>, EncryptError> {
@@ -1346,7 +1346,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         data: &[u8],
     ) -> Result<Vec<u8>, EncryptError> {
@@ -1364,7 +1364,7 @@ impl CipherState {
 
     /// Highly-specific function when the message to decode is 32 bytes.
     fn read_chachapoly_message_to_array(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8; 48],
     ) -> Result<[u8; 32], CipherError> {
@@ -1374,7 +1374,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
     ) -> Result<Vec<u8>, CipherError> {
@@ -1384,7 +1384,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec_append(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         out: &mut Vec<u8>,
@@ -1403,7 +1403,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_slice(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         destination: &mut [u8],

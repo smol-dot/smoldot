@@ -424,7 +424,7 @@ impl Prepare {
     ///
     /// Returns an error if the range is invalid or out of range.
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
@@ -689,7 +689,7 @@ impl VirtualMachine {
     ///
     /// Returns an error if the range is invalid or out of range.
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {

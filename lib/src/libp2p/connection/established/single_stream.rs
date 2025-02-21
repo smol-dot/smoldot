@@ -127,7 +127,7 @@ where
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
     pub fn read_write(
         mut self,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<(SingleStream<TNow, TSubUd>, Option<Event<TSubUd>>), Error> {
         // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {

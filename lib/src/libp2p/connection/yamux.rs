@@ -1562,9 +1562,7 @@ where
     /// This function does not remove dead substreams from the state machine. In other words, if
     /// this function is called multiple times in a row, it will always return the same
     /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
-    pub fn dead_substreams(
-        &'_ self,
-    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ TSub)> {
+    pub fn dead_substreams(&self) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &TSub)> {
         self.inner.dead_substreams.iter().map(|id| {
             let substream = self.inner.substreams.get(id).unwrap();
             match &substream.state {

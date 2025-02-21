@@ -486,7 +486,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
+    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_unordered()
     }
 
@@ -495,7 +495,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
     pub fn non_finalized_blocks_ancestry_order(
-        &'_ self,
+        &self,
     ) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_ancestry_order()
     }
@@ -569,7 +569,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }
 
     /// Returns the list of sources in this state machine.
-    pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> {
+    pub fn sources(&self) -> impl ExactSizeIterator<Item = SourceId> {
         self.inner.blocks.sources()
     }
 
@@ -662,7 +662,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> {
+    pub fn desired_requests(&self) -> impl Iterator<Item = (SourceId, &TSrc, RequestParams)> {
         // Query justifications of blocks that are necessary in order for finality to progress
         // against sources that have reported these blocks as finalized.
         // TODO: make it clear in the API docs that justifications should be requested as part of a request
@@ -739,7 +739,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> {
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = (RequestId, &TRq)> {
         // TODO: requests meant to query justifications only are considered obsolete by the underlying state machine, which right now is okay because the underlying state machine is pretty loose in its definition of obsolete
         self.inner.blocks.obsolete_requests()
     }
@@ -1899,7 +1899,7 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
+        &self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         if self.parent.inner.blocks.downloading_bodies() {
             Some(
@@ -2053,7 +2053,7 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
+        &self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         if self.parent.inner.blocks.downloading_bodies() {
             Some(

@@ -329,7 +329,7 @@ where
     /// substream must be reset if it is not closed.
     pub fn read_write(
         self,
-        read_write: &'_ mut read_write::ReadWrite<TNow>,
+        read_write: &mut read_write::ReadWrite<TNow>,
     ) -> (Option<Self>, Option<Event>) {
         let (me, event) = self.read_write2(read_write);
         (me.map(|inner| Substream { inner }), event)
@@ -337,7 +337,7 @@ where
 
     fn read_write2(
         self,
-        read_write: &'_ mut read_write::ReadWrite<TNow>,
+        read_write: &mut read_write::ReadWrite<TNow>,
     ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
         match self.inner {
             SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {

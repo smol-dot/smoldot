@@ -293,7 +293,7 @@ impl<TTx> Pool<TTx> {
     /// The returned iterator is guaranteed to remove all transactions even if it is dropped
     /// eagerly.
     pub fn remove_included(
-        &'_ mut self,
+        &mut self,
         block_inferior_of_equal: u64,
     ) -> impl Iterator<Item = (TransactionId, TTx)> {
         // First, unvalidate all the transactions that we are going to remove.
@@ -378,7 +378,7 @@ impl<TTx> Pool<TTx> {
     /// block at which it has been included minus one, or the current best block. It is yielded by
     /// the iterator for convenience, to avoid writing error-prone code.
     pub fn unvalidated_transactions(
-        &'_ self,
+        &self,
     ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> {
         self.not_validated.iter().copied().map(move |tx_id| {
             let tx = self.transactions.get(tx_id.0).unwrap();
@@ -391,14 +391,14 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
+    pub fn iter(&self) -> impl Iterator<Item = (TransactionId, &TTx)> {
         self.transactions
             .iter()
             .map(|(id, tx)| (TransactionId(id), &tx.user_data))
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter_mut(&'_ mut self) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (TransactionId, &mut TTx)> {
         self.transactions
             .iter_mut()
             .map(|(id, tx)| (TransactionId(id), &mut tx.user_data))
@@ -428,7 +428,7 @@ impl<TTx> Pool<TTx> {
     /// This operation has a complexity of `O(log n)` where `n` is the number of entries in the
     /// pool.
     pub fn transactions_by_scale_encoding(
-        &'_ self,
+        &self,
         scale_encoded: &[u8],
     ) -> impl Iterator<Item = TransactionId> {
         let hash = blake2_hash(scale_encoded);
@@ -521,8 +521,8 @@ impl<TTx> Pool<TTx> {
     /// lead to the runtime returning errors. It is safe, however, to skip some transactions
     /// altogether if desired.
     pub fn best_block_includable_transactions(
-        &'_ self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
+        &self,
+    ) -> impl Iterator<Item = (TransactionId, &TTx)> {
         self.includable
             .iter()
             .rev()

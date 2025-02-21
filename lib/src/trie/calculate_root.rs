@@ -135,7 +135,7 @@ struct Node {
 
 impl CalcInner {
     /// Returns the full key of the node currently being iterated.
-    fn current_iter_node_full_key(&'_ self) -> impl Iterator<Item = Nibble> {
+    fn current_iter_node_full_key(&self) -> impl Iterator<Item = Nibble> {
         self.stack.iter().flat_map(|node| {
             let child_nibble = if node.children.len() == 16 {
                 None
@@ -219,7 +219,7 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key_before(&'_ self) -> impl Iterator<Item = u8> {
+    pub fn key_before(&self) -> impl Iterator<Item = u8> {
         self.branch_search.key_before()
     }
 
@@ -231,7 +231,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = u8> {
+    pub fn prefix(&self) -> impl Iterator<Item = u8> {
         self.branch_search.prefix()
     }
 
@@ -291,7 +291,7 @@ pub struct StorageValue {
 
 impl StorageValue {
     /// Returns the key whose value is being requested.
-    pub fn key(&'_ self) -> impl Iterator<Item = u8> {
+    pub fn key(&self) -> impl Iterator<Item = u8> {
         // This function can never be reached if the number of nibbles is uneven.
         debug_assert_eq!(self.calculation.current_iter_node_full_key().count() % 2, 0);
         nibbles_to_bytes_suffix_extend(self.calculation.current_iter_node_full_key())

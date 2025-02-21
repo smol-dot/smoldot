@@ -843,7 +843,7 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but

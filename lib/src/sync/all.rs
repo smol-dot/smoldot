@@ -482,7 +482,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns the list of sources in this state machine.
-    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> {
+    pub fn sources(&self) -> impl Iterator<Item = SourceId> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -577,7 +577,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// potentially-finalized block prevents potentially confusing or erroneous situations.
     ///
     pub fn knows_non_finalized_block(
-        &'_ self,
+        &self,
         height: u64,
         hash: &[u8; 32],
     ) -> impl Iterator<Item = SourceId> {
@@ -628,9 +628,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllSync::add_request`] must be
     /// called in order for the request to actually be marked as started.
-    pub fn desired_requests(
-        &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> {
+    pub fn desired_requests(&self) -> impl Iterator<Item = (SourceId, &TSrc, DesiredRequest)> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -873,7 +871,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> {
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
         // TODO: not implemented properly
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
@@ -2014,7 +2012,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
+        &self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         self.inner.scale_encoded_extrinsics()
     }
@@ -2122,7 +2120,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     ///
     /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
-        &'_ self,
+        &self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone> {
         self.inner.scale_encoded_extrinsics()
     }

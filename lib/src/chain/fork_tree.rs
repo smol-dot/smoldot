@@ -129,7 +129,7 @@ impl<T> ForkTree<T> {
 
     /// Returns an iterator to all the node values. The returned items are guaranteed to be in an
     /// order in which the parents are found before their children.
-    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = (NodeIndex, &'_ T)> {
+    pub fn iter_ancestry_order(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
         iter::successors(self.first_root.map(NodeIndex), move |n| {
             self.ancestry_order_next(*n)
         })
@@ -209,7 +209,7 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
+    pub fn ancestors(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
         iter::successors(Some(node), move |n| self.nodes[n.0].parent.map(NodeIndex)).skip(1)
     }
 
@@ -229,7 +229,7 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
+    pub fn children(&self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
         let first = match node {
             Some(n) => self.nodes[n.0].first_child,
             None => self.first_root,
@@ -386,7 +386,7 @@ impl<T> ForkTree<T> {
     /// Panics if one of the [`NodeIndex`]s is invalid.
     ///
     pub fn ascend_and_descend(
-        &'_ self,
+        &self,
         node1: NodeIndex,
         node2: NodeIndex,
     ) -> (
@@ -421,7 +421,7 @@ impl<T> ForkTree<T> {
     /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn node_to_root_path(
-        &'_ self,
+        &self,
         node_index: NodeIndex,
     ) -> impl Iterator<Item = NodeIndex> + Clone {
         iter::successors(Some(node_index), move |n| {
@@ -436,7 +436,7 @@ impl<T> ForkTree<T> {
     /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn root_to_node_path(
-        &'_ self,
+        &self,
         node_index: NodeIndex,
     ) -> impl Iterator<Item = NodeIndex> + Clone {
         debug_assert!(self.nodes.get(usize::MAX).is_none());

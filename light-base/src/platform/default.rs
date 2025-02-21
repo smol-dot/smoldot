@@ -304,7 +304,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         match *c {}
     }
 
-    fn next_substream(&self, c: &'_ mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream(&self, c: &mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
