@@ -1,5 +1,5 @@
 [licenses]
-# See <https://choosealicense.com/appendix/>
+# See <https://spdx.org/licenses/>
 allow = [
     "MIT",
     "Apache-2.0",
