@@ -1564,7 +1564,7 @@ where
     /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
     pub fn dead_substreams(
         &'_ self,
-    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ TSub)> + '_ {
+    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ TSub)> {
         self.inner.dead_substreams.iter().map(|id| {
             let substream = self.inner.substreams.get(id).unwrap();
             match &substream.state {

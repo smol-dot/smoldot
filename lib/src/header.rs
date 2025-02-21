@@ -348,7 +348,7 @@ impl Header {
     pub fn scale_encoding(
         &'_ self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         HeaderRef::from(self).scale_encoding(block_number_bytes)
     }
 

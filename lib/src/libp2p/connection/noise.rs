@@ -163,7 +163,7 @@ impl UnsignedNoiseKey {
     }
 
     /// Returns the data that has to be signed.
-    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         [
             &b"noise-libp2p-static-key:"[..],
             &self.public_key.as_bytes()[..],

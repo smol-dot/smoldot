@@ -20,7 +20,7 @@ use super::methods;
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
 pub fn payment_info_parameters(
     extrinsic: &'_ [u8],
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_ {
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
     [
         either::Left(extrinsic),
         either::Right(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()),

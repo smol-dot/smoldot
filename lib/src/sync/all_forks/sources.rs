@@ -83,7 +83,7 @@ impl<TSrc> AllForksSources<TSrc> {
     }
 
     /// Returns the list of all [`SourceId`]s.
-    pub fn keys(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
+    pub fn keys(&'_ self) -> impl ExactSizeIterator<Item = SourceId> {
         self.sources.keys().copied()
     }
 
@@ -105,7 +105,7 @@ impl<TSrc> AllForksSources<TSrc> {
     }
 
     /// Returns the list of all user datas of all sources.
-    pub fn user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
+    pub fn user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> {
         self.sources.values_mut().map(|s| &mut s.user_data)
     }
 

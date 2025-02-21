@@ -200,7 +200,7 @@ impl StorageChanges {
     /// >           changes made to the main trie.
     pub fn main_trie_storage_changes_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone {
         self.inner
             .trie_diffs
             .get(&None)
@@ -209,7 +209,7 @@ impl StorageChanges {
     }
 
     /// Returns the list of all child tries whose content has been modified in some way.
-    pub fn tries_with_storage_changes_unordered(&'_ self) -> impl Iterator<Item = &'_ [u8]> + '_ {
+    pub fn tries_with_storage_changes_unordered(&'_ self) -> impl Iterator<Item = &'_ [u8]> {
         self.inner.trie_diffs.keys().filter_map(|k| k.as_deref())
     }
 
@@ -225,7 +225,7 @@ impl StorageChanges {
     pub fn child_trie_storage_changes_iter_unordered(
         &'_ self,
         child_trie: &'_ [u8],
-    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone {
         self.inner
             .trie_diffs
             .get(&Some(child_trie.to_vec())) // TODO: annoying unnecessary overhead
@@ -239,7 +239,7 @@ impl StorageChanges {
     /// the underlying value.
     pub fn storage_changes_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [u8], Option<&'_ [u8]>)> + Clone {
         self.inner.trie_diffs.iter().flat_map(|(trie, list)| {
             list.diff_iter_unordered()
                 .map(move |(k, v, ())| (trie.as_deref(), k, v))
@@ -472,7 +472,7 @@ pub struct SuccessVirtualMachine(host::Finished);
 
 impl SuccessVirtualMachine {
     /// Returns the value the called function has returned.
-    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn value(&'_ self) -> impl AsRef<[u8]> {
         self.0.value()
     }
 
@@ -577,7 +577,7 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         enum Three<A, B, C> {
             A(A),
             B(B),
@@ -616,7 +616,7 @@ impl StorageGet {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         enum Three<A, B, C> {
             A(A),
             B(B),
@@ -709,7 +709,7 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         if let Some(key_overwrite) = &self.key_overwrite {
             return either::Left(trie::bytes_to_nibbles(key_overwrite.iter().copied()));
         }
@@ -732,7 +732,7 @@ impl NextKey {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         enum Three<A, B, C> {
             A(A),
             B(B),
@@ -773,7 +773,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> {
         match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
             (host::HostVm::ExternalStorageClearPrefix(req), _) => {
                 either::Left(trie::bytes_to_nibbles(util::as_ref_iter(req.prefix())))
@@ -889,7 +889,7 @@ pub struct ClosestDescendantMerkleValue {
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         let (_, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.as_ref().unwrap()
         else {
@@ -899,7 +899,7 @@ impl ClosestDescendantMerkleValue {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(_)) =
             self.inner.root_calculation.as_ref().unwrap()
         else {
@@ -957,7 +957,7 @@ pub struct SignatureVerification {
 
 impl SignatureVerification {
     /// Returns the message that the signature is expected to sign.
-    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn message(&'_ self) -> impl AsRef<[u8]> {
         match self.inner.vm {
             host::HostVm::SignatureVerification(ref sig) => sig.message(),
             _ => unreachable!(),
@@ -968,7 +968,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
     /// >           set of valid signatures.
-    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn signature(&'_ self) -> impl AsRef<[u8]> {
         match self.inner.vm {
             host::HostVm::SignatureVerification(ref sig) => sig.signature(),
             _ => unreachable!(),
@@ -979,7 +979,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
     /// >           set of valid public keys.
-    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn public_key(&'_ self) -> impl AsRef<[u8]> {
         match self.inner.vm {
             host::HostVm::SignatureVerification(ref sig) => sig.public_key(),
             _ => unreachable!(),
@@ -1041,7 +1041,7 @@ pub struct OffchainStorageGet {
 
 impl OffchainStorageGet {
     /// Returns the key whose value must be passed to [`OffchainStorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         match &self.inner.vm {
             host::HostVm::ExternalOffchainStorageGet(req) => req.key(),
             // We only create a `OffchainStorageGet` if the state is one of the above.
@@ -1071,7 +1071,7 @@ pub struct OffchainStorageSet {
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         match &self.inner.vm {
             host::HostVm::Finished(_) => {
                 self.inner
@@ -1088,7 +1088,7 @@ impl OffchainStorageSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]>> {
         match &self.inner.vm {
             host::HostVm::Finished(_) => self
                 .inner
@@ -1124,7 +1124,7 @@ pub struct OffchainStorageCompareSet {
 
 impl OffchainStorageCompareSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         match &self.inner.vm {
             host::HostVm::ExternalOffchainStorageSet(req) => either::Left(req.key()),
             host::HostVm::Finished(_) => either::Right(
@@ -1142,7 +1142,7 @@ impl OffchainStorageCompareSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]>> {
         match &self.inner.vm {
             host::HostVm::ExternalOffchainStorageSet(req) => req.value().map(either::Left),
             host::HostVm::Finished(_) => self
@@ -1160,7 +1160,7 @@ impl OffchainStorageCompareSet {
     }
 
     /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
-    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]>> {
         match &self.inner.vm {
             host::HostVm::ExternalOffchainStorageSet(req) => req.old_value(),
             host::HostVm::Finished(_) => None,
@@ -1236,7 +1236,7 @@ pub struct OffchainSubmitTransaction {
 
 impl OffchainSubmitTransaction {
     /// Returns the SCALE-encoded transaction that must be submitted.
-    pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn transaction(&'_ self) -> impl AsRef<[u8]> {
         match &self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => req.transaction(),
             // We only create a `OffchainSubmitTransaction` if the state is one of the above.

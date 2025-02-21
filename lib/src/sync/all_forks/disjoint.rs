@@ -83,7 +83,7 @@ impl<TBl> DisjointBlocks<TBl> {
     }
 
     /// Returns the list of blocks in the collection.
-    pub fn iter(&'_ self) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> + '_ {
+    pub fn iter(&'_ self) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> {
         self.blocks
             .iter()
             .map(|((he, ha), bl)| (*he, ha, &bl.user_data))
@@ -197,7 +197,7 @@ impl<TBl> DisjointBlocks<TBl> {
         &'_ self,
         height: u64,
         hash: &[u8; 32],
-    ) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> + '_ {
+    ) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> {
         let hash = *hash;
         self.blocks
             .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
@@ -290,7 +290,7 @@ impl<TBl> DisjointBlocks<TBl> {
 
     /// Returns the list of blocks whose parent hash is known but the parent itself is absent from
     /// the list of disjoint blocks. These blocks can potentially be verified.
-    pub fn good_tree_roots(&'_ self) -> impl Iterator<Item = TreeRoot> + '_ {
+    pub fn good_tree_roots(&'_ self) -> impl Iterator<Item = TreeRoot> {
         self.blocks
             .iter()
             .filter(|(_, block)| !block.bad)
@@ -325,7 +325,7 @@ impl<TBl> DisjointBlocks<TBl> {
     /// >           this method.
     ///
     /// The blocks yielded by the iterator are always ordered by ascending height.
-    pub fn unknown_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
+    pub fn unknown_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> {
         // Blocks whose parent hash isn't known.
         let mut iter1 = self
             .blocks

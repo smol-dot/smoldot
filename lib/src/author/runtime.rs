@@ -622,12 +622,12 @@ pub struct StorageGet(runtime_call::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -648,12 +648,12 @@ pub struct ClosestDescendantMerkleValue(runtime_call::ClosestDescendantMerkleVal
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -681,12 +681,12 @@ pub struct NextKey(runtime_call::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -704,7 +704,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -725,14 +725,14 @@ pub struct OffchainStorageSet(runtime_call::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.value()
     }
 

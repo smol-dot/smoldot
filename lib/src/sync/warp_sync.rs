@@ -621,7 +621,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     }
 
     /// Returns a list of all known sources stored in the state machine.
-    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
+    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> {
         self.sources.iter().map(|(id, _)| SourceId(id))
     }
 
@@ -666,7 +666,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     pub fn remove_source(
         &'_ mut self,
         to_remove: SourceId,
-    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
+    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)>) {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0);
         let _was_in = self
@@ -800,7 +800,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// [`WarpSync::add_request`], it is no longer returned by this function.
     pub fn desired_requests(
         &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> {
         // If we are in the fragments download phase, return a fragments download request.
         let mut desired_warp_sync_request = if self.warp_sync_fragments_download.is_none() {
             if self.verify_queue.iter().fold(0, |sum, entry| {

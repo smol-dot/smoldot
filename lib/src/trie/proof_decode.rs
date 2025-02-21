@@ -596,7 +596,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> + '_ {
+    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> {
         self.iter_ordered().filter_map(
             |(
                 EntryKey {
@@ -629,7 +629,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: ordering between trie roots unspecified
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> + '_ {
+    ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> {
         let proof = self.proof.as_ref();
 
         self.trie_roots
@@ -1680,9 +1680,7 @@ impl<'a, T> Children<'a, T> {
     }
 
     /// Returns an iterator of 16 items, one for each child.
-    pub fn children(
-        &'_ self,
-    ) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> + '_ {
+    pub fn children(&'_ self) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> {
         self.children.iter().cloned()
     }
 }

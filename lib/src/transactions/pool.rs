@@ -295,7 +295,7 @@ impl<TTx> Pool<TTx> {
     pub fn remove_included(
         &'_ mut self,
         block_inferior_of_equal: u64,
-    ) -> impl Iterator<Item = (TransactionId, TTx)> + '_ {
+    ) -> impl Iterator<Item = (TransactionId, TTx)> {
         // First, unvalidate all the transactions that we are going to remove.
         // This is done separately ahead of time in order to guarantee that there is no state
         // mismatch when `unvalidate_transaction` is entered.
@@ -379,7 +379,7 @@ impl<TTx> Pool<TTx> {
     /// the iterator for convenience, to avoid writing error-prone code.
     pub fn unvalidated_transactions(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> + '_ {
+    ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> {
         self.not_validated.iter().copied().map(move |tx_id| {
             let tx = self.transactions.get(tx_id.0).unwrap();
             let height = tx
@@ -391,14 +391,14 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+    pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
         self.transactions
             .iter()
             .map(|(id, tx)| (TransactionId(id), &tx.user_data))
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter_mut(&'_ mut self) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> + '_ {
+    pub fn iter_mut(&'_ mut self) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> {
         self.transactions
             .iter_mut()
             .map(|(id, tx)| (TransactionId(id), &mut tx.user_data))
@@ -430,7 +430,7 @@ impl<TTx> Pool<TTx> {
     pub fn transactions_by_scale_encoding(
         &'_ self,
         scale_encoded: &[u8],
-    ) -> impl Iterator<Item = TransactionId> + '_ {
+    ) -> impl Iterator<Item = TransactionId> {
         let hash = blake2_hash(scale_encoded);
         self.by_hash
             .range((hash, TransactionId(usize::MIN))..=(hash, TransactionId(usize::MAX)))
@@ -522,7 +522,7 @@ impl<TTx> Pool<TTx> {
     /// altogether if desired.
     pub fn best_block_includable_transactions(
         &'_ self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> {
         self.includable
             .iter()
             .rev()

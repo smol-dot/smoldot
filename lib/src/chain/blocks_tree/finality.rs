@@ -230,7 +230,7 @@ impl<T> NonFinalizedTree<T> {
         (
             fork_tree::NodeIndex,
             u64,
-            impl Iterator<Item = &'_ [u8]> + Clone + '_,
+            impl Iterator<Item = &'_ [u8]> + Clone,
         ),
         FinalityVerifyError,
     > {

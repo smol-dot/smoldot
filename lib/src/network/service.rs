@@ -650,7 +650,7 @@ where
     }
 
     /// Returns the list of all the chains that have been added.
-    pub fn chains(&'_ self) -> impl ExactSizeIterator<Item = ChainId> + '_ {
+    pub fn chains(&'_ self) -> impl ExactSizeIterator<Item = ChainId> {
         self.chains.iter().map(|(idx, _)| ChainId(idx))
     }
 
@@ -899,7 +899,7 @@ where
         &self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &'_ PeerId> {
         self.gossip_desired_peers_by_chain
             .range(
                 (chain_id.0, kind, PeerIndex(usize::MIN))
@@ -923,7 +923,7 @@ where
     ///
     /// > **Note**: Connections that are currently in the process of shutting down are also
     /// >           ignored for the purpose of this function.
-    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone + '_ {
+    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone {
         self.unconnected_desired
             .iter()
             .map(|peer_index| &self.peers[peer_index.0])
@@ -933,7 +933,7 @@ where
     /// connection exists, but for which no substream connection attempt exists.
     pub fn connected_unopened_gossip_desired(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone {
         self.connected_unopened_gossip_desired.iter().map(
             move |(peer_index, chain_id, gossip_kind)| {
                 (&self.peers[peer_index.0], *chain_id, *gossip_kind)
@@ -945,7 +945,7 @@ where
     /// exists but that are not marked as desired.
     pub fn opened_gossip_undesired(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone {
         self.opened_gossip_undesired
             .iter()
             .map(move |(chain_id, peer_index, gossip_kind)| {
@@ -963,7 +963,7 @@ where
     pub fn opened_gossip_undesired_by_chain(
         &'_ self,
         chain_id: ChainId,
-    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone + '_ {
+    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone {
         // TODO: optimize and add an ExactSizeIterator bound to the return value, and update the users to use len() instead of count()
         self.opened_gossip_undesired
             .iter()
@@ -3287,7 +3287,7 @@ where
         &'_ self,
         chain_id: ChainId,
         kind: GossipKind,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    ) -> impl Iterator<Item = &'_ PeerId> {
         assert!(self.chains.contains(chain_id.0));
         let GossipKind::ConsensusTransactions = kind;
 

@@ -427,7 +427,7 @@ impl Prepare {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         Ok(match &self.inner {
             #[cfg(all(
                 any(
@@ -692,7 +692,7 @@ impl VirtualMachine {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         Ok(match &self.inner {
             #[cfg(all(
                 any(

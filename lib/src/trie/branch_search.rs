@@ -124,7 +124,7 @@ enum NextKeyInner {
 impl NextKey {
     /// The API user must provide the trie node with a storage value whose key is the first one
     /// that is strictly superior or superior or equal to the key returned by this function.
-    pub fn key_before(&'_ self) -> impl Iterator<Item = u8> + '_ {
+    pub fn key_before(&'_ self) -> impl Iterator<Item = u8> {
         trie::nibbles_to_bytes_suffix_extend(match &self.inner {
             NextKeyInner::FirstFound { .. } => either::Left(self.key_before.iter().copied()),
             NextKeyInner::FurtherRound {
@@ -170,7 +170,7 @@ impl NextKey {
 
     /// The API user must indicate a key that starts with the bytes returned by this function.
     /// If the first key doesn't start with these bytes, then the API user must indicate `None`.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = u8> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = u8> {
         trie::nibbles_to_bytes_truncate(self.prefix.iter().copied())
     }
 

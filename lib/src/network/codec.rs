@@ -99,9 +99,7 @@ impl<'a> fmt::Display for ProtocolName<'a> {
 
 /// Turns a [`ProtocolName`] into its string version. Returns a list of objects that, when
 /// concatenated together, forms the string version of the [`ProtocolName`].
-pub fn encode_protocol_name(
-    protocol: ProtocolName<'_>,
-) -> impl Iterator<Item = impl AsRef<str> + '_> + '_ {
+pub fn encode_protocol_name(protocol: ProtocolName<'_>) -> impl Iterator<Item = impl AsRef<str>> {
     let (genesis_hash, fork_id, base_protocol_name) = match protocol {
         ProtocolName::Identify => return either::Left(iter::once(Cow::Borrowed("/ipfs/id/1.0.0"))),
         ProtocolName::Ping => return either::Left(iter::once(Cow::Borrowed("/ipfs/ping/1.0.0"))),

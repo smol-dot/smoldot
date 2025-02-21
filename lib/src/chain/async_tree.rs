@@ -352,7 +352,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.ancestors(node)
     }
 
@@ -362,7 +362,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.children(node)
     }
 
@@ -383,7 +383,7 @@ where
     /// guaranteed to be in an order in which the parents are found before their children.
     pub fn input_output_iter_ancestry_order(
         &'_ self,
-    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_ancestry_order()
             .map(move |(id, b)| {
@@ -410,7 +410,7 @@ where
     /// Does not include the finalized output block itself, but includes all descendants of it.
     pub fn input_output_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_unordered()
             .map(move |(id, b)| {

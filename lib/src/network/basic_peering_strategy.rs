@@ -311,10 +311,7 @@ where
     /// words peers added through [`BasicPeeringStrategy::insert_chain_peer`].
     ///
     /// The order of the yielded elements is unspecified.
-    pub fn chain_peers_unordered(
-        &'_ self,
-        chain: &TChainId,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    pub fn chain_peers_unordered(&'_ self, chain: &TChainId) -> impl Iterator<Item = &'_ PeerId> {
         let Some(&chain_index) = self.chains_indices.get(chain) else {
             // If the `TChainId` is unknown, it means that it doesn't have any peer.
             return either::Right(iter::empty());
@@ -435,7 +432,7 @@ where
     }
 
     /// Returns the list of all addresses that have been inserted for the given peer.
-    pub fn peer_addresses(&'_ self, peer_id: &PeerId) -> impl Iterator<Item = &'_ [u8]> + '_ {
+    pub fn peer_addresses(&'_ self, peer_id: &PeerId) -> impl Iterator<Item = &'_ [u8]> {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it doesn't have any address.
             return either::Right(iter::empty());

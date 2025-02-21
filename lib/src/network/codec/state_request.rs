@@ -81,9 +81,7 @@ pub enum StateRequestStart<'a> {
 // for protocol definition.
 
 /// Builds the bytes corresponding to a state request.
-pub fn build_state_request(
-    config: StateRequest<'_>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+pub fn build_state_request(config: StateRequest<'_>) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let start = match config.start_key {
         StateRequestStart::MainTrie(key) => {
             either::Left(protobuf::bytes_tag_encode(2, key).map(either::Left))

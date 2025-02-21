@@ -162,9 +162,7 @@ impl RuntimeCall {
     /// Returns the list of parameters to pass when making the call.
     ///
     /// The actual parameters are obtained by putting together all the returned buffers together.
-    pub fn parameter_vectored(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn parameter_vectored(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         iter::empty::<Vec<u8>>()
     }
 
@@ -270,12 +268,12 @@ pub struct StorageGet(runtime_call::StorageGet, ChainInformationBuildInner);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -304,12 +302,12 @@ pub struct ClosestDescendantMerkleValue(
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -344,12 +342,12 @@ pub struct NextKey(runtime_call::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -367,7 +365,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 

@@ -96,7 +96,7 @@ impl<T: AsRef<[u8]>> Multiaddr<T> {
     }
 
     /// Returns the list of components of the multiaddress.
-    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> + '_ {
+    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> {
         let mut iter = nom::combinator::iterator(
             self.bytes.as_ref(),
             protocol::<_, nom::error::Error<&'_ [u8]>>,

@@ -663,10 +663,7 @@ impl SubscribeStorage {
     /// Returns the next storage change notification.
     pub async fn next_storage_update(
         &'_ mut self,
-    ) -> (
-        [u8; 32],
-        impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)> + '_,
-    ) {
+    ) -> ([u8; 32], impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>) {
         'main_subscription: loop {
             // Get the active consensus service subscription, or subscribe if necessary.
             let subscription = match &mut self.subscription {

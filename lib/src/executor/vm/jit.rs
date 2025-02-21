@@ -411,7 +411,7 @@ impl Prepare {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let memory_slice = self.inner.memory.data(&self.inner.store);
 
         let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
@@ -807,7 +807,7 @@ impl Jit {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let memory_slice = match &self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => self.memory.data(store),
             JitInner::Executing(_) => {

@@ -273,7 +273,7 @@ impl Prepare {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
 
         let max = offset
@@ -535,7 +535,7 @@ impl Interpreter {
         &'_ self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
 
         let max = offset

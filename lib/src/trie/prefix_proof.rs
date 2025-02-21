@@ -87,9 +87,7 @@ enum QueryTy {
 
 impl PrefixScan {
     /// Returns the list of keys whose storage proof must be queried.
-    pub fn requested_keys(
-        &'_ self,
-    ) -> impl Iterator<Item = impl Iterator<Item = nibble::Nibble> + '_> + '_ {
+    pub fn requested_keys(&'_ self) -> impl Iterator<Item = impl Iterator<Item = nibble::Nibble>> {
         self.next_queries.iter().map(|(l, _)| l.iter().copied())
     }
 
