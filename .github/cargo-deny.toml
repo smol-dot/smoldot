@@ -8,10 +8,10 @@ allow = [
     "BSD-3-Clause",
     "GPL-2.0",
     "GPL-3.0",
-    "GPL-3.0-or-later WITH Classpath-exception-2.0",
     "CC0-1.0",
     "Zlib",
     "MPL-2.0",
+    "Unicode-3.0",
 ]
 
 [bans]
