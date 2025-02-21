@@ -301,7 +301,7 @@ impl JitPrototype {
                 &base_components.module,
                 &imports
             )),
-            &mut task::Context::from_waker(&noop_waker()),
+            &mut task::Context::from_waker(task::Waker::noop()),
         ) {
             task::Poll::Pending => return Err(NewErr::StartFunctionNotSupported), // TODO: hacky error value, as the error could also be different
             task::Poll::Ready(Ok(i)) => i,
@@ -963,16 +963,3 @@ impl fmt::Debug for Jit {
 // anyway.
 // TODO: maybe find a way to remove this unsafe implementation
 unsafe impl Sync for Jit {}
-
-fn noop_waker() -> task::Waker {
-    // Safety: all the requirements in the documentation of wakers (e.g. thread safety) is
-    // irrelevant here due to the implementation being trivial.
-    unsafe {
-        fn clone(_: *const ()) -> task::RawWaker {
-            task::RawWaker::new(ptr::null(), &VTABLE)
-        }
-        fn noop(_: *const ()) {}
-        static VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(clone, noop, noop, noop);
-        task::Waker::from_raw(task::RawWaker::new(ptr::null(), &VTABLE))
-    }
-}
