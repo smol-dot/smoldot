@@ -198,6 +198,8 @@ jobs:
 
   deno-publish:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.82
     permissions:
       contents: write   # Necessary in order to push tags.
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
@@ -214,12 +216,6 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v1.x
-      # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors
-      - uses: actions-rs/toolchain@v1
-        with:
-          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: 1.82
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
         run: echo "tag=light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
