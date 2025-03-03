@@ -21,7 +21,7 @@ use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, StreamExt as _};
+use futures_util::{StreamExt as _, future, stream};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
@@ -190,7 +190,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: Pin<Box<dyn future::Future<Output = ()> + Send>>,
+    next_start_parahead_fetch: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {

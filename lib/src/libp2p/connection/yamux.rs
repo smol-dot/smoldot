@@ -48,8 +48,8 @@ use alloc::{
 use core::{cmp, fmt, mem, num::NonZero, ops};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use header::GoAwayErrorCode;
@@ -1562,9 +1562,7 @@ where
     /// This function does not remove dead substreams from the state machine. In other words, if
     /// this function is called multiple times in a row, it will always return the same
     /// substreams. Use [`Yamux::remove_dead_substream`] to remove substreams.
-    pub fn dead_substreams(
-        &'_ self,
-    ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ TSub)> + '_ {
+    pub fn dead_substreams(&self) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &TSub)> {
         self.inner.dead_substreams.iter().map(|id| {
             let substream = self.inner.substreams.get(id).unwrap();
             match &substream.state {
@@ -1605,11 +1603,13 @@ where
             panic!()
         }
 
-        debug_assert!(!self
-            .inner
-            .substreams_wake_up
-            .iter()
-            .any(|(_, s)| s == &id.0));
+        debug_assert!(
+            !self
+                .inner
+                .substreams_wake_up
+                .iter()
+                .any(|(_, s)| s == &id.0)
+        );
         debug_assert!(!self.inner.window_frames_to_send.contains_key(&id.0));
         debug_assert!(!self.inner.substreams_write_ready.contains(&id.0));
 
@@ -1742,13 +1742,13 @@ impl<TNow, TSub> fmt::Debug for Yamux<TNow, TSub>
 where
     TSub: fmt::Debug,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         struct List<'a, TNow, TSub>(&'a Yamux<TNow, TSub>);
         impl<'a, TNow, TSub> fmt::Debug for List<'a, TNow, TSub>
         where
             TSub: fmt::Debug,
         {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.debug_list()
                     .entries(self.0.inner.substreams.values().map(|v| &v.user_data))
                     .finish()
@@ -2095,22 +2095,28 @@ where
         {
             let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
             debug_assert!(_was_inserted);
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_wake_up
-                .iter()
-                .any(|(_, s)| *s == self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .substreams_write_ready
-                .contains(&self.substream_id));
-            debug_assert!(!self
-                .yamux
-                .inner
-                .window_frames_to_send
-                .contains_key(&self.substream_id));
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_wake_up
+                    .iter()
+                    .any(|(_, s)| *s == self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .substreams_write_ready
+                    .contains(&self.substream_id)
+            );
+            debug_assert!(
+                !self
+                    .yamux
+                    .inner
+                    .window_frames_to_send
+                    .contains_key(&self.substream_id)
+            );
         }
 
         self.yamux
@@ -2133,7 +2139,7 @@ impl<'a, TNow, TSub> fmt::Debug for SubstreamReadWrite<'a, TNow, TSub>
 where
     TNow: Clone + cmp::Ord,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("SubstreamReadWrite")
             .field("substream_id", &self.substream_id)
             .finish()
@@ -2179,9 +2185,7 @@ pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a substream ID that is of the same side as the local side.
-    #[display(
-        "Received a SYN flag with a substream ID that is of the same side as the local side"
-    )]
+    #[display("Received a SYN flag with a substream ID that is of the same side as the local side")]
     InvalidInboundStreamId { stream_id: NonZero<u32> },
     /// Received a SYN flag with a known substream ID.
     #[display("Received a SYN flag with a known substream ID")]

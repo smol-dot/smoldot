@@ -34,7 +34,7 @@ pub enum GrandpaNotificationRef<'a> {
     CatchUp(CatchUpRef<'a>),
 }
 
-impl<'a> GrandpaNotificationRef<'a> {
+impl GrandpaNotificationRef<'_> {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
     pub fn scale_encoding(
@@ -97,10 +97,12 @@ impl NeighborPacket {
         ));
         commit_finalized_height.extend(self.commit_finalized_height.to_le_bytes());
         // TODO: unclear what to do if the block number doesn't fit in `block_number_bytes`
-        debug_assert!(!commit_finalized_height
-            .iter()
-            .skip(block_number_bytes)
-            .any(|b| *b != 0));
+        debug_assert!(
+            !commit_finalized_height
+                .iter()
+                .skip(block_number_bytes)
+                .any(|b| *b != 0)
+        );
         commit_finalized_height.resize(block_number_bytes, 0);
 
         [
@@ -169,7 +171,7 @@ pub struct DecodeGrandpaNotificationError(#[error(not(source))] nom::error::Erro
 
 fn grandpa_notification<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaNotificationRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaNotificationRef<'a>> {
     nom::error::context(
         "grandpa_notification",
         nom::branch::alt((
@@ -217,7 +219,7 @@ fn grandpa_notification<'a>(
 
 fn vote_message<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], VoteMessageRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], VoteMessageRef<'a>> {
     nom::error::context(
         "vote_message",
         nom::combinator::map(
@@ -241,7 +243,7 @@ fn vote_message<'a>(
 
 fn message<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], MessageRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], MessageRef<'a>> {
     nom::error::context(
         "message",
         nom::branch::alt((
@@ -272,7 +274,7 @@ fn message<'a>(
 
 fn unsigned_prevote<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], UnsignedPrevoteRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], UnsignedPrevoteRef<'a>> {
     nom::error::context(
         "unsigned_prevote",
         nom::combinator::map(
@@ -290,7 +292,7 @@ fn unsigned_prevote<'a>(
 
 fn unsigned_precommit<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], UnsignedPrecommitRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], UnsignedPrecommitRef<'a>> {
     nom::error::context(
         "unsigned_precommit",
         nom::combinator::map(
@@ -308,7 +310,7 @@ fn unsigned_precommit<'a>(
 
 fn primary_propose<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrimaryProposeRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrimaryProposeRef<'a>> {
     nom::error::context(
         "primary_propose",
         nom::combinator::map(
@@ -326,7 +328,7 @@ fn primary_propose<'a>(
 
 fn neighbor_packet<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], NeighborPacket> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], NeighborPacket> {
     nom::error::context(
         "neighbor_packet",
         nom::combinator::map(
@@ -365,7 +367,7 @@ fn catch_up_request(bytes: &[u8]) -> nom::IResult<&[u8], CatchUpRequest> {
 
 fn catch_up<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], CatchUpRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], CatchUpRef<'a>> {
     nom::error::context(
         "catch_up",
         nom::combinator::map(
@@ -404,7 +406,7 @@ fn catch_up<'a>(
 
 fn prevote<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrevoteRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrevoteRef<'a>> {
     nom::error::context(
         "prevote",
         nom::combinator::map(

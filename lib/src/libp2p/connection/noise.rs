@@ -163,7 +163,7 @@ impl UnsignedNoiseKey {
     }
 
     /// Returns the data that has to be signed.
-    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+    pub fn payload_to_sign(&self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         [
             &b"noise-libp2p-static-key:"[..],
             &self.public_key.as_bytes()[..],
@@ -837,7 +837,7 @@ impl HandshakeInProgress {
                             return Ok(NoiseHandshake::InProgress(self));
                         }
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                            return Err(HandshakeError::ReadClosed)
+                            return Err(HandshakeError::ReadClosed);
                         }
                     }
                 };
@@ -854,7 +854,7 @@ impl HandshakeInProgress {
                         return Ok(NoiseHandshake::InProgress(self));
                     }
                     Err(read_write::IncomingBytesTakeError::ReadClosed) => {
-                        return Err(HandshakeError::ReadClosed)
+                        return Err(HandshakeError::ReadClosed);
                     }
                 };
 
@@ -880,7 +880,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     });
@@ -922,7 +922,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -1001,7 +1001,7 @@ impl HandshakeInProgress {
                             match parser(&libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };
@@ -1046,7 +1046,7 @@ impl HandshakeInProgress {
                         match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
-                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                             }
                         }
                     };
@@ -1103,7 +1103,7 @@ impl HandshakeInProgress {
                             match parser(&libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
-                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
                                 }
                             }
                         };
@@ -1201,7 +1201,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         decrypted_buffers: impl Iterator<Item = Vec<u8>>,
     ) -> Result<impl Iterator<Item = Vec<u8>>, EncryptError> {
@@ -1346,7 +1346,7 @@ impl CipherState {
     ///
     /// Does *not* include the libp2p-specific message length prefix.
     fn write_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         data: &[u8],
     ) -> Result<Vec<u8>, EncryptError> {
@@ -1364,7 +1364,7 @@ impl CipherState {
 
     /// Highly-specific function when the message to decode is 32 bytes.
     fn read_chachapoly_message_to_array(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8; 48],
     ) -> Result<[u8; 32], CipherError> {
@@ -1374,7 +1374,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
     ) -> Result<Vec<u8>, CipherError> {
@@ -1384,7 +1384,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_vec_append(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         out: &mut Vec<u8>,
@@ -1403,7 +1403,7 @@ impl CipherState {
     }
 
     fn read_chachapoly_message_to_slice(
-        &'_ mut self,
+        &mut self,
         associated_data: &[u8],
         message_data: &[u8],
         destination: &mut [u8],

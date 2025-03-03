@@ -90,9 +90,7 @@ pub struct BlockAnnounceRef<'a> {
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announce(
-    announce: BlockAnnounceRef<'_>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+pub fn encode_block_announce(announce: BlockAnnounceRef) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
 
     [
@@ -150,9 +148,9 @@ pub struct DecodeBlockAnnounceError(#[error(not(source))] nom::error::ErrorKind)
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
 pub fn encode_block_announces_handshake(
-    handshake: BlockAnnouncesHandshakeRef<'_>,
+    handshake: BlockAnnouncesHandshakeRef,
     block_number_bytes: usize,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let mut header = vec![0; 1 + block_number_bytes];
     header[0] = handshake.role.scale_encoding()[0];
     // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around

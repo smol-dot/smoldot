@@ -96,7 +96,7 @@ impl InterpreterPrototype {
                                 return Err(NewErr::UnresolvedFunctionImport {
                                     module_name: import.module().to_owned(),
                                     function: import.name().to_owned(),
-                                })
+                                });
                             }
                         };
 
@@ -121,7 +121,7 @@ impl InterpreterPrototype {
                 }
                 wasmi::ExternType::Memory(_) => {}
                 wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
-                    return Err(NewErr::ImportTypeNotSupported)
+                    return Err(NewErr::ImportTypeNotSupported);
                 }
             }
         }
@@ -270,10 +270,10 @@ impl Prepare {
 
     /// See [`super::Prepare::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
 
         let max = offset
@@ -532,10 +532,10 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::read_memory`].
     pub fn read_memory(
-        &'_ self,
+        &self,
         offset: u32,
         size: u32,
-    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+    ) -> Result<impl AsRef<[u8]>, OutOfBoundsError> {
         let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
 
         let max = offset

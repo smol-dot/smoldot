@@ -241,7 +241,7 @@ pub struct CoreVersionRef<'a> {
     pub state_version: Option<TrieEntryVersion>,
 }
 
-impl<'a> CoreVersionRef<'a> {
+impl CoreVersionRef<'_> {
     /// Returns the SCALE encoding of this data structure.
     pub fn scale_encoding_vec(&self) -> Vec<u8> {
         // See https://spec.polkadot.network/#defn-rt-core-version
@@ -367,7 +367,7 @@ impl<'a> CoreVersionApisRefIter<'a> {
     }
 }
 
-impl<'a> Iterator for CoreVersionApisRefIter<'a> {
+impl Iterator for CoreVersionApisRefIter<'_> {
     type Item = CoreVersionApi;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -388,7 +388,7 @@ impl<'a> Iterator for CoreVersionApisRefIter<'a> {
     }
 }
 
-impl<'a> PartialEq for CoreVersionApisRefIter<'a> {
+impl PartialEq for CoreVersionApisRefIter<'_> {
     fn eq(&self, other: &Self) -> bool {
         let mut a = self.clone();
         let mut b = other.clone();
@@ -402,9 +402,9 @@ impl<'a> PartialEq for CoreVersionApisRefIter<'a> {
     }
 }
 
-impl<'a> Eq for CoreVersionApisRefIter<'a> {}
+impl Eq for CoreVersionApisRefIter<'_> {}
 
-impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
+impl fmt::Debug for CoreVersionApisRefIter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list().entries(self.clone()).finish()
     }
@@ -495,7 +495,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
 
 fn core_version_apis<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], CoreVersionApisRefIter, E> {
+) -> nom::IResult<&'a [u8], CoreVersionApisRefIter<'a>, E> {
     nom::combinator::map(
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::combinator::recognize(nom::multi::fold_many_m_n(
@@ -531,7 +531,7 @@ struct WasmSection<'a> {
 }
 
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<WasmSection<'_>>> {
+fn wasm_section(bytes: &[u8]) -> nom::IResult<&[u8], Option<WasmSection>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(

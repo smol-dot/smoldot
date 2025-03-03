@@ -31,7 +31,7 @@ use alloc::{
 };
 use core::{cmp, iter, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _, future, stream};
 use hashbrown::HashMap;
 use smoldot::{
     chain, header,
@@ -304,7 +304,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                                 &task.platform,
                                 Warn,
                                 &task.log_target,
-                                format!("Failed to build the chain information during warp syncing process: {}", error)
+                                format!(
+                                    "Failed to build the chain information during warp syncing process: {}",
+                                    error
+                                )
                             );
                         }
                     }
@@ -501,7 +504,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::SyncProcess(all::ProcessOne::VerifyFinalityProof(verify)) => {
                 // Finality proof to verify.
-                let sender = verify.sender().1 .0.clone();
+                let sender = verify.sender().1.0.clone();
                 match verify.perform({
                     let mut seed = [0; 32];
                     task.platform.fill_random_bytes(&mut seed);

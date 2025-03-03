@@ -38,7 +38,7 @@
 //! Once decoded, one can examine the content of the proof, in other words the list of storage
 //! items and values.
 
-use super::{nibble, trie_node, TrieEntryVersion};
+use super::{TrieEntryVersion, nibble, trie_node};
 
 use alloc::vec::Vec;
 use core::{fmt, iter, ops};
@@ -483,7 +483,7 @@ struct Entry {
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
             .entries(self.iter_ordered().map(
                 |(
@@ -495,7 +495,7 @@ impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
                 )| {
                     struct DummyHash<'a>(&'a [u8]);
                     impl<'a> fmt::Debug for DummyHash<'a> {
-                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                             if self.0.is_empty() {
                                 write!(f, "∅")?
                             }
@@ -508,7 +508,7 @@ impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
 
                     struct DummyNibbles<'a, T: AsRef<[u8]>>(EntryKeyIter<'a, T>);
                     impl<'a, T: AsRef<[u8]>> fmt::Debug for DummyNibbles<'a, T> {
-                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                             let mut any_written = false;
                             for nibble in self.0.clone() {
                                 any_written = true;
@@ -595,8 +595,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: ordering between trie roots unspecified
     // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
-        &'_ self,
-    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> + '_ {
+        &self,
+    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue)> {
         self.iter_ordered().filter_map(
             |(
                 EntryKey {
@@ -628,8 +628,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     // TODO: ordering between trie roots unspecified
     pub fn iter_ordered(
-        &'_ self,
-    ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> + '_ {
+        &self,
+    ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> {
         let proof = self.proof.as_ref();
 
         self.trie_roots
@@ -815,7 +815,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// This function will return `Ok` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
     pub fn trie_node_info(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
     ) -> Result<TrieNodeInfo<'_, T>, IncompleteProofError> {
@@ -968,10 +968,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: accept param as iterator rather than slice?
     pub fn storage_value(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         key: &[u8],
-    ) -> Result<Option<(&'_ [u8], TrieEntryVersion)>, IncompleteProofError> {
+    ) -> Result<Option<(&[u8], TrieEntryVersion)>, IncompleteProofError> {
         match self
             .trie_node_info(
                 trie_root_merkle_value,
@@ -1006,7 +1006,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns `Ok(None)` if the proof indicates that there is no next key (within the given
     /// prefix).
     pub fn next_key(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         key_before: impl Iterator<Item = nibble::Nibble>,
         mut or_equal: bool,
@@ -1273,10 +1273,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// value.
     /// Returns `Ok(None)` if the proof indicates that there is no descendant.
     pub fn closest_descendant_merkle_value(
-        &'_ self,
+        &self,
         trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
-    ) -> Result<Option<&'_ [u8]>, IncompleteProofError> {
+    ) -> Result<Option<&[u8]>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // Find the starting point of the requested trie.
@@ -1376,7 +1376,7 @@ pub enum StorageValue<'a> {
 }
 
 impl<'a> fmt::Debug for StorageValue<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             StorageValue::Known { value, inline } if value.len() <= 48 => {
                 write!(
@@ -1532,7 +1532,7 @@ impl<'a, T> Clone for EntryKeyIter<'a, T> {
 }
 
 impl<'a, T: AsRef<[u8]>> fmt::Debug for EntryKeyIter<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut any_printed = false;
         for nibble in self.clone() {
             any_printed = true;
@@ -1680,9 +1680,7 @@ impl<'a, T> Children<'a, T> {
     }
 
     /// Returns an iterator of 16 items, one for each child.
-    pub fn children(
-        &'_ self,
-    ) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> + '_ {
+    pub fn children(&self) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> {
         self.children.iter().cloned()
     }
 }
@@ -1697,13 +1695,13 @@ impl<'a, T> Clone for Children<'a, T> {
 }
 
 impl<'a, T> fmt::Debug for Children<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Binary::fmt(&self, f)
     }
 }
 
 impl<'a, T> fmt::Binary for Children<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for child in &self.children {
             let chr = match child {
                 Child::InProof { .. } | Child::AbsentFromProof { .. } => '1',

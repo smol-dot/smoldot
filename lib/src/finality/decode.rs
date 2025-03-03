@@ -165,7 +165,7 @@ pub struct PrecommitsRef<'a> {
     inner: PrecommitsRefInner<'a>,
 }
 
-impl<'a> fmt::Debug for PrecommitsRef<'a> {
+impl fmt::Debug for PrecommitsRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
@@ -181,7 +181,7 @@ enum PrecommitsRefInner<'a> {
 }
 
 impl<'a> PrecommitsRef<'a> {
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + 'a {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + use<'a> {
         match self.inner {
             PrecommitsRefInner::Undecoded {
                 data,
@@ -250,7 +250,7 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for PrecommitsRefIter<'a> {}
+impl ExactSizeIterator for PrecommitsRefIter<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrecommitRef<'a> {
@@ -268,7 +268,7 @@ pub struct PrecommitRef<'a> {
     pub authority_public_key: &'a [u8; 32],
 }
 
-impl<'a> PrecommitRef<'a> {
+impl PrecommitRef<'_> {
     /// Decodes a SCALE-encoded precommit.
     ///
     /// Returns the rest of the data alongside with the decoded struct.
@@ -357,7 +357,7 @@ impl<'a> Iterator for VotesAncestriesIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
+impl ExactSizeIterator for VotesAncestriesIter<'_> {}
 
 /// Potential error when decoding a Grandpa justification.
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -368,7 +368,7 @@ pub struct JustificationDecodeError(#[error(not(source))] nom::error::ErrorKind)
 /// `Nom` combinator that parses a justification.
 fn grandpa_justification<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaJustificationRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaJustificationRef<'a>> {
     nom::error::context(
         "grandpa_justification",
         nom::combinator::map(
@@ -395,7 +395,7 @@ fn grandpa_justification<'a>(
 /// `Nom` combinator that parses a list of precommits.
 fn precommits<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrecommitsRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrecommitsRef<'a>> {
     nom::combinator::map(
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
             nom::combinator::recognize(nom::multi::fold_many_m_n(
@@ -418,7 +418,7 @@ fn precommits<'a>(
 /// `Nom` combinator that parses a single precommit.
 fn precommit<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PrecommitRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrecommitRef<'a>> {
     nom::error::context(
         "precommit",
         nom::combinator::map(
@@ -441,7 +441,7 @@ fn precommit<'a>(
 /// `Nom` combinator that parses a list of headers.
 fn votes_ancestries<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], VotesAncestriesIter<'a>> {
     nom::error::context(
         "votes ancestries",
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
@@ -474,7 +474,7 @@ fn votes_ancestries<'a>(
 
 fn commit_message<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], CommitMessageRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], CommitMessageRef<'a>> {
     nom::error::context(
         "commit_message",
         nom::combinator::map(
@@ -525,7 +525,7 @@ fn commit_message<'a>(
 
 fn unsigned_precommit<'a>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], UnsignedPrecommitRef> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], UnsignedPrecommitRef<'a>> {
     nom::error::context(
         "unsigned_precommit",
         nom::combinator::map(

@@ -77,7 +77,7 @@ pub fn build_identify_response<'a>(
         impl Iterator<Item = &'a [u8]> + 'a,
         impl Iterator<Item = &'a str> + 'a,
     >,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     protobuf::string_tag_encode(5, config.protocol_version)
         .map(either::Left)
         .map(either::Left)
@@ -121,9 +121,9 @@ pub fn build_identify_response<'a>(
 
 /// Decodes a response to an identify request.
 pub fn decode_identify_response(
-    response_bytes: &'_ [u8],
+    response_bytes: &[u8],
 ) -> Result<
-    IdentifyResponse<'_, vec::IntoIter<&'_ [u8]>, vec::IntoIter<&'_ str>>,
+    IdentifyResponse<'_, vec::IntoIter<&[u8]>, vec::IntoIter<&str>>,
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(

@@ -320,12 +320,12 @@ pub struct StorageGet(runtime::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -346,12 +346,12 @@ pub struct ClosestDescendantMerkleValue(runtime::ClosestDescendantMerkleValue, S
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -380,12 +380,12 @@ pub struct NextKey(runtime::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -403,7 +403,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -424,14 +424,14 @@ pub struct OffchainStorageSet(runtime::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         self.0.value()
     }
 
@@ -536,7 +536,7 @@ impl Shared {
                             break BuilderAuthoring::Error {
                                 parent_runtime: block.parent_runtime,
                                 error: Error::InvalidHeaderGenerated,
-                            }
+                            };
                         }
                     };
 
@@ -559,7 +559,7 @@ impl Shared {
                     break BuilderAuthoring::Error {
                         parent_runtime,
                         error: Error::Runtime(error),
-                    }
+                    };
                 }
                 runtime::BlockBuild::InherentExtrinsics(a) => {
                     // Injecting the inherent is guaranteed to be done only once per block.
@@ -575,21 +575,21 @@ impl Shared {
                             inner: resume,
                             shared: self,
                         },
-                    }
+                    };
                 }
                 runtime::BlockBuild::StorageGet(inner) => {
-                    break BuilderAuthoring::StorageGet(StorageGet(inner, self))
+                    break BuilderAuthoring::StorageGet(StorageGet(inner, self));
                 }
                 runtime::BlockBuild::ClosestDescendantMerkleValue(inner) => {
                     break BuilderAuthoring::ClosestDescendantMerkleValue(
                         ClosestDescendantMerkleValue(inner, self),
-                    )
+                    );
                 }
                 runtime::BlockBuild::NextKey(inner) => {
-                    break BuilderAuthoring::NextKey(NextKey(inner, self))
+                    break BuilderAuthoring::NextKey(NextKey(inner, self));
                 }
                 runtime::BlockBuild::OffchainStorageSet(inner) => {
-                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self))
+                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self));
                 }
             }
         }

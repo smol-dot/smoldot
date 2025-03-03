@@ -50,14 +50,14 @@
 use crate::util;
 use alloc::{
     borrow::ToOwned as _,
-    collections::{btree_map, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map},
     vec::Vec,
 };
 use core::{hash::Hash, iter, ops};
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
-    rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
+    rand_core::{RngCore as _, SeedableRng as _},
 };
 
 pub use crate::libp2p::PeerId;
@@ -311,10 +311,7 @@ where
     /// words peers added through [`BasicPeeringStrategy::insert_chain_peer`].
     ///
     /// The order of the yielded elements is unspecified.
-    pub fn chain_peers_unordered(
-        &'_ self,
-        chain: &TChainId,
-    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    pub fn chain_peers_unordered(&self, chain: &TChainId) -> impl Iterator<Item = &PeerId> {
         let Some(&chain_index) = self.chains_indices.get(chain) else {
             // If the `TChainId` is unknown, it means that it doesn't have any peer.
             return either::Right(iter::empty());
@@ -435,7 +432,7 @@ where
     }
 
     /// Returns the list of all addresses that have been inserted for the given peer.
-    pub fn peer_addresses(&'_ self, peer_id: &PeerId) -> impl Iterator<Item = &'_ [u8]> + '_ {
+    pub fn peer_addresses(&self, peer_id: &PeerId) -> impl Iterator<Item = &[u8]> {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it doesn't have any address.
             return either::Right(iter::empty());
@@ -461,7 +458,7 @@ where
     /// often not desirable, it is preferable to keep the API simple and straight-forward rather
     /// than try to be smart about function behaviours.
     pub fn pick_assignable_peer(
-        &'_ mut self,
+        &mut self,
         chain: &TChainId,
         now: &TInstant,
     ) -> AssignablePeer<'_, TInstant> {
@@ -517,7 +514,7 @@ where
     ///
     /// A slot is assigned even if the peer is banned. API users that call this function are
     /// expected to be aware of that.
-    pub fn assign_slot(&'_ mut self, chain: &TChainId, peer_id: &PeerId) {
+    pub fn assign_slot(&mut self, chain: &TChainId, peer_id: &PeerId) {
         let peer_id_index = self.get_or_insert_peer_index(peer_id);
         let chain_index = self.get_or_insert_chain_index(chain);
 
@@ -1018,7 +1015,7 @@ mod tests {
         BasicPeeringStrategy, Config, InsertAddressConnectionsResult, InsertAddressResult,
         InsertChainPeerResult,
     };
-    use crate::network::service::{peer_id::PublicKey, PeerId};
+    use crate::network::service::{PeerId, peer_id::PublicKey};
     use core::time::Duration;
 
     #[test]

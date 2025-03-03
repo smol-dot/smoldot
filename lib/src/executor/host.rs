@@ -333,17 +333,17 @@ impl HostVmPrototype {
             Err(runtime_version::FindEmbeddedRuntimeVersionError::FindSections(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::FindSections(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err),
-                ))
+                ));
             }
             Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeVersionDecode) => {
                 return Err(NewErr::RuntimeVersion(
                     FindEmbeddedRuntimeVersionError::RuntimeVersionDecode,
-                ))
+                ));
             }
         };
 
@@ -428,7 +428,7 @@ impl HostVmPrototype {
                             match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
                                 Ok(v) => v,
                                 Err(_) => {
-                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode));
                                 }
                             };
 
@@ -444,7 +444,7 @@ impl HostVmPrototype {
                     HostVm::LogEmit(log) => vm = log.resume(),
 
                     HostVm::Error { error, .. } => {
-                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)));
                     }
 
                     // Getting the runtime version is a very core operation, and very few
@@ -813,7 +813,7 @@ impl ReadyToRun {
                 return HostVm::Error {
                     error: Error::Trap(err),
                     prototype: self.inner.into_prototype(),
-                }
+                };
             }
 
             Err(vm::RunErr::BadValueTy { .. }) => {
@@ -986,7 +986,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -1004,7 +1004,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
@@ -2164,7 +2164,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error,
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -2188,7 +2188,7 @@ impl ReadyToRun {
                         return HostVm::Error {
                             error: Error::FreeError { pointer },
                             prototype: self.inner.into_prototype(),
-                        }
+                        };
                     }
                 };
 
@@ -2301,7 +2301,7 @@ pub struct Finished {
 
 impl Finished {
     /// Returns the value the called function has returned.
-    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn value(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
@@ -2346,7 +2346,7 @@ pub struct ExternalStorageGet {
 
 impl ExternalStorageGet {
     /// Returns the key whose value must be provided back with [`ExternalStorageGet::resume`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2354,7 +2354,7 @@ impl ExternalStorageGet {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2562,7 +2562,7 @@ pub struct ExternalStorageSet {
 
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2575,7 +2575,7 @@ impl ExternalStorageSet {
     /// implicitly be created.
     /// If [`ExternalStorageSet::value`] returns `None` and this is the last entry in the child
     /// trie, it must implicitly be destroyed.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         match &self.child_trie_ptr_size {
             Some((ptr, size)) => {
                 let child_trie = self
@@ -2592,7 +2592,7 @@ impl ExternalStorageSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         self.value.map(|(ptr, size)| {
             self.inner
                 .vm
@@ -2672,7 +2672,7 @@ pub struct ExternalStorageAppend {
 
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2685,13 +2685,13 @@ impl ExternalStorageAppend {
     ///
     /// > **Note**: At the moment, this function always returns None, as there is no host function
     /// >           that appends to a child trie storage.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         // Note that there is no equivalent of this host function for child tries.
         None::<&'static [u8]>
     }
 
     /// Returns the value to append.
-    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn value(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
@@ -2740,7 +2740,7 @@ pub struct ExternalStorageClearPrefix {
 
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&self) -> impl AsRef<[u8]> {
         if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
             either::Left(
                 self.inner
@@ -2757,7 +2757,7 @@ impl ExternalStorageClearPrefix {
     ///
     /// If [`ExternalStorageClearPrefix::child_trie`] returns `Some` and all the entries of the
     /// child trie are removed, the child trie must implicitly be destroyed.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2848,7 +2848,7 @@ pub struct ExternalStorageRoot {
 
 impl ExternalStorageRoot {
     /// Returns the child trie whose root hash must be provided. `None` for the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2896,7 +2896,7 @@ pub struct ExternalStorageNextKey {
 
 impl ExternalStorageNextKey {
     /// Returns the key whose following key must be returned.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -2904,7 +2904,7 @@ impl ExternalStorageNextKey {
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
@@ -2988,7 +2988,7 @@ enum SignatureVerificationAlgorithm {
 
 impl SignatureVerification {
     /// Returns the message that the signature is expected to sign.
-    pub fn message(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn message(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.message_ptr, self.message_size)
@@ -2999,7 +2999,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this signature is untrusted input and might not be part of the
     /// >           set of valid signatures.
-    pub fn signature(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn signature(&self) -> impl AsRef<[u8]> {
         let signature_size = match self.algorithm {
             SignatureVerificationAlgorithm::Ed25519 => 64,
             SignatureVerificationAlgorithm::Sr25519V1 => 64,
@@ -3018,7 +3018,7 @@ impl SignatureVerification {
     ///
     /// > **Note**: Be aware that this public key is untrusted input and might not be part of the
     /// >           set of valid public keys.
-    pub fn public_key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn public_key(&self) -> impl AsRef<[u8]> {
         let public_key_size = match self.algorithm {
             SignatureVerificationAlgorithm::Ed25519 => 32,
             SignatureVerificationAlgorithm::Sr25519V1 => 32,
@@ -3184,7 +3184,7 @@ pub struct CallRuntimeVersion {
 
 impl CallRuntimeVersion {
     /// Returns the Wasm code whose runtime version must be provided.
-    pub fn wasm_code(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn wasm_code(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.wasm_blob_ptr, self.wasm_blob_size)
@@ -3237,7 +3237,7 @@ pub struct ExternalOffchainIndexSet {
 
 impl ExternalOffchainIndexSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3247,7 +3247,7 @@ impl ExternalOffchainIndexSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.value {
             Some(
                 self.inner
@@ -3293,7 +3293,7 @@ pub struct ExternalOffchainStorageSet {
 
 impl ExternalOffchainStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3303,7 +3303,7 @@ impl ExternalOffchainStorageSet {
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.value {
             Some(
                 self.inner
@@ -3317,7 +3317,7 @@ impl ExternalOffchainStorageSet {
     }
 
     /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
-    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn old_value(&self) -> Option<impl AsRef<[u8]>> {
         if let Some((ptr, size)) = self.old_value {
             Some(
                 self.inner
@@ -3368,7 +3368,7 @@ pub struct ExternalOffchainStorageGet {
 
 impl ExternalOffchainStorageGet {
     /// Returns the key whose value must be loaded.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
@@ -3470,7 +3470,7 @@ pub struct OffchainSubmitTransaction {
 
 impl OffchainSubmitTransaction {
     /// Returns the SCALE-encoded transaction to submit to the chain.
-    pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn transaction(&self) -> impl AsRef<[u8]> {
         self.inner
             .vm
             .read_memory(self.tx_ptr, self.tx_size)
@@ -3640,13 +3640,13 @@ impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoHex<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
     }
 }
@@ -3667,13 +3667,13 @@ impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
 }
 
 impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.as_ref(), f)
     }
 }
 
 impl<'a> fmt::Display for LogEmitInfoStr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self.as_ref(), f)
     }
 }
@@ -3807,7 +3807,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3858,7 +3858,7 @@ impl Inner {
                 return HostVm::Error {
                     error,
                     prototype: self.into_prototype(),
-                }
+                };
             }
         };
 
@@ -3901,7 +3901,7 @@ impl Inner {
                 return Err(Error::OutOfMemory {
                     function: function_name,
                     requested_size: size,
-                })
+                });
             }
         };
 

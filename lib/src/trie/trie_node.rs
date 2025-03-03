@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{nibble, HashFunction};
+use super::{HashFunction, nibble};
 use alloc::vec::Vec;
 use core::{cmp, fmt, iter, slice};
 
@@ -35,7 +35,7 @@ pub fn encode<'a>(
         impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
         impl AsRef<[u8]> + Clone + 'a,
     >,
-) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a + Clone> + Clone + 'a, EncodeError> {
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone, EncodeError> {
     // The return value is composed of three parts:
     // - Before the storage value.
     // - The storage value (which can be empty).
@@ -314,7 +314,7 @@ impl fmt::Debug for MerkleValueOutput {
 /// Decodes a node value found in a proof into its components.
 ///
 /// This can decode nodes no matter their version or hash algorithm.
-pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>, &'_ [u8]>, Error> {
+pub fn decode(mut node_value: &[u8]) -> Result<Decoded<DecodedPartialKey, &[u8]>, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
     }
@@ -673,12 +673,14 @@ mod tests {
 
     #[test]
     fn no_children_no_storage_value() {
-        assert!(super::encode(super::Decoded {
-            children: [None::<&'static [u8]>; 16],
-            storage_value: super::StorageValue::None,
-            partial_key: core::iter::empty()
-        })
-        .is_ok());
+        assert!(
+            super::encode(super::Decoded {
+                children: [None::<&'static [u8]>; 16],
+                storage_value: super::StorageValue::None,
+                partial_key: core::iter::empty()
+            })
+            .is_ok()
+        );
 
         assert!(matches!(
             super::encode(super::Decoded {

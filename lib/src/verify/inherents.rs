@@ -50,8 +50,8 @@ pub struct InherentData {
 impl InherentData {
     /// Turns this list of inherents into a list that can be passed as parameter to the runtime.
     pub fn as_raw_list(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
+        &self,
+    ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone {
         [(*b"timstap0", self.timestamp.to_le_bytes())].into_iter()
     }
 

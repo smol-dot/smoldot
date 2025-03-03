@@ -36,8 +36,8 @@
 
 use crate::{
     chain::chain_information::{
-        build, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationFinality, ValidChainInformation, ValidityError,
+        BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality, ValidChainInformation, ValidityError, build,
     },
     executor, libp2p, trie,
 };
@@ -103,7 +103,7 @@ impl ChainSpec {
         let genesis_storage = match self.genesis_storage() {
             GenesisStorage::Items(items) => items,
             GenesisStorage::TrieRootHash(_) => {
-                return Err(FromGenesisStorageError::UnknownStorageItems)
+                return Err(FromGenesisStorageError::UnknownStorageItems);
             }
         };
 
@@ -236,7 +236,7 @@ impl ChainSpec {
     }
 
     /// Returns a list of hashes of block headers that should always be considered as invalid.
-    pub fn bad_blocks_hashes(&'_ self) -> impl Iterator<Item = &'_ [u8; 32]> + '_ {
+    pub fn bad_blocks_hashes(&self) -> impl Iterator<Item = &[u8; 32]> {
         self.client_spec
             .bad_blocks
             .as_ref()
@@ -249,7 +249,7 @@ impl ChainSpec {
     ///
     /// Bootnode addresses that have failed to be parsed are returned as well in the form of
     /// a [`Bootnode::UnrecognizedFormat`].
-    pub fn boot_nodes(&'_ self) -> impl ExactSizeIterator<Item = Bootnode<'_>> + '_ {
+    pub fn boot_nodes(&self) -> impl ExactSizeIterator<Item = Bootnode> {
         // Note that we intentionally don't expose types found in the `libp2p` module in order to
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {
@@ -273,7 +273,7 @@ impl ChainSpec {
 
     /// Returns the list of libp2p multiaddresses of the default telemetry servers of the chain.
     // TODO: more strongly typed?
-    pub fn telemetry_endpoints(&'_ self) -> impl Iterator<Item = impl AsRef<str> + '_> + '_ {
+    pub fn telemetry_endpoints(&self) -> impl Iterator<Item = impl AsRef<str>> {
         self.client_spec
             .telemetry_endpoints
             .as_ref()
@@ -417,7 +417,7 @@ impl<'a> GenesisStorageItems<'a> {
         key_before: impl Iterator<Item = u8>,
         or_equal: bool,
         prefix: impl Iterator<Item = u8>,
-    ) -> Option<impl Iterator<Item = u8> + 'a> {
+    ) -> Option<impl Iterator<Item = u8>> {
         let lower_bound = if or_equal {
             Bound::Included(structs::HexString(key_before.collect::<Vec<_>>()))
         } else {
@@ -489,7 +489,7 @@ impl LightSyncState {
             })
             .collect();
 
-        epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
+        epochs.sort_unstable_by_key(|(block_num, _)| **block_num);
 
         // TODO: it seems that multiple identical epochs can be found in the list ; figure out why Substrate does that and fix it
         epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);

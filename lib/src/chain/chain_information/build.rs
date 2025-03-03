@@ -162,9 +162,7 @@ impl RuntimeCall {
     /// Returns the list of parameters to pass when making the call.
     ///
     /// The actual parameters are obtained by putting together all the returned buffers together.
-    pub fn parameter_vectored(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn parameter_vectored(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         iter::empty::<Vec<u8>>()
     }
 
@@ -270,12 +268,12 @@ pub struct StorageGet(runtime_call::StorageGet, ChainInformationBuildInner);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&self) -> impl AsRef<[u8]> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -304,12 +302,12 @@ pub struct ClosestDescendantMerkleValue(
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -344,12 +342,12 @@ pub struct NextKey(runtime_call::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = Nibble> {
         self.0.key()
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&self) -> Option<impl AsRef<[u8]>> {
         self.0.child_trie()
     }
 
@@ -367,7 +365,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+    pub fn prefix(&self) -> impl Iterator<Item = Nibble> {
         self.0.prefix()
     }
 
@@ -389,7 +387,9 @@ impl NextKey {
 }
 
 impl ChainInformationBuild {
-    fn necessary_calls(inner: &ChainInformationBuildInner) -> impl Iterator<Item = RuntimeCall> {
+    fn necessary_calls(
+        inner: &ChainInformationBuildInner,
+    ) -> impl Iterator<Item = RuntimeCall> + use<> {
         let aura_api_authorities =
             if inner.runtime_has_aura && inner.aura_autorities_call_output.is_none() {
                 Some(RuntimeCall::AuraApiAuthorities)
@@ -508,7 +508,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::WasmStart { call, error }),
                         virtual_machine,
-                    }
+                    };
                 }
             };
 
@@ -527,7 +527,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::MultipleConsensusAlgorithms),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
                 (
@@ -665,7 +665,7 @@ impl ChainInformationBuild {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::InvalidChainInformation(err)),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
-                    }
+                    };
                 }
             };
 
@@ -815,24 +815,24 @@ impl ChainInformationBuild {
                             error: err.detail,
                         }),
                         virtual_machine: err.prototype,
-                    }
+                    };
                 }
                 runtime_call::RuntimeCall::StorageGet(call) => {
                     break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::NextKey(call) => {
                     break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
                         call, inner,
-                    )))
+                    )));
                 }
                 runtime_call::RuntimeCall::ClosestDescendantMerkleValue(call) => {
                     break ChainInformationBuild::InProgress(
                         InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                             call, inner,
                         )),
-                    )
+                    );
                 }
                 runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
@@ -1007,7 +1007,7 @@ fn decode_babe_configuration_output(
 /// Decodes the output of a call to `BabeApi_current_epoch` (`is_next_epoch` is `false`) or
 /// `BabeApi_next_epoch` (`is_next_epoch` is `true`).
 fn decode_babe_epoch_output(
-    scale_encoded: &'_ [u8],
+    scale_encoded: &[u8],
     is_next_epoch: bool,
 ) -> Result<chain_information::BabeEpochInformation, Error> {
     let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
@@ -1073,7 +1073,7 @@ fn decode_babe_epoch_output(
         },
     ));
 
-    let result: Result<_, nom::Err<nom::error::Error<&'_ [u8]>>> = combinator(scale_encoded);
+    let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> = combinator(scale_encoded);
     match result {
         Ok((_, info)) => Ok(info),
         Err(_) => Err(if is_next_epoch {

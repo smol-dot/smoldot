@@ -18,7 +18,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 // TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
 
-use futures_util::{future, StreamExt as _};
+use futures_util::{StreamExt as _, future};
 use rand::RngCore as _;
 use smol::lock::Mutex;
 use smoldot::{

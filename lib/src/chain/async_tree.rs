@@ -271,7 +271,7 @@ where
     ///
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
     /// is the finalized block, which is out of scope of this data structure.
-    pub fn output_best_block_index(&self) -> Option<(NodeIndex, &'_ TAsync)> {
+    pub fn output_best_block_index(&self) -> Option<(NodeIndex, &TAsync)> {
         self.output_best_block_index.map(|best_block_index| {
             (
                 best_block_index,
@@ -352,7 +352,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn ancestors(&self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.ancestors(node)
     }
 
@@ -362,7 +362,7 @@ where
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+    pub fn children(&self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> {
         self.non_finalized_blocks.children(node)
     }
 
@@ -382,8 +382,8 @@ where
     /// Similar to [`AsyncTree::input_output_iter_unordered`], except that the returned items are
     /// guaranteed to be in an order in which the parents are found before their children.
     pub fn input_output_iter_ancestry_order(
-        &'_ self,
-    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
+        &self,
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_ancestry_order()
             .map(move |(id, b)| {
@@ -409,8 +409,8 @@ where
     ///
     /// Does not include the finalized output block itself, but includes all descendants of it.
     pub fn input_output_iter_unordered(
-        &'_ self,
-    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
+        &self,
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> {
         self.non_finalized_blocks
             .iter_unordered()
             .map(move |(id, b)| {
@@ -570,7 +570,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -594,7 +594,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -619,7 +619,7 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                    })
+                    });
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
                     when_not_ready = match (when, when_not_ready.take()) {
@@ -661,7 +661,7 @@ where
             } => {
                 return NextNecessaryAsyncOpInternal::NotReady {
                     when: timeout.clone(),
-                }
+                };
             }
             _ => return NextNecessaryAsyncOpInternal::NotReady { when: None },
         };
@@ -736,10 +736,11 @@ where
         // When this block is inserted, value to use for `input_best_block_weight`.
         let input_best_block_weight = if is_new_best {
             let id = self.input_best_block_next_weight;
-            debug_assert!(self
-                .non_finalized_blocks
-                .iter_unordered()
-                .all(|(_, b)| b.input_best_block_weight < id));
+            debug_assert!(
+                self.non_finalized_blocks
+                    .iter_unordered()
+                    .all(|(_, b)| b.input_best_block_weight < id)
+            );
             self.input_best_block_next_weight += 1;
             id
         } else {
@@ -841,10 +842,11 @@ where
         }
 
         // Minor sanity checks.
-        debug_assert!(self
-            .non_finalized_blocks
-            .iter_unordered()
-            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
+        debug_assert!(
+            self.non_finalized_blocks
+                .iter_unordered()
+                .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight)
+        );
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
@@ -865,11 +867,12 @@ where
         // otherwise the state of the tree will be corrupted.
         // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
         // is part of the public API of this method.
-        assert!(self
-            .input_best_block_index
-            .map_or(false, |current_input_best| self
-                .non_finalized_blocks
-                .is_ancestor(node_to_finalize, current_input_best)));
+        assert!(
+            self.input_best_block_index
+                .map_or(false, |current_input_best| self
+                    .non_finalized_blocks
+                    .is_ancestor(node_to_finalize, current_input_best))
+        );
 
         self.input_finalized_index = Some(node_to_finalize);
     }
@@ -955,11 +958,7 @@ where
                             // silently while the public API gives the impression that all
                             // `TAsync`s are always returned.
                             // TODO: solve that
-                            if reported {
-                                Some(user_data)
-                            } else {
-                                None
-                            }
+                            if reported { Some(user_data) } else { None }
                         }
                         _ => None,
                     };

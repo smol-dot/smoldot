@@ -252,7 +252,7 @@ impl<'a> HeaderRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         self.scale_encoding_before_digest().map(either::Left).chain(
             self.digest
                 .scale_encoding(block_number_bytes)
@@ -269,7 +269,7 @@ impl<'a> HeaderRef<'a> {
         &self,
         block_number_bytes: usize,
         extra_item: DigestItemRef<'a>,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         self.scale_encoding_before_digest().map(either::Left).chain(
             self.digest
                 .scale_encoding_with_extra_item(block_number_bytes, extra_item)
@@ -279,7 +279,7 @@ impl<'a> HeaderRef<'a> {
 
     fn scale_encoding_before_digest(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         iter::once(either::Left(&self.parent_hash[..]))
             .chain(iter::once(either::Right(util::encode_scale_compact_u64(
                 self.number,
@@ -346,9 +346,9 @@ impl Header {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of the header.
     pub fn scale_encoding(
-        &'_ self,
+        &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         HeaderRef::from(self).scale_encoding(block_number_bytes)
     }
 
@@ -626,7 +626,7 @@ impl<'a> DigestRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let encoded_len = util::encode_scale_compact_usize(self.logs().len());
         iter::once(either::Left(encoded_len)).chain(
             self.logs()
@@ -639,7 +639,7 @@ impl<'a> DigestRef<'a> {
         &self,
         block_number_bytes: usize,
         extra_item: DigestItemRef<'a>,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         // Given that `self.logs().len()` counts a number of items present in memory, and that
         // these items have a non-zero size, it is not possible for this value to be equal to
         // `usize::MAX`, as that would mean that the entire memory is completely full
@@ -770,14 +770,14 @@ impl<'a> DigestRef<'a> {
                     aura_predigest_index = Some(item_num);
                 }
                 DigestItemRef::AuraPreDigest(_) => {
-                    return Err(Error::MultipleAuraPreRuntimeDigests)
+                    return Err(Error::MultipleAuraPreRuntimeDigests);
                 }
                 DigestItemRef::AuraConsensus(_) => {}
                 DigestItemRef::BabePreDigest(_) if babe_predigest_index.is_none() => {
                     babe_predigest_index = Some(item_num);
                 }
                 DigestItemRef::BabePreDigest(_) => {
-                    return Err(Error::MultipleBabePreRuntimeDigests)
+                    return Err(Error::MultipleBabePreRuntimeDigests);
                 }
                 DigestItemRef::BabeConsensus(BabeConsensusLogRef::NextEpochData(_))
                     if babe_next_epoch_data_index.is_none() =>
@@ -1101,7 +1101,7 @@ impl<'a> DigestItemRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let (item1, item2) = match *self {
             DigestItemRef::AuraPreDigest(ref aura_pre_digest) => {
                 let encoded = aura_pre_digest

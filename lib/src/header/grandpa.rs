@@ -86,7 +86,7 @@ impl<'a> GrandpaConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let index = iter::once(match self {
             GrandpaConsensusLogRef::ScheduledChange(_) => [1],
             GrandpaConsensusLogRef::ForcedChange { .. } => [2],
@@ -245,7 +245,7 @@ impl<'a> GrandpaScheduledChangeRef<'a> {
     pub fn scale_encoding(
         &self,
         block_number_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let header = util::encode_scale_compact_usize(self.next_authorities.len());
 
         let mut delay = Vec::with_capacity(block_number_bytes);
@@ -377,7 +377,7 @@ impl<'a> GrandpaAuthorityRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         iter::once(either::Right(self.public_key))
             .chain(iter::once(either::Left(self.weight.get().to_le_bytes())))
     }
@@ -406,9 +406,7 @@ pub struct GrandpaAuthority {
 impl GrandpaAuthority {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
-    pub fn scale_encoding(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         GrandpaAuthorityRef::from(self).scale_encoding()
     }
 }

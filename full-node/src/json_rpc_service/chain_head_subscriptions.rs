@@ -25,7 +25,6 @@ use smoldot::{
     json_rpc::{methods, service},
 };
 use std::{
-    future::Future,
     num::NonZero,
     pin::{self, Pin},
     sync::Arc,

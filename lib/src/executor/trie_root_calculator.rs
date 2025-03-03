@@ -124,7 +124,7 @@ pub struct ClosestDescendant {
 impl ClosestDescendant {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.inner
             .current_node_full_key()
             .map(either::Left)
@@ -146,11 +146,12 @@ impl ClosestDescendant {
         closest_descendant: Option<impl Iterator<Item = Nibble>>,
     ) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
-        debug_assert!(self
-            .inner
-            .stack
-            .last()
-            .map_or(true, |n| n.children.len() != 16));
+        debug_assert!(
+            self.inner
+                .stack
+                .last()
+                .map_or(true, |n| n.children.len() != 16)
+        );
 
         // Length of the key of the currently-iterated node.
         let iter_key_len = self
@@ -222,7 +223,7 @@ pub struct StorageValue(Box<Inner>);
 impl StorageValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose storage value must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.0.current_node_full_key()
     }
 
@@ -402,7 +403,7 @@ pub struct ClosestDescendantMerkleValue {
 impl ClosestDescendantMerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant Merkle value must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         // A `ClosestDescendantMerkleValue` is created directly in response to a `ClosestAncestor` without
         // updating the `Inner`.
         self.inner.current_node_full_key()
@@ -487,7 +488,7 @@ pub struct TrieNodeInsertUpdateEvent {
 
 impl TrieNodeInsertUpdateEvent {
     /// Returns the key of the trie node that was inserted or updated.
-    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.inner
             .current_node_full_key()
             .map(either::Left)
@@ -559,7 +560,7 @@ enum TrieNodeRemoveEventTy {
 
 impl TrieNodeRemoveEvent {
     /// Returns the key of the trie node that was removed.
-    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.inner
             .current_node_full_key()
             .map(either::Left)
@@ -690,7 +691,7 @@ impl Inner {
 
     /// Iterator of arrays which, when joined together, form the full key of the node currently
     /// being iterated.
-    fn current_node_full_key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+    fn current_node_full_key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]>> {
         self.stack.iter().flat_map(move |node| {
             let maybe_child_nibble_u8 =
                 u8::try_from(node.children.len()).unwrap_or_else(|_| unreachable!());

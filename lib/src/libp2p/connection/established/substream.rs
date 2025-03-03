@@ -329,7 +329,7 @@ where
     /// substream must be reset if it is not closed.
     pub fn read_write(
         self,
-        read_write: &'_ mut read_write::ReadWrite<TNow>,
+        read_write: &mut read_write::ReadWrite<TNow>,
     ) -> (Option<Self>, Option<Event>) {
         let (me, event) = self.read_write2(read_write);
         (me.map(|inner| Substream { inner }), event)
@@ -337,7 +337,7 @@ where
 
     fn read_write2(
         self,
-        read_write: &'_ mut read_write::ReadWrite<TNow>,
+        read_write: &mut read_write::ReadWrite<TNow>,
     ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
         match self.inner {
             SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
@@ -506,7 +506,7 @@ where
                                 Some(Event::NotificationsOutResult {
                                     result: Err(NotificationsOutErr::NegotiationError(err)),
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -689,7 +689,7 @@ where
                                 Some(Event::Response {
                                     response: Err(RequestError::ProtocolNotAvailable),
                                 }),
-                            )
+                            );
                         }
                         Err(err) => {
                             return (
@@ -697,7 +697,7 @@ where
                                 Some(Event::Response {
                                     response: Err(RequestError::NegotiationError(err)),
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -731,7 +731,7 @@ where
                                     Some(Event::Response {
                                         response: Err(RequestError::SubstreamClosed),
                                     }),
-                                )
+                                );
                             }
                         }
                     } else {
@@ -792,7 +792,7 @@ where
                                     error: InboundError::SubstreamClosed,
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 } else {
@@ -806,7 +806,7 @@ where
                                     error: InboundError::RequestInLebError(error),
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -856,7 +856,7 @@ where
                                     error: InboundError::SubstreamClosed,
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 } else {
@@ -870,7 +870,7 @@ where
                                     error: InboundError::NotificationsInError { error },
                                     was_accepted: true,
                                 }),
-                            )
+                            );
                         }
                     }
                 }

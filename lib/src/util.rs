@@ -217,7 +217,7 @@ macro_rules! decode_scale_compact {
                             return Err(nom::Err::Error(nom::error::make_error(
                                 bytes,
                                 nom::error::ErrorKind::Satisfy,
-                            )))
+                            )));
                         }
                     };
                     Ok((&bytes[4..], value))
@@ -275,7 +275,7 @@ decode_scale_compact!(nom_scale_compact_u64, u64);
 macro_rules! encode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
         /// Returns a buffer containing the SCALE-compact encoding of the parameter.
-        pub(crate) fn $fn_name(mut value: $num_ty) -> impl AsRef<[u8]> + Clone {
+        pub(crate) fn $fn_name(mut value: $num_ty) -> impl AsRef<[u8]> + Clone + use<> {
             const MAX_BITS: usize = 1 + (<$num_ty>::BITS as usize) / 8;
             let mut array = arrayvec::ArrayVec::<u8, MAX_BITS>::new();
 

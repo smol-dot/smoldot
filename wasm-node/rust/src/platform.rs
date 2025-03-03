@@ -19,7 +19,7 @@ use crate::{bindings, timers::Delay};
 
 use futures_lite::future::FutureExt as _;
 
-use smoldot_light::platform::{read_write, SubstreamDirection};
+use smoldot_light::platform::{SubstreamDirection, read_write};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
@@ -69,19 +69,18 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type StreamErrorRef<'a> = StreamError;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
-            dyn future::Future<
+            dyn Future<
                     Output = smoldot_light::platform::MultiStreamWebRtcConnection<
                         Self::MultiStream,
                     >,
                 > + Send,
         >,
     >;
-    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + 'a>>;
+    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     type NextSubstreamFuture<'a> = pin::Pin<
         Box<
-            dyn future::Future<
-                    Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>,
-                > + Send
+            dyn Future<Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>>
+                + Send
                 + 'a,
         >,
     >;
@@ -113,11 +112,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         Delay::new_at_monotonic_clock(when)
     }
 
-    fn spawn_task(
-        &self,
-        task_name: Cow<str>,
-        task: impl future::Future<Output = ()> + Send + 'static,
-    ) {
+    fn spawn_task(&self, task_name: Cow<str>, task: impl Future<Output = ()> + Send + 'static) {
         // The code below processes tasks that have names.
         #[pin_project::pin_project]
         struct FutureAdapter<F> {
@@ -126,7 +121,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             future: F,
         }
 
-        impl<F: future::Future> future::Future for FutureAdapter<F> {
+        impl<F: Future> Future for FutureAdapter<F> {
             type Output = F::Output;
             fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 let this = self.project();

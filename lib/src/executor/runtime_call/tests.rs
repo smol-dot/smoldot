@@ -25,7 +25,7 @@
 
 use core::{iter, ops};
 
-use super::{run, Config, RuntimeCall, StorageProofSizeBehavior};
+use super::{Config, RuntimeCall, StorageProofSizeBehavior, run};
 use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 

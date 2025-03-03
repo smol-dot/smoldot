@@ -52,7 +52,7 @@ impl<'a> AuraConsensusLogRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         let index = iter::once(match self {
             AuraConsensusLogRef::AuthoritiesChange(_) => [1],
             AuraConsensusLogRef::OnDisabled(_) => [2],
@@ -205,7 +205,7 @@ impl<'a> AuraAuthorityRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + use<'a>> + Clone + use<'a> {
         iter::once(self.public_key)
     }
 }

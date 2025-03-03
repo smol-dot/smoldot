@@ -199,7 +199,7 @@ impl<T> TrieDiff<T> {
     ///
     pub fn storage_next_key<'a>(
         &'a self,
-        key: &'_ [u8],
+        key: &[u8],
         in_parent_next_key: Option<&'a [u8]>,
         or_equal: bool,
     ) -> StorageNextKey<'a> {

@@ -19,7 +19,7 @@ use hashbrown::HashMap;
 use smol::stream::StreamExt as _;
 use smoldot::{
     chain::fork_tree,
-    executor::{host::HostVmPrototype, CoreVersion},
+    executor::{CoreVersion, host::HostVmPrototype},
     trie,
 };
 use std::{collections::BTreeSet, iter, mem, num::NonZero, ops, pin::Pin, sync::Arc};
@@ -662,11 +662,8 @@ impl SubscribeStorage {
 
     /// Returns the next storage change notification.
     pub async fn next_storage_update(
-        &'_ mut self,
-    ) -> (
-        [u8; 32],
-        impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)> + '_,
-    ) {
+        &mut self,
+    ) -> ([u8; 32], impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>) {
         'main_subscription: loop {
             // Get the active consensus service subscription, or subscribe if necessary.
             let subscription = match &mut self.subscription {

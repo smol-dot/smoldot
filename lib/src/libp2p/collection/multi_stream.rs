@@ -691,7 +691,7 @@ where
     pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: ref mut opened_substream @ None,
+                opened_substream: opened_substream @ None,
                 ..
             } if outbound => {
                 *opened_substream = Some((id, webrtc_framing::WebRtcFraming::new()));
@@ -701,9 +701,11 @@ where
                 extra_open_substreams,
                 ..
             } => {
-                assert!(opened_substream
-                    .as_ref()
-                    .map_or(true, |(open, _)| *open != id));
+                assert!(
+                    opened_substream
+                        .as_ref()
+                        .map_or(true, |(open, _)| *open != id)
+                );
                 // TODO: add a limit to the number allowed?
                 let _was_in = extra_open_substreams.insert(id, outbound);
                 assert!(_was_in.is_none());
@@ -841,7 +843,7 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
