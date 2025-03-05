@@ -1,0 +1,16 @@
+{
+  "types": "../dist/mjs/worker-browser.d.ts",
+  "module": "../dist/mjs/worker-browser.js",
+  "exports": {
+    ".": {
+      "node": {
+        "import": "../dist/mjs/worker-nodejs.js",
+        "require": "../dist/cjs/worker-nodejs.js"
+      },
+      "default": {
+        "import": "../dist/mjs/worker-browser.js",
+        "require": "../dist/cjs/worker-browser.js"
+      }
+    }
+  }
+}
