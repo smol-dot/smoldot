@@ -95,6 +95,9 @@ fn validate_from_proof() {
             runtime_call::RuntimeCall::SignatureVerification(r) => {
                 validation_in_progress = r.verify_and_resume()
             }
+            runtime_call::RuntimeCall::EcdsaPublicKeyRecover(r) => {
+                validation_in_progress = r.verify_and_resume()
+            }
             runtime_call::RuntimeCall::LogEmit(r) => validation_in_progress = r.resume(),
             runtime_call::RuntimeCall::OffchainStorageSet(r) => validation_in_progress = r.resume(),
             runtime_call::RuntimeCall::Offchain(_) => panic!(),
