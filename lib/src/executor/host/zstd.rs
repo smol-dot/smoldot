@@ -48,12 +48,12 @@ pub(super) fn zstd_decode_if_necessary(
 ///
 /// The output data shall not be larger than `max_allowed`, to avoid potential zip bombs.
 fn zstd_decode(mut data: &[u8], max_allowed: usize) -> Result<Vec<u8>, Error> {
-    let mut decoder = ruzstd::frame_decoder::FrameDecoder::new();
+    let mut decoder = ruzstd::decoding::FrameDecoder::new();
     decoder.init(&mut data).map_err(|_| Error::InvalidZstd)?;
 
     match decoder.decode_blocks(
         &mut data,
-        ruzstd::frame_decoder::BlockDecodingStrategy::UptoBytes(max_allowed),
+        ruzstd::decoding::BlockDecodingStrategy::UptoBytes(max_allowed),
     ) {
         Ok(true) => {}
         Ok(false) => return Err(Error::TooLarge),
