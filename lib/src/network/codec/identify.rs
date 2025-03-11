@@ -126,7 +126,7 @@ pub fn decode_identify_response(
     IdentifyResponse<'_, vec::IntoIter<&[u8]>, vec::IntoIter<&str>>,
     DecodeIdentifyResponseError,
 > {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[optional] protocol_version = 5 => protobuf::string_tag_decode,
             #[optional] agent_version = 6 => protobuf::string_tag_decode,
@@ -137,7 +137,7 @@ pub fn decode_identify_response(
         }),
     );
 
-    let decoded = match nom::Finish::finish(parser(response_bytes)) {
+    let decoded = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, out)) => out,
         Err(_) => return Err(DecodeIdentifyResponseError::ProtobufDecode),
     };

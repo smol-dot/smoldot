@@ -868,16 +868,13 @@ impl HandshakeInProgress {
                     self.0.remote_ephemeral_public_key = x25519_dalek::PublicKey::from(*{
                         // Because the remote hasn't authenticated us at this point, sending more
                         // data than what the protocol specifies is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::combinator::map(
-                            nom::bytes::streaming::take(32u32),
-                            |k| <&[u8; 32]>::try_from(k).unwrap(),
-                        ));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
+                                    <&[u8; 32]>::try_from(k).unwrap()
+                                }),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
@@ -905,21 +902,19 @@ impl HandshakeInProgress {
                     ) = {
                         // Because the remote hasn't fully authenticated us at this point, sending
                         // more data than what the protocol specifies is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
-                                <&[u8; 32]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
-                                <&[u8; 48]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::rest,
-                        )));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                (
+                                    nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
+                                        <&[u8; 32]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
+                                        <&[u8; 48]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::rest,
+                                ),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
@@ -991,14 +986,13 @@ impl HandshakeInProgress {
                             let mut parser =
                                 nom::combinator::all_consuming::<
                                     _,
-                                    _,
                                     (&[u8], nom::error::ErrorKind),
                                     _,
                                 >(protobuf::message_decode! {
                                     #[required] key = 1 => protobuf::bytes_tag_decode,
                                     #[required] sig = 2 => protobuf::bytes_tag_decode,
                                 });
-                            match parser(&libp2p_handshake_decrypted) {
+                            match nom::Parser::parse(&mut parser, &libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
                                     return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
@@ -1032,18 +1026,16 @@ impl HandshakeInProgress {
                         // handshake message and a noise transport message as two different things.
                         // While the remote could in theory send post-handshake
                         // application-specific data in this message, in practice it is forbidden.
-                        let mut parser = nom::combinator::all_consuming::<
-                            _,
-                            _,
-                            (&[u8], nom::error::ErrorKind),
-                            _,
-                        >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
-                                <&[u8; 48]>::try_from(k).unwrap()
-                            }),
-                            nom::combinator::rest,
-                        )));
-                        match parser(&available_message) {
+                        let mut parser =
+                            nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
+                                (
+                                    nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
+                                        <&[u8; 48]>::try_from(k).unwrap()
+                                    }),
+                                    nom::combinator::rest,
+                                ),
+                            );
+                        match nom::Parser::parse(&mut parser, &available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError));
@@ -1093,14 +1085,13 @@ impl HandshakeInProgress {
                             let mut parser =
                                 nom::combinator::all_consuming::<
                                     _,
-                                    _,
                                     (&[u8], nom::error::ErrorKind),
                                     _,
                                 >(protobuf::message_decode! {
                                     #[required] key = 1 => protobuf::bytes_tag_decode,
                                     #[required] sig = 2 => protobuf::bytes_tag_decode,
                                 });
-                            match parser(&libp2p_handshake_decrypted) {
+                            match nom::Parser::parse(&mut parser, &libp2p_handshake_decrypted) {
                                 Ok((_, out)) => (out.key, out.sig),
                                 Err(_) => {
                                     return Err(HandshakeError::PayloadDecode(PayloadDecodeError));

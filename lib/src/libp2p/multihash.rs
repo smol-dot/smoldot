@@ -119,7 +119,10 @@ impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
 }
 
 fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), FromBytesError> {
-    match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(bytes) {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>),
+        bytes,
+    ) {
         Ok((_rest, multihash)) => {
             debug_assert!(_rest.is_empty());
             Ok(multihash)
@@ -131,10 +134,13 @@ fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), FromBytesError> {
 fn multihash<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u32, &'a [u8]), E> {
-    nom::sequence::tuple((
-        nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
-            u32::try_from(c).ok()
-        }),
-        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-    ))(bytes)
+    nom::Parser::parse(
+        &mut (
+            nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
+                u32::try_from(c).ok()
+            }),
+            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+        ),
+        bytes,
+    )
 }

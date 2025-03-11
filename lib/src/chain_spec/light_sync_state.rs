@@ -40,18 +40,17 @@ impl LightSyncState {
         // in Substrate to these data structures.
         // This really should be solved by having a proper format for checkpoints, but
         // there isn't.
-        let grandpa_authority_set = match nom::Finish::finish(nom::combinator::complete(
-            authority_set::<nom::error::Error<&[u8]>>,
-        )(
-            &self.grandpa_authority_set.0[..]
+        let grandpa_authority_set = match nom::Finish::finish(nom::Parser::parse(
+            &mut nom::combinator::complete(authority_set::<nom::error::Error<&[u8]>>),
+            &self.grandpa_authority_set.0[..],
         )) {
             Ok((_, v)) => v,
             Err(_err) => return Err(ParseError(ParseErrorInner::Other)),
         };
-        let babe_epoch_changes = match nom::Finish::finish(nom::combinator::complete(
-            epoch_changes::<nom::error::Error<&[u8]>>,
-        )(&self.babe_epoch_changes.0[..]))
-        {
+        let babe_epoch_changes = match nom::Finish::finish(nom::Parser::parse(
+            &mut nom::combinator::complete(epoch_changes::<nom::error::Error<&[u8]>>),
+            &self.babe_epoch_changes.0[..],
+        )) {
             Ok((_, v)) => v,
             Err(_err) => return Err(ParseError(ParseErrorInner::Other)),
         };
@@ -89,29 +88,32 @@ pub(super) struct EpochChanges {
 fn epoch_changes<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], EpochChanges, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            fork_tree(persisted_epoch_header),
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::sequence::tuple((
-                        nom::bytes::streaming::take(32u32),
-                        nom::number::streaming::le_u32,
-                        persisted_epoch,
-                    )),
-                )
-            }),
-        )),
-        move |(inner, epochs)| EpochChanges {
-            _inner: inner,
-            epochs: epochs
-                .into_iter()
-                .map(|(h, n, e)| ((*<&[u8; 32]>::try_from(h).unwrap(), n), e))
-                .collect(),
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                fork_tree(&mut persisted_epoch_header),
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(
+                        num_elems,
+                        num_elems,
+                        (
+                            nom::bytes::streaming::take(32u32),
+                            nom::number::streaming::le_u32,
+                            persisted_epoch,
+                        ),
+                    )
+                }),
+            ),
+            move |(inner, epochs)| EpochChanges {
+                _inner: inner,
+                epochs: epochs
+                    .into_iter()
+                    .map(|(h, n, e)| ((*<&[u8; 32]>::try_from(h).unwrap(), n), e))
+                    .collect(),
+            },
+        ),
+        bytes,
+    )
 }
 
 #[allow(unused)]
@@ -125,25 +127,28 @@ pub(super) struct GapEpochs {
 fn gap_epochs<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], GapEpochs, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-                    *<&[u8; 32]>::try_from(b).unwrap()
-                }),
-                nom::number::streaming::le_u32,
-                persisted_epoch,
-            )),
-            crate::util::nom_option_decode(nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-                    *<&[u8; 32]>::try_from(b).unwrap()
-                }),
-                nom::number::streaming::le_u32,
-                babe_epoch,
-            ))),
-        )),
-        move |(current, next)| GapEpochs { current, next },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                (
+                    nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+                        *<&[u8; 32]>::try_from(b).unwrap()
+                    }),
+                    nom::number::streaming::le_u32,
+                    persisted_epoch,
+                ),
+                crate::util::nom_option_decode((
+                    nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+                        *<&[u8; 32]>::try_from(b).unwrap()
+                    }),
+                    nom::number::streaming::le_u32,
+                    babe_epoch,
+                )),
+            ),
+            move |(current, next)| GapEpochs { current, next },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -156,19 +161,22 @@ pub(super) enum PersistedEpochHeader {
 fn persisted_epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], PersistedEpochHeader, E> {
-    nom::branch::alt((
-        nom::combinator::map(
-            nom::sequence::preceded(
-                nom::bytes::streaming::tag(&[0]),
-                nom::sequence::tuple((epoch_header, epoch_header)),
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::streaming::tag(&[0][..]),
+                    (epoch_header, epoch_header),
+                ),
+                |(a, b)| PersistedEpochHeader::Genesis(a, b),
             ),
-            |(a, b)| PersistedEpochHeader::Genesis(a, b),
-        ),
-        nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), epoch_header),
-            PersistedEpochHeader::Regular,
-        ),
-    ))(bytes)
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1][..]), epoch_header),
+                PersistedEpochHeader::Regular,
+            ),
+        )),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -180,16 +188,19 @@ pub(super) struct EpochHeader {
 fn epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], EpochHeader, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::number::streaming::le_u64,
-            nom::number::streaming::le_u64,
-        )),
-        move |(start_slot, end_slot)| EpochHeader {
-            _start_slot: start_slot,
-            _end_slot: end_slot,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+            ),
+            move |(start_slot, end_slot)| EpochHeader {
+                _start_slot: start_slot,
+                _end_slot: end_slot,
+            },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -202,19 +213,22 @@ pub(super) enum PersistedEpoch {
 fn persisted_epoch<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], PersistedEpoch, E> {
-    nom::branch::alt((
-        nom::combinator::map(
-            nom::sequence::preceded(
-                nom::bytes::streaming::tag(&[0]),
-                nom::sequence::tuple((babe_epoch, babe_epoch)),
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::streaming::tag(&[0][..]),
+                    (babe_epoch, babe_epoch),
+                ),
+                |(a, b)| PersistedEpoch::Genesis(a, b),
             ),
-            |(a, b)| PersistedEpoch::Genesis(a, b),
-        ),
-        nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), babe_epoch),
-            PersistedEpoch::Regular,
-        ),
-    ))(bytes)
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1][..]), babe_epoch),
+                PersistedEpoch::Regular,
+            ),
+        )),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -230,32 +244,40 @@ pub(super) struct BabeEpoch {
 fn babe_epoch<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], BabeEpoch, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::number::streaming::le_u64,
-            nom::number::streaming::le_u64,
-            nom::number::streaming::le_u64,
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(num_elems, num_elems, babe_authority)
-            }),
-            nom::bytes::streaming::take(32u32),
-            |b| {
-                BabeNextConfig::from_slice(b)
-                    .map(|c| (&b[17..], c)) // TODO: hacky to use a constant
-                    .map_err(|_| {
-                        nom::Err::Error(nom::error::make_error(b, nom::error::ErrorKind::MapOpt))
-                    })
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, babe_authority)
+                }),
+                nom::bytes::streaming::take(32u32),
+                |b| {
+                    BabeNextConfig::from_slice(b)
+                        .map(|c| (&b[17..], c)) // TODO: hacky to use a constant
+                        .map_err(|_| {
+                            nom::Err::Error(nom::error::make_error(
+                                b,
+                                nom::error::ErrorKind::MapOpt,
+                            ))
+                        })
+                },
+            ),
+            move |(epoch_index, slot_number, duration, authorities, randomness, config)| {
+                BabeEpoch {
+                    epoch_index,
+                    slot_number,
+                    duration,
+                    authorities,
+                    randomness: *<&[u8; 32]>::try_from(randomness).unwrap(),
+                    config,
+                }
             },
-        )),
-        move |(epoch_index, slot_number, duration, authorities, randomness, config)| BabeEpoch {
-            epoch_index,
-            slot_number,
-            duration,
-            authorities,
-            randomness: *<&[u8; 32]>::try_from(randomness).unwrap(),
-            config,
-        },
-    )(bytes)
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -272,16 +294,19 @@ pub struct BabeAuthority {
 fn babe_authority<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], BabeAuthority, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::bytes::streaming::take(32u32),
-            nom::number::streaming::le_u64,
-        )),
-        move |(public_key, weight)| BabeAuthority {
-            public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
-            weight,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::bytes::streaming::take(32u32),
+                nom::number::streaming::le_u64,
+            ),
+            move |(public_key, weight)| BabeAuthority {
+                public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
+                weight,
+            },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -298,41 +323,44 @@ pub(super) struct AuthoritySet {
 fn authority_set<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], AuthoritySet, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
-            }),
-            nom::number::streaming::le_u64,
-            fork_tree(pending_change),
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(num_elems, num_elems, pending_change)
-            }),
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::sequence::tuple((
-                        nom::number::streaming::le_u64,
-                        nom::number::streaming::le_u32,
-                    )),
-                )
-            }),
-        )),
-        move |(
-            current_authorities,
-            set_id,
-            pending_standard_changes,
-            pending_forced_changes,
-            authority_set_changes,
-        )| AuthoritySet {
-            current_authorities,
-            set_id,
-            _pending_standard_changes: pending_standard_changes,
-            _pending_forced_changes: pending_forced_changes,
-            _authority_set_changes: authority_set_changes,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
+                }),
+                nom::number::streaming::le_u64,
+                fork_tree(&mut pending_change),
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, pending_change)
+                }),
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(
+                        num_elems,
+                        num_elems,
+                        (
+                            nom::number::streaming::le_u64,
+                            nom::number::streaming::le_u32,
+                        ),
+                    )
+                }),
+            ),
+            move |(
+                current_authorities,
+                set_id,
+                pending_standard_changes,
+                pending_forced_changes,
+                authority_set_changes,
+            )| AuthoritySet {
+                current_authorities,
+                set_id,
+                _pending_standard_changes: pending_standard_changes,
+                _pending_forced_changes: pending_forced_changes,
+                _authority_set_changes: authority_set_changes,
+            },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -347,24 +375,27 @@ pub(super) struct PendingChange {
 fn pending_change<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], PendingChange, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
-                nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
-            }),
-            nom::number::streaming::le_u32,
-            nom::number::streaming::le_u32,
-            nom::bytes::streaming::take(32u32),
-            delay_kind,
-        )),
-        move |(next_authorities, delay, canon_height, canon_hash, delay_kind)| PendingChange {
-            _next_authorities: next_authorities,
-            _delay: delay,
-            _canon_height: canon_height,
-            _canon_hash: *<&[u8; 32]>::try_from(canon_hash).unwrap(),
-            _delay_kind: delay_kind,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
+                }),
+                nom::number::streaming::le_u32,
+                nom::number::streaming::le_u32,
+                nom::bytes::streaming::take(32u32),
+                delay_kind,
+            ),
+            move |(next_authorities, delay, canon_height, canon_hash, delay_kind)| PendingChange {
+                _next_authorities: next_authorities,
+                _delay: delay,
+                _canon_height: canon_height,
+                _canon_hash: *<&[u8; 32]>::try_from(canon_hash).unwrap(),
+                _delay_kind: delay_kind,
+            },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -376,18 +407,23 @@ pub(super) enum DelayKind {
 fn delay_kind<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], DelayKind, E> {
-    nom::branch::alt((
-        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| DelayKind::Finalized),
-        nom::combinator::map(
-            nom::sequence::preceded(
-                nom::bytes::streaming::tag(&[1]),
-                nom::number::streaming::le_u32,
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                DelayKind::Finalized
+            }),
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::streaming::tag(&[1][..]),
+                    nom::number::streaming::le_u32,
+                ),
+                |median_last_finalized| DelayKind::Best {
+                    _median_last_finalized: median_last_finalized,
+                },
             ),
-            |median_last_finalized| DelayKind::Best {
-                _median_last_finalized: median_last_finalized,
-            },
-        ),
-    ))(bytes)
+        )),
+        bytes,
+    )
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -405,16 +441,19 @@ pub struct GrandpaAuthority {
 fn grandpa_authority<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], GrandpaAuthority, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::bytes::streaming::take(32u32),
-            nom::number::streaming::le_u64,
-        )),
-        move |(public_key, weight)| GrandpaAuthority {
-            public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
-            weight,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::bytes::streaming::take(32u32),
+                nom::number::streaming::le_u64,
+            ),
+            move |(public_key, weight)| GrandpaAuthority {
+                public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
+                weight,
+            },
+        ),
+        bytes,
+    )
 }
 
 #[derive(Debug)]
@@ -424,10 +463,10 @@ pub(super) struct ForkTree<T> {
 }
 
 fn fork_tree<'a, T, E: nom::error::ParseError<&'a [u8]>>(
-    mut inner: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], T, E>,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], ForkTree<T>, E> {
+    inner: &mut impl nom::Parser<&'a [u8], Output = T, Error = E>,
+) -> impl nom::Parser<&'a [u8], Output = ForkTree<T>, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             // We do parsing manually due to borrow checking troubles regarding `inner`.
             move |mut bytes| {
                 let (bytes_rest, num_roots) = match crate::util::nom_scale_compact_usize(bytes) {
@@ -438,10 +477,11 @@ fn fork_tree<'a, T, E: nom::error::ParseError<&'a [u8]>>(
 
                 let mut roots = Vec::with_capacity(num_roots);
                 for _ in 0..num_roots {
-                    let (bytes_rest, child) = match fork_tree_node(&mut inner)(bytes) {
-                        Ok(d) => d,
-                        Err(err) => return Err(err),
-                    };
+                    let (bytes_rest, child) =
+                        match nom::Parser::parse(&mut fork_tree_node(inner), bytes) {
+                            Ok(d) => d,
+                            Err(err) => return Err(err),
+                        };
                     bytes = bytes_rest;
                     roots.push(child);
                 }
@@ -449,7 +489,7 @@ fn fork_tree<'a, T, E: nom::error::ParseError<&'a [u8]>>(
                 Ok((bytes, roots))
             },
             crate::util::nom_option_decode(nom::number::streaming::le_u32),
-        )),
+        ),
         |(roots, best_finalized_number)| ForkTree {
             _roots: roots,
             _best_finalized_number: best_finalized_number,
@@ -465,16 +505,16 @@ pub(super) struct ForkTreeNode<T> {
     _children: Vec<Self>,
 }
 
-fn fork_tree_node<'a, 'p, T, E: nom::error::ParseError<&'a [u8]>>(
-    inner: &'p mut dyn FnMut(&'a [u8]) -> nom::IResult<&'a [u8], T, E>,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], ForkTreeNode<T>, E> + 'p {
+fn fork_tree_node<'a, T, E: nom::error::ParseError<&'a [u8]>>(
+    inner: &mut impl nom::Parser<&'a [u8], Output = T, Error = E>,
+) -> impl nom::Parser<&'a [u8], Output = ForkTreeNode<T>, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             nom::bytes::streaming::take(32u32),
             nom::number::streaming::le_u32,
             // We do parsing manually due to borrow checking troubles regarding `inner`.
             move |mut bytes| {
-                let (bytes_rest, data) = match inner(bytes) {
+                let (bytes_rest, data) = match nom::Parser::parse(inner, bytes) {
                     Ok(d) => d,
                     Err(err) => return Err(err),
                 };
@@ -488,17 +528,18 @@ fn fork_tree_node<'a, 'p, T, E: nom::error::ParseError<&'a [u8]>>(
 
                 let mut children = Vec::with_capacity(num_children);
                 for _ in 0..num_children {
-                    let (bytes_rest, child) = match fork_tree_node(&mut *inner)(bytes) {
-                        Ok(d) => d,
-                        Err(err) => return Err(err),
-                    };
+                    let (bytes_rest, child) =
+                        match nom::Parser::parse(&mut fork_tree_node(inner), bytes) {
+                            Ok(d) => d,
+                            Err(err) => return Err(err),
+                        };
                     bytes = bytes_rest;
                     children.push(child);
                 }
 
                 Ok((bytes, (data, children)))
             },
-        )),
+        ),
         |(hash, number, (data, children))| ForkTreeNode {
             _hash: *<&[u8; 32]>::try_from(hash).unwrap(),
             _number: number,

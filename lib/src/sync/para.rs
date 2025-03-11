@@ -77,9 +77,12 @@ pub fn decode_persisted_validation_data_return_value(
     scale_encoded: &[u8],
     block_number_bytes: usize,
 ) -> Result<Option<PersistedValidationDataRef>, Error> {
-    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::combinator::all_consuming(
-        crate::util::nom_option_decode(persisted_validation_data(block_number_bytes)),
-    )(scale_encoded);
+    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(crate::util::nom_option_decode(
+            persisted_validation_data(block_number_bytes),
+        )),
+        scale_encoded,
+    );
     match res {
         Ok((_, data)) => Ok(data),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
@@ -112,14 +115,14 @@ pub struct PersistedValidationDataRef<'a> {
 /// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PersistedValidationDataRef<'a>, E> {
+) -> impl nom::Parser<&'a [u8], Output = PersistedValidationDataRef<'a>, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             crate::util::nom_bytes_decode,
             crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             nom::bytes::streaming::take(32u32),
             nom::number::streaming::le_u32,
-        )),
+        ),
         |(parent_head, relay_parent_number, relay_parent_storage_root, max_pov_size)| {
             PersistedValidationDataRef {
                 parent_head,

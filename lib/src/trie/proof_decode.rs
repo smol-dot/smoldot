@@ -91,10 +91,15 @@ where
     // the function actually take less time than if it was a legitimate proof.
     let entries_by_merkle_value = {
         // TODO: don't use a Vec?
-        let (_, decoded_proof) = nom::combinator::all_consuming(nom::combinator::flat_map(
-            crate::util::nom_scale_compact_usize,
-            |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
-        ))(config.proof.as_ref())
+        let (_, decoded_proof) = nom::Parser::parse(
+            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                crate::util::nom_scale_compact_usize,
+                |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
+                },
+            )),
+            config.proof.as_ref(),
+        )
         .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
 
         let entries_by_merkle_value = decoded_proof

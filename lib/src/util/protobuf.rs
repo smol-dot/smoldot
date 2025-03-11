@@ -112,18 +112,24 @@ pub(crate) fn delimited_tag_encode(
 pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u64, u8), E> {
-    nom::combinator::map(leb128::nom_leb128_u64, |num| {
-        let wire_ty = u8::try_from(num & 0b111).unwrap();
-        let field = num >> 3;
-        (field, wire_ty)
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(leb128::nom_leb128_u64, |num| {
+            let wire_ty = u8::try_from(num & 0b111).unwrap();
+            let field = num >> 3;
+            (field, wire_ty)
+        }),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag of the given field number, and value where the data type is `uint32`.
 pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], u32, E> {
-    nom::combinator::map_opt(varint_zigzag_tag_decode, |num| u32::try_from(num).ok())(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map_opt(varint_zigzag_tag_decode, |num| u32::try_from(num).ok()),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag and value where the data type is `bool`.
@@ -134,13 +140,16 @@ pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], bool, E> {
-    nom::combinator::map(varint_zigzag_tag_decode, |n| {
-        // Note that booleans are undocumented. However, the official Java library interprets
-        // 0 as false and any other value as true.
-        // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
-        // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
-        n != 0
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(varint_zigzag_tag_decode, |n| {
+            // Note that booleans are undocumented. However, the official Java library interprets
+            // 0 as false and any other value as true.
+            // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
+            // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
+            n != 0
+        }),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag and value where the data type is "enum".
@@ -152,8 +161,8 @@ pub(crate) fn enum_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 
 /// Decodes a Protobuf tag and value where the data type is a sub-message.
 pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    inner_message_parser: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E> {
+    inner_message_parser: impl nom::Parser<&'a [u8], Output = O, Error = E>,
+) -> impl nom::Parser<&'a [u8], Output = O, Error = E> {
     nom::combinator::map_parser(delimited_tag_decode, inner_message_parser)
 }
 
@@ -161,61 +170,89 @@ pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
 pub(crate) fn string_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a str, E> {
-    nom::combinator::map_opt(delimited_tag_decode, |bytes| {
-        if bytes.len() > 2 * 1024 * 1024 * 1024 {
-            return None;
-        }
-        str::from_utf8(bytes).ok()
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map_opt(delimited_tag_decode, |bytes| {
+            if bytes.len() > 2 * 1024 * 1024 * 1024 {
+                return None;
+            }
+            str::from_utf8(bytes).ok()
+        }),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag and value where the data type is "bytes".
 pub(crate) fn bytes_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a [u8], E> {
-    nom::combinator::verify(delimited_tag_decode, |bytes: &[u8]| {
-        bytes.len() <= 2 * 1024 * 1024 * 1024
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::verify(delimited_tag_decode, |bytes: &[u8]| {
+            bytes.len() <= 2 * 1024 * 1024 * 1024
+        }),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag  and value where the wire type is `varint` or "zigzag".
 pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], u64, E> {
-    nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 0),
-        leb128::nom_leb128_u64,
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::sequence::preceded(
+            nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 0),
+            leb128::nom_leb128_u64,
+        ),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag and value where the wire type is "delimited".
 pub(crate) fn delimited_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a [u8], E> {
-    nom::sequence::preceded(
-        nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 2),
-        nom::multi::length_data(leb128::nom_leb128_usize),
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::sequence::preceded(
+            nom::combinator::verify(tag_decode, move |(_, ty)| *ty == 2),
+            nom::multi::length_data(leb128::nom_leb128_usize),
+        ),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf tag and value and discards them.
 pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (), E> {
-    nom::combinator::flat_map(tag_decode, |(_, wire_ty)| {
-        move |inner_bytes| match wire_ty {
-            0 => nom::combinator::map(leb128::nom_leb128_u64, |_| ())(inner_bytes),
-            5 => nom::combinator::map(nom::bytes::streaming::take(4u32), |_| ())(inner_bytes),
-            1 => nom::combinator::map(nom::bytes::streaming::take(8u32), |_| ())(inner_bytes),
-            2 => nom::combinator::map(nom::multi::length_data(leb128::nom_leb128_usize), |_| ())(
-                inner_bytes,
-            ),
-            _ => Err(nom::Err::Error(nom::error::ParseError::from_error_kind(
-                bytes,
-                nom::error::ErrorKind::Tag,
-            ))),
-        }
-    })(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::flat_map(tag_decode, |(_, wire_ty)| {
+            move |inner_bytes| match wire_ty {
+                0 => nom::Parser::parse(
+                    &mut nom::combinator::map(leb128::nom_leb128_u64, |_| ()),
+                    inner_bytes,
+                ),
+                5 => nom::Parser::parse(
+                    &mut nom::combinator::map(nom::bytes::streaming::take(4u32), |_| ()),
+                    inner_bytes,
+                ),
+                1 => nom::Parser::parse(
+                    &mut nom::combinator::map(nom::bytes::streaming::take(8u32), |_| ()),
+                    inner_bytes,
+                ),
+                2 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::multi::length_data(leb128::nom_leb128_usize),
+                        |_| (),
+                    ),
+                    inner_bytes,
+                ),
+                _ => Err(nom::Err::Error(nom::error::ParseError::from_error_kind(
+                    bytes,
+                    nom::error::ErrorKind::Tag,
+                ))),
+            }
+        }),
+        bytes,
+    )
 }
 
 /// Decodes a Protobuf message.
@@ -264,7 +301,7 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// # Example
 ///
 /// ```ignore
-/// let _parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+/// let _parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
 ///     nom::combinator::complete(protobuf::message_decode! {
 ///         #[repeated(max = 4)] entries = 1 => protobuf::message_decode!{
 ///             #[required] state_root = 1 => protobuf::bytes_tag_decode(1),
@@ -308,7 +345,7 @@ macro_rules! message_decode {
                 let (_, (field_num, _wire_ty)) = $crate::util::protobuf::tag_decode(input)?;
 
                 $(if field_num == $field_num {
-                    let (rest, value) = nom::Parser::<&[u8], _, _>::parse(&mut $parser, input)?;
+                    let (rest, value) = nom::Parser::<&[u8]>::parse(&mut $parser, input)?;
 
                     if input == rest {
                         // The field parser didn't consume any byte. This will lead
