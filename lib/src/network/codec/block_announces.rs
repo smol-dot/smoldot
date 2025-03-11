@@ -106,9 +106,9 @@ pub fn decode_block_announce(
     bytes: &[u8],
     block_number_bytes: usize,
 ) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
-    let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::combinator::recognize(|enc_hdr| {
                     match header::decode_partial(enc_hdr, block_number_bytes) {
                         Ok((hdr, rest)) => Ok((rest, hdr)),
@@ -119,17 +119,19 @@ pub fn decode_block_announce(
                     }
                 }),
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| false),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| true),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| false),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| true),
                 )),
                 crate::util::nom_bytes_decode,
-            )),
+            ),
             |(scale_encoded_header, is_best, _)| BlockAnnounceRef {
                 scale_encoded_header,
                 is_best,
             },
-        )))(bytes)
-        .finish();
+        ))),
+        bytes,
+    )
+    .finish();
 
     match result {
         Ok((_, ann)) => Ok(ann),
@@ -169,26 +171,30 @@ pub fn decode_block_announces_handshake(
     expected_block_number_bytes: usize,
     handshake: &[u8],
 ) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
-    let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b1]), |_| Role::Full),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b10]), |_| Role::Light),
-                    nom::combinator::map(nom::bytes::streaming::tag(&[0b100]), |_| Role::Authority),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b1][..]), |_| Role::Full),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b10][..]), |_| Role::Light),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b100][..]), |_| {
+                        Role::Authority
+                    }),
                 )),
                 crate::util::nom_varsize_number_decode_u64(expected_block_number_bytes),
                 nom::bytes::streaming::take(32u32),
                 nom::bytes::streaming::take(32u32),
-            )),
+            ),
             |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
                 role,
                 best_number,
                 best_hash: TryFrom::try_from(best_hash).unwrap(),
                 genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
             },
-        )))(handshake)
-        .finish();
+        ))),
+        handshake,
+    )
+    .finish();
 
     match result {
         Ok((_, hs)) => Ok(hs),

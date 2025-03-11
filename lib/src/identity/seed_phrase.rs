@@ -92,8 +92,8 @@ pub fn decode_ed25519_private_key(phrase: &str) -> Result<Box<[u8; 32]>, ParsePr
 
 /// Turns a human-readable private key (a.k.a. a seed phrase) into a seed and a derivation path.
 pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyError> {
-    let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> =
-        nom::combinator::all_consuming(nom::sequence::tuple((
+    let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming((
             // Either BIP39 words or some hexadecimal
             nom::branch::alt((
                 // Hexadecimal. Wrapped in `either::Left`
@@ -141,7 +141,9 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                 nom::bytes::streaming::tag("///"),
                 |s| Ok(("", s)), // Take the rest of the input after the `///`
             ))),
-        )))(phrase);
+        )),
+        phrase,
+    );
 
     match parse_result {
         Ok((_, (either::Left(seed), path, _password))) => {

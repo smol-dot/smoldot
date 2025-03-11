@@ -151,9 +151,12 @@ pub fn decode_grandpa_notification(
     scale_encoded: &[u8],
     block_number_bytes: usize,
 ) -> Result<GrandpaNotificationRef, DecodeGrandpaNotificationError> {
-    match nom::combinator::all_consuming(nom::combinator::complete(grandpa_notification(
-        block_number_bytes,
-    )))(scale_encoded)
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
+            nom::combinator::complete(grandpa_notification(block_number_bytes)),
+        ),
+        scale_encoded,
+    )
     .finish()
     {
         Ok((_, notif)) => Ok(notif),
@@ -169,21 +172,24 @@ pub struct DecodeGrandpaNotificationError(#[error(not(source))] nom::error::Erro
 
 // Nom combinators below.
 
-fn grandpa_notification<'a>(
+fn grandpa_notification<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaNotificationRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = GrandpaNotificationRef<'a>, Error = E> {
     nom::error::context(
         "grandpa_notification",
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[0]),
+                    nom::bytes::streaming::tag(&[0][..]),
                     vote_message(block_number_bytes),
                 ),
                 GrandpaNotificationRef::Vote,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), move |s| {
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1][..]), move |s| {
                     decode::decode_partial_grandpa_commit(s, block_number_bytes)
                         .map(|(a, b)| (b, a))
                         .map_err(|_| {
@@ -197,18 +203,18 @@ fn grandpa_notification<'a>(
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::tag(&[2][..]),
                     neighbor_packet(block_number_bytes),
                 ),
                 GrandpaNotificationRef::Neighbor,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::streaming::tag(&[3]), catch_up_request),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[3][..]), catch_up_request),
                 GrandpaNotificationRef::CatchUpRequest,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[4]),
+                    nom::bytes::streaming::tag(&[4][..]),
                     catch_up(block_number_bytes),
                 ),
                 GrandpaNotificationRef::CatchUp,
@@ -217,19 +223,19 @@ fn grandpa_notification<'a>(
     )
 }
 
-fn vote_message<'a>(
+fn vote_message<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], VoteMessageRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = VoteMessageRef<'a>, Error = E> {
     nom::error::context(
         "vote_message",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::number::streaming::le_u64,
                 nom::number::streaming::le_u64,
                 message(block_number_bytes),
                 nom::bytes::streaming::take(64u32),
                 nom::bytes::streaming::take(32u32),
-            )),
+            ),
             |(round_number, set_id, message, signature, authority_public_key)| VoteMessageRef {
                 round_number,
                 set_id,
@@ -241,29 +247,29 @@ fn vote_message<'a>(
     )
 }
 
-fn message<'a>(
+fn message<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], MessageRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = MessageRef<'a>, Error = E> {
     nom::error::context(
         "message",
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[0]),
+                    nom::bytes::streaming::tag(&[0][..]),
                     unsigned_prevote(block_number_bytes),
                 ),
                 MessageRef::Prevote,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1][..]),
                     unsigned_precommit(block_number_bytes),
                 ),
                 MessageRef::Precommit,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::tag(&[2][..]),
                     primary_propose(block_number_bytes),
                 ),
                 MessageRef::PrimaryPropose,
@@ -272,16 +278,19 @@ fn message<'a>(
     )
 }
 
-fn unsigned_prevote<'a>(
+fn unsigned_prevote<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], UnsignedPrevoteRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = UnsignedPrevoteRef<'a>, Error = E> {
     nom::error::context(
         "unsigned_prevote",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(target_hash, target_number)| UnsignedPrevoteRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,
@@ -290,16 +299,19 @@ fn unsigned_prevote<'a>(
     )
 }
 
-fn unsigned_precommit<'a>(
+fn unsigned_precommit<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], UnsignedPrecommitRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = UnsignedPrecommitRef<'a>, Error = E> {
     nom::error::context(
         "unsigned_precommit",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(target_hash, target_number)| UnsignedPrecommitRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,
@@ -308,16 +320,16 @@ fn unsigned_precommit<'a>(
     )
 }
 
-fn primary_propose<'a>(
+fn primary_propose<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrimaryProposeRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = PrimaryProposeRef<'a>, Error = E> {
     nom::error::context(
         "primary_propose",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(target_hash, target_number)| PrimaryProposeRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,
@@ -326,19 +338,19 @@ fn primary_propose<'a>(
     )
 }
 
-fn neighbor_packet<'a>(
+fn neighbor_packet<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], NeighborPacket> {
+) -> impl nom::Parser<&'a [u8], Output = NeighborPacket, Error = E> {
     nom::error::context(
         "neighbor_packet",
         nom::combinator::map(
             nom::sequence::preceded(
-                nom::bytes::streaming::tag(&[1]),
-                nom::sequence::tuple((
+                nom::bytes::streaming::tag(&[1][..]),
+                (
                     nom::number::streaming::le_u64,
                     nom::number::streaming::le_u64,
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-                )),
+                ),
             ),
             |(round_number, set_id, commit_finalized_height)| NeighborPacket {
                 round_number,
@@ -349,29 +361,37 @@ fn neighbor_packet<'a>(
     )
 }
 
-fn catch_up_request(bytes: &[u8]) -> nom::IResult<&[u8], CatchUpRequest> {
-    nom::error::context(
-        "catch_up_request",
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::number::streaming::le_u64,
-                nom::number::streaming::le_u64,
-            )),
-            |(round_number, set_id)| CatchUpRequest {
-                round_number,
-                set_id,
-            },
+fn catch_up_request<
+    'a,
+    E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>,
+>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], CatchUpRequest, E> {
+    nom::Parser::parse(
+        &mut nom::error::context(
+            "catch_up_request",
+            nom::combinator::map(
+                (
+                    nom::number::streaming::le_u64,
+                    nom::number::streaming::le_u64,
+                ),
+                |(round_number, set_id)| CatchUpRequest {
+                    round_number,
+                    set_id,
+                },
+            ),
         ),
-    )(bytes)
+        bytes,
+    )
 }
 
-fn catch_up<'a>(
+fn catch_up<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], CatchUpRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = CatchUpRef<'a>, Error = E> {
     nom::error::context(
         "catch_up",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::number::streaming::le_u64,
                 nom::number::streaming::le_u64,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
@@ -391,7 +411,7 @@ fn catch_up<'a>(
                 }),
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            )),
+            ),
             |(set_id, round_number, prevotes, precommits, base_hash, base_number)| CatchUpRef {
                 set_id,
                 round_number,
@@ -404,18 +424,18 @@ fn catch_up<'a>(
     )
 }
 
-fn prevote<'a>(
+fn prevote<'a, E: nom::error::ContextError<&'a [u8]> + nom::error::ParseError<&'a [u8]>>(
     block_number_bytes: usize,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], PrevoteRef<'a>> {
+) -> impl nom::Parser<&'a [u8], Output = PrevoteRef<'a>, Error = E> {
     nom::error::context(
         "prevote",
         nom::combinator::map(
-            nom::sequence::tuple((
+            (
                 nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 nom::bytes::streaming::take(64u32),
                 nom::bytes::streaming::take(32u32),
-            )),
+            ),
             |(target_hash, target_number, signature, authority_public_key)| PrevoteRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,

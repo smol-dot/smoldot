@@ -43,10 +43,12 @@ pub fn decode_payment_info(
         _ => return Err(DecodeError::UnknownRuntimeVersion),
     };
 
-    match nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&[u8]>>(
-        is_api_v2,
-    ))(scale_encoded)
-    {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom_decode_payment_info::<nom::error::Error<&[u8]>>(
+            is_api_v2,
+        )),
+        scale_encoded,
+    ) {
         Ok((_, info)) => Ok(info),
         Err(_) => Err(DecodeError::ParseError),
     }
@@ -63,20 +65,23 @@ pub enum DecodeError {
 
 fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
     is_api_v2: bool,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], methods::RuntimeDispatchInfo, E> {
+) -> impl nom::Parser<&'a [u8], Output = methods::RuntimeDispatchInfo, Error = E> {
     nom::combinator::map(
-        nom::sequence::tuple((
+        (
             move |bytes| {
                 if is_api_v2 {
                     nom::number::streaming::le_u64(bytes)
                 } else {
-                    nom::combinator::map(
-                        nom::sequence::tuple((
-                            crate::util::nom_scale_compact_u64,
-                            crate::util::nom_scale_compact_u64,
-                        )),
-                        |(ref_time, _proof_size)| ref_time,
-                    )(bytes)
+                    nom::Parser::parse(
+                        &mut nom::combinator::map(
+                            (
+                                crate::util::nom_scale_compact_u64,
+                                crate::util::nom_scale_compact_u64,
+                            ),
+                            |(ref_time, _proof_size)| ref_time,
+                        ),
+                        bytes,
+                    )
                 }
             },
             nom::combinator::map_opt(nom::number::streaming::u8, |n| match n {
@@ -123,7 +128,7 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
 
                 Ok((&[][..], num))
             },
-        )),
+        ),
         |(weight, class, partial_fee)| methods::RuntimeDispatchInfo {
             weight,
             class,

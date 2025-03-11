@@ -148,42 +148,41 @@ impl Keystore {
                     Err(_) => continue,
                 };
 
-                let mut parser =
-                    nom::combinator::all_consuming::<_, _, (&str, nom::error::ErrorKind), _>(
-                        nom::combinator::complete(nom::sequence::tuple((
-                            nom::combinator::map_opt(
-                                nom::bytes::streaming::take(4u32),
-                                KeyNamespace::from_string,
-                            ),
-                            nom::bytes::streaming::tag("-"),
-                            nom::combinator::map_opt(
-                                nom::bytes::streaming::take(7u32),
-                                |b| match b {
-                                    "ed25519" => Some(PrivateKey::FileEd25519),
-                                    "sr25519" => Some(PrivateKey::FileSr25519),
-                                    _ => None,
-                                },
-                            ),
-                            nom::bytes::streaming::tag("-"),
-                            nom::combinator::map_opt(
-                                nom::bytes::complete::take_while(|c: char| {
-                                    c.is_ascii_digit() || ('a'..='f').contains(&c)
-                                }),
-                                |k: &str| {
-                                    if k.len() == 64 {
-                                        Some(<[u8; 32]>::try_from(hex::decode(k).unwrap()).unwrap())
-                                    } else {
-                                        None
-                                    }
-                                },
-                            ),
-                        ))),
-                    );
+                let mut parser = nom::combinator::all_consuming::<
+                    _,
+                    (&str, nom::error::ErrorKind),
+                    _,
+                >(nom::combinator::complete((
+                    nom::combinator::map_opt(
+                        nom::bytes::streaming::take(4u32),
+                        KeyNamespace::from_string,
+                    ),
+                    nom::bytes::streaming::tag("-"),
+                    nom::combinator::map_opt(nom::bytes::streaming::take(7u32), |b| match b {
+                        "ed25519" => Some(PrivateKey::FileEd25519),
+                        "sr25519" => Some(PrivateKey::FileSr25519),
+                        _ => None,
+                    }),
+                    nom::bytes::streaming::tag("-"),
+                    nom::combinator::map_opt(
+                        nom::bytes::complete::take_while(|c: char| {
+                            c.is_ascii_digit() || ('a'..='f').contains(&c)
+                        }),
+                        |k: &str| {
+                            if k.len() == 64 {
+                                Some(<[u8; 32]>::try_from(hex::decode(k).unwrap()).unwrap())
+                            } else {
+                                None
+                            }
+                        },
+                    ),
+                )));
 
-                let (namespace, _, algorithm, _, public_key) = match parser(&file_name) {
-                    Ok((_, v)) => v,
-                    Err(_) => continue,
-                };
+                let (namespace, _, algorithm, _, public_key) =
+                    match nom::Parser::parse(&mut parser, &file_name) {
+                        Ok((_, v)) => v,
+                        Err(_) => continue,
+                    };
 
                 // Make sure that the content of the file is valid and that it corresponds to
                 // the public key advertised in the file name.

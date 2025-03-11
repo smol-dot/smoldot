@@ -274,10 +274,12 @@ pub fn ordered_root(
                 let key = value_req
                     .key()
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
-                let value = match nom::combinator::all_consuming(
-                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
-                )(&key)
-                {
+                let value = match nom::Parser::parse(
+                    &mut nom::combinator::all_consuming(
+                        util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
+                    ),
+                    &key,
+                ) {
                     Ok((_, key)) => entries.get(key).map(move |v| (v, version)),
                     Err(_) => None,
                 };

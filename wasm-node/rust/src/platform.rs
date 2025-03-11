@@ -972,12 +972,15 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
     handshake_ty: Box<[u8]>,
 ) {
-    let (_, local_tls_certificate_sha256) = nom::sequence::preceded(
-        nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
-        nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-            <&[u8; 32]>::try_from(b).unwrap()
-        }),
-    )(&handshake_ty[..])
+    let (_, local_tls_certificate_sha256) = nom::Parser::parse(
+        &mut nom::sequence::preceded(
+            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0][..]),
+            nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+                <&[u8; 32]>::try_from(b).unwrap()
+            }),
+        ),
+        &handshake_ty[..],
+    )
     .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
 
     let mut lock = STATE.try_lock().unwrap();

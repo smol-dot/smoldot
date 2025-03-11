@@ -57,7 +57,7 @@ impl Multiaddr<Vec<u8>> {
     ///
     pub fn pop(&mut self) {
         let remain = {
-            let mut iter = nom::combinator::iterator(
+            let iter = nom::combinator::iterator(
                 &self.bytes[..],
                 nom::combinator::recognize(protocol::<&[u8], nom::error::Error<&[u8]>>),
             );
@@ -82,11 +82,14 @@ impl<T: AsRef<[u8]>> Multiaddr<T> {
     /// around a [`Multiaddr`].
     pub fn from_bytes(bytes: T) -> Result<Self, (FromBytesError, T)> {
         // Check whether this is indeed a valid list of protocols.
-        if nom::combinator::all_consuming(nom::multi::fold_many0(
-            nom::combinator::complete(protocol::<&[u8], nom::error::Error<&[u8]>>),
-            || (),
-            |(), _| (),
-        ))(bytes.as_ref())
+        if nom::Parser::parse(
+            &mut nom::combinator::all_consuming(nom::multi::fold_many0(
+                nom::combinator::complete(protocol::<&[u8], nom::error::Error<&[u8]>>),
+                || (),
+                |(), _| (),
+            )),
+            bytes.as_ref(),
+        )
         .is_err()
         {
             return Err((FromBytesError, bytes));
@@ -494,71 +497,109 @@ impl<T: AsRef<[u8]>> fmt::Display for DomainName<T> {
 fn protocol<'a, T: From<&'a [u8]> + AsRef<[u8]>, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], Protocol<T>, E> {
-    nom::combinator::flat_map(crate::util::leb128::nom_leb128_usize, |protocol_code| {
-        move |bytes: &'a [u8]| match protocol_code {
-            4 => nom::combinator::map(nom::bytes::streaming::take(4_u32), |ip: &'a [u8]| {
-                Protocol::Ip4(ip.try_into().unwrap())
-            })(bytes),
-            6 => nom::combinator::map(nom::number::streaming::be_u16, Protocol::Tcp)(bytes),
-            41 => nom::combinator::map(nom::bytes::streaming::take(16_u32), |ip: &'a [u8]| {
-                Protocol::Ip6(ip.try_into().unwrap())
-            })(bytes),
-            53 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| DomainName::from_bytes(T::from(s)).ok(),
+    nom::Parser::parse(
+        &mut nom::combinator::flat_map(crate::util::leb128::nom_leb128_usize, |protocol_code| {
+            move |bytes: &'a [u8]| match protocol_code {
+                4 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::bytes::streaming::take(4_u32),
+                        |ip: &'a [u8]| Protocol::Ip4(ip.try_into().unwrap()),
+                    ),
+                    bytes,
                 ),
-                Protocol::Dns,
-            )(bytes),
-            54 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| DomainName::from_bytes(T::from(s)).ok(),
+                6 => nom::Parser::parse(
+                    &mut nom::combinator::map(nom::number::streaming::be_u16, Protocol::Tcp),
+                    bytes,
                 ),
-                Protocol::Dns4,
-            )(bytes),
-            55 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| DomainName::from_bytes(T::from(s)).ok(),
+                41 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::bytes::streaming::take(16_u32),
+                        |ip: &'a [u8]| Protocol::Ip6(ip.try_into().unwrap()),
+                    ),
+                    bytes,
                 ),
-                Protocol::Dns6,
-            )(bytes),
-            56 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| DomainName::from_bytes(T::from(s)).ok(),
+                53 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| DomainName::from_bytes(T::from(s)).ok(),
+                        ),
+                        Protocol::Dns,
+                    ),
+                    bytes,
                 ),
-                Protocol::DnsAddr,
-            )(bytes),
-            273 => nom::combinator::map(nom::number::streaming::be_u16, Protocol::Udp)(bytes),
-            421 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| Multihash::from_bytes(From::from(s)).ok(),
+                54 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| DomainName::from_bytes(T::from(s)).ok(),
+                        ),
+                        Protocol::Dns4,
+                    ),
+                    bytes,
                 ),
-                Protocol::P2p,
-            )(bytes),
-            448 => Ok((bytes, Protocol::Tls)),
-            460 => Ok((bytes, Protocol::Quic)),
-            477 => Ok((bytes, Protocol::Ws)),
-            478 => Ok((bytes, Protocol::Wss)),
-            // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
-            777 => nom::combinator::map(nom::number::streaming::be_u64, Protocol::Memory)(bytes),
-            280 => Ok((bytes, Protocol::WebRtcDirect)),
-            466 => nom::combinator::map(
-                nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| Multihash::from_bytes(From::from(s)).ok(),
+                55 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| DomainName::from_bytes(T::from(s)).ok(),
+                        ),
+                        Protocol::Dns6,
+                    ),
+                    bytes,
                 ),
-                Protocol::Certhash,
-            )(bytes),
-            _ => Err(nom::Err::Error(nom::error::make_error(
-                bytes,
-                nom::error::ErrorKind::Tag,
-            ))),
-        }
-    })(bytes)
+                56 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| DomainName::from_bytes(T::from(s)).ok(),
+                        ),
+                        Protocol::DnsAddr,
+                    ),
+                    bytes,
+                ),
+                273 => nom::Parser::parse(
+                    &mut nom::combinator::map(nom::number::streaming::be_u16, Protocol::Udp),
+                    bytes,
+                ),
+                421 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| Multihash::from_bytes(From::from(s)).ok(),
+                        ),
+                        Protocol::P2p,
+                    ),
+                    bytes,
+                ),
+                448 => Ok((bytes, Protocol::Tls)),
+                460 => Ok((bytes, Protocol::Quic)),
+                477 => Ok((bytes, Protocol::Ws)),
+                478 => Ok((bytes, Protocol::Wss)),
+                // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
+                777 => nom::Parser::parse(
+                    &mut nom::combinator::map(nom::number::streaming::be_u64, Protocol::Memory),
+                    bytes,
+                ),
+                280 => Ok((bytes, Protocol::WebRtcDirect)),
+                466 => nom::Parser::parse(
+                    &mut nom::combinator::map(
+                        nom::combinator::map_opt(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            |s| Multihash::from_bytes(From::from(s)).ok(),
+                        ),
+                        Protocol::Certhash,
+                    ),
+                    bytes,
+                ),
+                _ => Err(nom::Err::Error(nom::error::make_error(
+                    bytes,
+                    nom::error::ErrorKind::Tag,
+                ))),
+            }
+        }),
+        bytes,
+    )
 }
 
 #[cfg(test)]

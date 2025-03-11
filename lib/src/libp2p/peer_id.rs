@@ -79,8 +79,8 @@ impl PublicKey {
 
         // As indicated in the libp2p specification, the public key must be encoded
         // deterministically, and thus the fields are decoded deterministically in a precise order.
-        let mut parser = nom::combinator::all_consuming::<_, _, ErrorWrapper, _>(
-            nom::combinator::complete(nom::sequence::tuple((
+        let mut parser =
+            nom::combinator::all_consuming::<_, ErrorWrapper, _>(nom::combinator::complete((
                 nom::sequence::preceded(
                     nom::combinator::peek(nom::combinator::verify(
                         protobuf::tag_decode,
@@ -101,10 +101,9 @@ impl PublicKey {
                             .map_err(|_| FromProtobufEncodingError::BadEd25519Key)
                     }),
                 ),
-            ))),
-        );
+            )));
 
-        match nom::Finish::finish(parser(bytes)) {
+        match nom::Finish::finish(nom::Parser::parse(&mut parser, bytes)) {
             Ok((_, (1, key))) => Ok(PublicKey::Ed25519(key)),
             Ok((_, (_, _))) => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
             Err(err) => Err(err.0),

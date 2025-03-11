@@ -109,13 +109,13 @@ pub fn build_state_request(config: StateRequest) -> impl Iterator<Item = impl As
 ///
 /// On success, contains a Merkle proof.
 pub fn decode_state_response(response_bytes: &[u8]) -> Result<&[u8], DecodeStateResponseError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+    let mut parser = nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[required] proof = 2 => protobuf::bytes_tag_decode,
         }),
     );
 
-    let proof = match nom::Finish::finish(parser(response_bytes)) {
+    let proof = match nom::Finish::finish(nom::Parser::parse(&mut parser, response_bytes)) {
         Ok((_, proof)) => proof.proof,
         Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
     };

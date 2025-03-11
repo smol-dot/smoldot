@@ -176,48 +176,54 @@ pub fn encode_protocol_name_string(protocol: ProtocolName) -> String {
 ///
 /// Returns an error if the protocol name isn't recognized.
 pub fn decode_protocol_name(name: &str) -> Result<ProtocolName, ()> {
-    nom::combinator::all_consuming(nom::branch::alt((
-        nom::combinator::map(nom::bytes::complete::tag("/ipfs/id/1.0.0"), |_| {
-            ProtocolName::Identify
-        }),
-        nom::combinator::map(nom::bytes::complete::tag("/ipfs/ping/1.0.0"), |_| {
-            ProtocolName::Ping
-        }),
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::bytes::complete::tag("/"),
-                genesis_hash,
-                nom::bytes::complete::tag("/"),
-                protocol_ty,
-            )),
-            |(_, genesis_hash, _, protocol_ty)| {
-                protocol_ty_to_real_protocol(protocol_ty, genesis_hash, None)
-            },
-        ),
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::bytes::complete::tag("/"),
-                genesis_hash,
-                nom::bytes::complete::tag("/"),
-                nom::bytes::complete::take_until("/"),
-                nom::bytes::complete::tag("/"),
-                protocol_ty,
-            )),
-            |(_, genesis_hash, _, fork_id, _, protocol_ty)| {
-                protocol_ty_to_real_protocol(protocol_ty, genesis_hash, Some(fork_id))
-            },
-        ),
-    )))(name)
+    nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag("/ipfs/id/1.0.0"), |_| {
+                ProtocolName::Identify
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("/ipfs/ping/1.0.0"), |_| {
+                ProtocolName::Ping
+            }),
+            nom::combinator::map(
+                (
+                    nom::bytes::complete::tag("/"),
+                    genesis_hash,
+                    nom::bytes::complete::tag("/"),
+                    protocol_ty,
+                ),
+                |(_, genesis_hash, _, protocol_ty)| {
+                    protocol_ty_to_real_protocol(protocol_ty, genesis_hash, None)
+                },
+            ),
+            nom::combinator::map(
+                (
+                    nom::bytes::complete::tag("/"),
+                    genesis_hash,
+                    nom::bytes::complete::tag("/"),
+                    nom::bytes::complete::take_until("/"),
+                    nom::bytes::complete::tag("/"),
+                    protocol_ty,
+                ),
+                |(_, genesis_hash, _, fork_id, _, protocol_ty)| {
+                    protocol_ty_to_real_protocol(protocol_ty, genesis_hash, Some(fork_id))
+                },
+            ),
+        ))),
+        name,
+    )
     .map(|(_, parse_result)| parse_result)
     .map_err(|_| ())
 }
 
 fn genesis_hash(name: &str) -> nom::IResult<&str, [u8; 32]> {
-    nom::combinator::map_opt(nom::bytes::complete::take(64u32), |hash| {
-        hex::decode(hash)
-            .ok()
-            .map(|hash| <[u8; 32]>::try_from(hash).unwrap_or_else(|_| unreachable!()))
-    })(name)
+    nom::Parser::parse(
+        &mut nom::combinator::map_opt(nom::bytes::complete::take(64u32), |hash| {
+            hex::decode(hash)
+                .ok()
+                .map(|hash| <[u8; 32]>::try_from(hash).unwrap_or_else(|_| unreachable!()))
+        }),
+        name,
+    )
 }
 
 enum ProtocolTy {
@@ -232,24 +238,27 @@ enum ProtocolTy {
 }
 
 fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
-    nom::branch::alt((
-        nom::combinator::map(nom::bytes::complete::tag("block-announces/1"), |_| {
-            ProtocolTy::BlockAnnounces
-        }),
-        nom::combinator::map(nom::bytes::complete::tag("transactions/1"), |_| {
-            ProtocolTy::Transactions
-        }),
-        nom::combinator::map(nom::bytes::complete::tag("grandpa/1"), |_| {
-            ProtocolTy::Grandpa
-        }),
-        nom::combinator::map(nom::bytes::complete::tag("sync/2"), |_| ProtocolTy::Sync),
-        nom::combinator::map(nom::bytes::complete::tag("light/2"), |_| ProtocolTy::Light),
-        nom::combinator::map(nom::bytes::complete::tag("kad"), |_| ProtocolTy::Kad),
-        nom::combinator::map(nom::bytes::complete::tag("sync/warp"), |_| {
-            ProtocolTy::SyncWarp
-        }),
-        nom::combinator::map(nom::bytes::complete::tag("state/2"), |_| ProtocolTy::State),
-    ))(name)
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag("block-announces/1"), |_| {
+                ProtocolTy::BlockAnnounces
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("transactions/1"), |_| {
+                ProtocolTy::Transactions
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("grandpa/1"), |_| {
+                ProtocolTy::Grandpa
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("sync/2"), |_| ProtocolTy::Sync),
+            nom::combinator::map(nom::bytes::complete::tag("light/2"), |_| ProtocolTy::Light),
+            nom::combinator::map(nom::bytes::complete::tag("kad"), |_| ProtocolTy::Kad),
+            nom::combinator::map(nom::bytes::complete::tag("sync/warp"), |_| {
+                ProtocolTy::SyncWarp
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("state/2"), |_| ProtocolTy::State),
+        )),
+        name,
+    )
 }
 
 fn protocol_ty_to_real_protocol(

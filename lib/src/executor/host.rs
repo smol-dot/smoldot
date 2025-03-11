@@ -1107,9 +1107,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1309,9 +1312,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1356,9 +1362,12 @@ impl ReadyToRun {
                 let max_keys_to_remove = {
                     let input = expect_pointer_size!(2);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::streaming::le_u32,
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(util::nom_option_decode(
+                                nom::number::streaming::le_u32,
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -1984,25 +1993,28 @@ impl ReadyToRun {
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(nom::combinator::flat_map(
-                            crate::util::nom_scale_compact_usize,
-                            |num_elems| {
-                                nom::multi::many_m_n(
-                                    num_elems,
-                                    num_elems,
-                                    nom::sequence::tuple((
-                                        nom::combinator::flat_map(
-                                            crate::util::nom_scale_compact_usize,
-                                            nom::bytes::streaming::take,
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                                crate::util::nom_scale_compact_usize,
+                                |num_elems| {
+                                    nom::multi::many_m_n(
+                                        num_elems,
+                                        num_elems,
+                                        (
+                                            nom::combinator::flat_map(
+                                                crate::util::nom_scale_compact_usize,
+                                                nom::bytes::streaming::take,
+                                            ),
+                                            nom::combinator::flat_map(
+                                                crate::util::nom_scale_compact_usize,
+                                                nom::bytes::streaming::take,
+                                            ),
                                         ),
-                                        nom::combinator::flat_map(
-                                            crate::util::nom_scale_compact_usize,
-                                            nom::bytes::streaming::take,
-                                        ),
-                                    )),
-                                )
-                            },
-                        ))(input.as_ref())
+                                    )
+                                },
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
@@ -2050,19 +2062,22 @@ impl ReadyToRun {
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
-                        nom::combinator::all_consuming(nom::combinator::flat_map(
-                            crate::util::nom_scale_compact_usize,
-                            |num_elems| {
-                                nom::multi::many_m_n(
-                                    num_elems,
-                                    num_elems,
-                                    nom::combinator::flat_map(
-                                        crate::util::nom_scale_compact_usize,
-                                        nom::bytes::streaming::take,
-                                    ),
-                                )
-                            },
-                        ))(input.as_ref())
+                        nom::Parser::parse(
+                            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                                crate::util::nom_scale_compact_usize,
+                                |num_elems| {
+                                    nom::multi::many_m_n(
+                                        num_elems,
+                                        num_elems,
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::streaming::take,
+                                        ),
+                                    )
+                                },
+                            )),
+                            input.as_ref(),
+                        )
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {

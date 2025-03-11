@@ -930,9 +930,9 @@ fn decode_babe_configuration_output(
     bytes: &[u8],
     is_babe_api_v1: bool,
 ) -> Result<BabeGenesisConfiguration, Error> {
-    let result: nom::IResult<_, _> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    let result: nom::IResult<_, _> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 nom::number::streaming::le_u64,
                 nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
                 nom::number::streaming::le_u64,
@@ -942,10 +942,10 @@ fn decode_babe_configuration_output(
                         num_elems,
                         num_elems,
                         nom::combinator::map(
-                            nom::sequence::tuple((
+                            (
                                 nom::bytes::streaming::take(32u32),
                                 nom::number::streaming::le_u64,
-                            )),
+                            ),
                             move |(public_key, weight)| header::BabeAuthority {
                                 public_key: <[u8; 32]>::try_from(public_key).unwrap(),
                                 weight,
@@ -958,29 +958,35 @@ fn decode_babe_configuration_output(
                 }),
                 |b| {
                     if is_babe_api_v1 {
-                        nom::branch::alt((
-                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                                header::BabeAllowedSlots::PrimarySlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                            }),
-                        ))(b)
+                        nom::Parser::parse(
+                            &mut nom::branch::alt((
+                                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                                    header::BabeAllowedSlots::PrimarySlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                                }),
+                            )),
+                            b,
+                        )
                     } else {
-                        nom::branch::alt((
-                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                                header::BabeAllowedSlots::PrimarySlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                            }),
-                            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
-                            }),
-                        ))(b)
+                        nom::Parser::parse(
+                            &mut nom::branch::alt((
+                                nom::combinator::map(nom::bytes::streaming::tag(&[0][..]), |_| {
+                                    header::BabeAllowedSlots::PrimarySlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[1][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                                }),
+                                nom::combinator::map(nom::bytes::streaming::tag(&[2][..]), |_| {
+                                    header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                                }),
+                            )),
+                            b,
+                        )
                     }
                 },
-            )),
+            ),
             |(_slot_duration, slots_per_epoch, c0, c1, authorities, randomness, allowed_slots)| {
                 // Note that the slot duration is unused as it is not modifiable anyway.
                 BabeGenesisConfiguration {
@@ -995,7 +1001,9 @@ fn decode_babe_configuration_output(
                     },
                 }
             },
-        )))(bytes);
+        ))),
+        bytes,
+    );
 
     match result {
         Ok((_, out)) => Ok(out),
@@ -1011,7 +1019,7 @@ fn decode_babe_epoch_output(
     is_next_epoch: bool,
 ) -> Result<chain_information::BabeEpochInformation, Error> {
     let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
+        (
             nom::number::streaming::le_u64,
             nom::number::streaming::le_u64,
             nom::number::streaming::le_u64,
@@ -1020,10 +1028,10 @@ fn decode_babe_epoch_output(
                     num_elems,
                     num_elems,
                     nom::combinator::map(
-                        nom::sequence::tuple((
+                        (
                             nom::bytes::streaming::take(32u32),
                             nom::number::streaming::le_u64,
-                        )),
+                        ),
                         move |(public_key, weight)| header::BabeAuthority {
                             public_key: <[u8; 32]>::try_from(public_key).unwrap(),
                             weight,
@@ -1043,7 +1051,7 @@ fn decode_babe_epoch_output(
                         nom::Err::Error(nom::error::make_error(b, nom::error::ErrorKind::Verify))
                     })
             },
-        )),
+        ),
         |(
             epoch_index,
             start_slot_number,
@@ -1073,7 +1081,8 @@ fn decode_babe_epoch_output(
         },
     ));
 
-    let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> = combinator(scale_encoded);
+    let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
+        nom::Parser::parse(&mut combinator, scale_encoded);
     match result {
         Ok((_, info)) => Ok(info),
         Err(_) => Err(if is_next_epoch {
@@ -1089,26 +1098,33 @@ fn decode_babe_epoch_output(
 fn decode_grandpa_authorities_output(
     scale_encoded: &[u8],
 ) -> Result<Vec<header::GrandpaAuthority>, Error> {
-    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::complete(
-        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-            nom::multi::fold_many_m_n(
-                num_elems,
-                num_elems,
-                nom::sequence::tuple((
-                    nom::bytes::streaming::take(32u32),
-                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZero::<u64>::new),
-                )),
-                move || Vec::with_capacity(num_elems),
-                |mut acc, (public_key, weight)| {
-                    acc.push(header::GrandpaAuthority {
-                        public_key: <[u8; 32]>::try_from(public_key).unwrap(),
-                        weight,
-                    });
-                    acc
-                },
-            )
-        }),
-    ))(scale_encoded);
+    let result: nom::IResult<_, _> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| {
+                nom::multi::fold_many_m_n(
+                    num_elems,
+                    num_elems,
+                    (
+                        nom::bytes::streaming::take(32u32),
+                        nom::combinator::map_opt(
+                            nom::number::streaming::le_u64,
+                            NonZero::<u64>::new,
+                        ),
+                    ),
+                    move || Vec::with_capacity(num_elems),
+                    |mut acc, (public_key, weight)| {
+                        acc.push(header::GrandpaAuthority {
+                            public_key: <[u8; 32]>::try_from(public_key).unwrap(),
+                            weight,
+                        });
+                        acc
+                    },
+                )
+            },
+        ))),
+        scale_encoded,
+    );
 
     match result {
         Ok((_, out)) => Ok(out),

@@ -133,17 +133,17 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
     // on older runtimes that expect these values. For this reason, errors concerning `auraslot`
     // and `babeslot` are ignored.
     let parser = nom::sequence::preceded(
-        nom::sequence::tuple((crate::util::nom_bool_decode, crate::util::nom_bool_decode)),
+        (crate::util::nom_bool_decode, crate::util::nom_bool_decode),
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::multi::fold_many_m_n(
                 num_elems,
                 num_elems,
-                nom::sequence::tuple((
+                (
                     nom::combinator::map(nom::bytes::streaming::take(8u8), |b| {
                         <[u8; 8]>::try_from(b).unwrap()
                     }),
                     crate::util::nom_bytes_decode,
-                )),
+                ),
                 Vec::new,
                 |mut errors, (module, error)| {
                     if module != *b"auraslot" && module != *b"babeslot" {
@@ -155,7 +155,10 @@ pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutput
         }),
     );
 
-    match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
+    match nom::Parser::parse(
+        &mut nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(parser),
+        output,
+    ) {
         Err(_err) => Err(InherentsOutputError::ParseFailure),
         Ok((_, errors)) => {
             if errors.is_empty() {

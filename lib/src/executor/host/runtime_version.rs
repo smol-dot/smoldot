@@ -93,10 +93,10 @@ pub fn find_encoded_embedded_runtime_version_apis(
 ) -> Result<EmbeddedRuntimeVersionApis, FindEncodedEmbeddedRuntimeVersionApisError> {
     let mut parser =
         nom::combinator::all_consuming(nom::combinator::complete(nom::sequence::preceded(
-            nom::sequence::tuple((
-                nom::bytes::streaming::tag(b"\0asm"),
-                nom::bytes::streaming::tag(&[0x1, 0x0, 0x0, 0x0]),
-            )),
+            (
+                nom::bytes::streaming::tag(&b"\0asm"[..]),
+                nom::bytes::streaming::tag(&[0x1, 0x0, 0x0, 0x0][..]),
+            ),
             nom::multi::fold_many0(
                 nom::combinator::complete(wasm_section),
                 || (None, None),
@@ -147,10 +147,11 @@ pub fn find_encoded_embedded_runtime_version_apis(
             ),
         )));
 
-    let (runtime_version_content, runtime_apis_content) = match parser(binary_wasm_module) {
-        Ok((_, content)) => content,
-        Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
-    };
+    let (runtime_version_content, runtime_apis_content) =
+        match nom::Parser::parse(&mut parser, binary_wasm_module) {
+            Ok((_, content)) => content,
+            Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
+        };
 
     Ok(EmbeddedRuntimeVersionApis {
         runtime_version_content,
@@ -295,15 +296,17 @@ impl<'a> CoreVersionApisRefIter<'a> {
     ///
     /// The input slice isn't expected to contain the number of APIs.
     pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, CoreVersionApisFromSliceErr> {
-        let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
-            nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+        let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> = nom::Parser::parse(
+            &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
                 nom::combinator::recognize(nom::multi::fold_many0(
                     nom::combinator::complete(core_version_api),
                     || {},
                     |(), _| (),
                 )),
                 |inner| CoreVersionApisRefIter { inner },
-            )))(input);
+            ))),
+            input,
+        );
 
         match result {
             Ok((_, me)) => Ok(me),
@@ -437,9 +440,9 @@ pub struct CoreVersionApi {
 
 fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
     // See https://spec.polkadot.network/#defn-rt-core-version
-    let result: nom::IResult<_, _> =
-        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
-            nom::sequence::tuple((
+    let result: nom::IResult<_, _> = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            (
                 crate::util::nom_string_decode,
                 crate::util::nom_string_decode,
                 nom::number::streaming::le_u32,
@@ -455,16 +458,16 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 )),
                 nom::branch::alt((
                     nom::combinator::complete(nom::combinator::map(
-                        nom::bytes::streaming::tag(&[0]),
+                        nom::bytes::streaming::tag(&[0][..]),
                         |_| Some(TrieEntryVersion::V0),
                     )),
                     nom::combinator::complete(nom::combinator::map(
-                        nom::bytes::streaming::tag(&[1]),
+                        nom::bytes::streaming::tag(&[1][..]),
                         |_| Some(TrieEntryVersion::V1),
                     )),
                     nom::combinator::map(nom::combinator::eof, |_| None),
                 )),
-            )),
+            ),
             |(
                 spec_name,
                 impl_name,
@@ -484,7 +487,9 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 transaction_version,
                 state_version,
             },
-        )))(scale_encoded);
+        ))),
+        scale_encoded,
+    );
 
     match result {
         Ok((_, out)) => Ok(out),
@@ -496,33 +501,39 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
 fn core_version_apis<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], CoreVersionApisRefIter<'a>, E> {
-    nom::combinator::map(
-        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-            nom::combinator::recognize(nom::multi::fold_many_m_n(
-                num_elems,
-                num_elems,
-                core_version_api,
-                || {},
-                |(), _| (),
-            ))
-        }),
-        |inner| CoreVersionApisRefIter { inner },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                nom::combinator::recognize(nom::multi::fold_many_m_n(
+                    num_elems,
+                    num_elems,
+                    core_version_api,
+                    || {},
+                    |(), _| (),
+                ))
+            }),
+            |inner| CoreVersionApisRefIter { inner },
+        ),
+        bytes,
+    )
 }
 
 fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], CoreVersionApi, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::bytes::streaming::take(8u32),
-            nom::number::streaming::le_u32,
-        )),
-        move |(name, version)| CoreVersionApi {
-            name_hash: <[u8; 8]>::try_from(name).unwrap(),
-            version,
-        },
-    )(bytes)
+    nom::Parser::parse(
+        &mut nom::combinator::map(
+            (
+                nom::bytes::streaming::take(8u32),
+                nom::number::streaming::le_u32,
+            ),
+            move |(name, version)| CoreVersionApi {
+                name_hash: <[u8; 8]>::try_from(name).unwrap(),
+                version,
+            },
+        ),
+        bytes,
+    )
 }
 
 struct WasmSection<'a> {
@@ -532,35 +543,38 @@ struct WasmSection<'a> {
 
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
 fn wasm_section(bytes: &[u8]) -> nom::IResult<&[u8], Option<WasmSection>> {
-    nom::branch::alt((
-        nom::combinator::map(
-            nom::combinator::map_parser(
-                nom::sequence::preceded(
-                    nom::bytes::streaming::tag(&[0]),
+    nom::Parser::parse(
+        &mut nom::branch::alt((
+            nom::combinator::map(
+                nom::combinator::map_parser(
+                    nom::sequence::preceded(
+                        nom::bytes::streaming::tag(&[0][..]),
+                        nom::multi::length_data(nom::combinator::map_opt(
+                            crate::util::leb128::nom_leb128_u64,
+                            |n| u32::try_from(n).ok(),
+                        )),
+                    ),
+                    (
+                        nom::multi::length_data(nom::combinator::map_opt(
+                            crate::util::leb128::nom_leb128_u64,
+                            |n| u32::try_from(n).ok(),
+                        )),
+                        nom::combinator::rest,
+                    ),
+                ),
+                |(name, content)| Some(WasmSection { name, content }),
+            ),
+            nom::combinator::map(
+                (
+                    nom::number::streaming::u8,
                     nom::multi::length_data(nom::combinator::map_opt(
                         crate::util::leb128::nom_leb128_u64,
                         |n| u32::try_from(n).ok(),
                     )),
                 ),
-                nom::sequence::tuple((
-                    nom::multi::length_data(nom::combinator::map_opt(
-                        crate::util::leb128::nom_leb128_u64,
-                        |n| u32::try_from(n).ok(),
-                    )),
-                    nom::combinator::rest,
-                )),
+                |_| None,
             ),
-            |(name, content)| Some(WasmSection { name, content }),
-        ),
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::number::streaming::u8,
-                nom::multi::length_data(nom::combinator::map_opt(
-                    crate::util::leb128::nom_leb128_u64,
-                    |n| u32::try_from(n).ok(),
-                )),
-            )),
-            |_| None,
-        ),
-    ))(bytes)
+        )),
+        bytes,
+    )
 }
