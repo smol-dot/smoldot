@@ -334,7 +334,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                             &relay_chain_subscribe_all.finalized_block_scale_encoded_header
                         )),
-                        subscription_id = relay_chain_subscribe_all.new_blocks.id(),
+                        subscription_id = ?relay_chain_subscribe_all.new_blocks.id(),
                     );
                     log!(
                         &self.platform,

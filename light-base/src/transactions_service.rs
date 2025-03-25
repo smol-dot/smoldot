@@ -537,7 +537,7 @@ async fn background_task<TPlat: PlatformRef>(
             &config.log_target,
             "reset",
             new_finalized = HashDisplay(&initial_finalized_block_hash),
-            subscription_id = subscribe_all.new_blocks.id(),
+            subscription_id = ?subscribe_all.new_blocks.id(),
             dropped_transactions
         );
 
