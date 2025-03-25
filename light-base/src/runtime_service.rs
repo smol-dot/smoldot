@@ -66,7 +66,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{cmp, iter, mem, num::NonZero, ops, pin::Pin, time::Duration};
+use core::{cmp, fmt, iter, mem, num::NonZero, ops, pin::Pin, time::Duration};
 use derive_more::derive;
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
@@ -449,8 +449,14 @@ pub struct SubscribeAll<TPlat: PlatformRef> {
     pub new_blocks: Subscription<TPlat>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubscriptionId(u64);
+
+impl fmt::Debug for SubscriptionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
 
 pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,

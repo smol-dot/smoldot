@@ -537,6 +537,7 @@ async fn background_task<TPlat: PlatformRef>(
             &config.log_target,
             "reset",
             new_finalized = HashDisplay(&initial_finalized_block_hash),
+            subscription_id = subscribe_all.new_blocks.id(),
             dropped_transactions
         );
 
@@ -751,10 +752,6 @@ async fn background_task<TPlat: PlatformRef>(
 
             // Remove finalized blocks from the pool when possible.
             for block in worker.pending_transactions.prune_finalized_with_body() {
-                // All blocks in `pending_transactions` are pinned within the runtime service.
-                // Unpin them when they're removed.
-                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
-
                 log!(
                     &worker.platform,
                     Debug,
@@ -767,6 +764,10 @@ async fn background_task<TPlat: PlatformRef>(
                         .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
                         .join(", ")
                 );
+
+                // All blocks in `pending_transactions` are pinned within the runtime service.
+                // Unpin them when they're removed.
+                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
 
                 debug_assert!(!block.user_data.downloading);
                 for mut tx in block.included_transactions {
@@ -853,6 +854,14 @@ async fn background_task<TPlat: PlatformRef>(
                         worker.set_best_block(&config.log_target, &best_block_hash_if_changed);
                     }
                     for pruned in worker.pending_transactions.set_finalized_block(&hash) {
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "pruned-block-discard",
+                            block = HashDisplay(&pruned.0),
+                        );
+
                         // All blocks in `pending_transactions` are pinned within the
                         // runtime service. Unpin them when they're removed.
                         subscribe_all.new_blocks.unpin_block(pruned.0).await;
