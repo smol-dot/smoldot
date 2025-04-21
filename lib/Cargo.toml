@@ -81,7 +81,7 @@ x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["
 zeroize = { version = "1.7.0", default-features = false, features = ["alloc"] }
 
 # `database-sqlite` feature
-rusqlite = { version = "0.32.1", optional = true, default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.35.0", optional = true, default-features = false, features = ["bundled"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
