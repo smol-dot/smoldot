@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The handshake of the transactions notifications protocol substream now contains the "role" of the node, similar to what Substrate does and expects.
+
 ## 2.0.34 - 2024-11-24
 
 ### Fixed
