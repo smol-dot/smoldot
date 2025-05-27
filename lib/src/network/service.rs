@@ -4063,8 +4063,9 @@ where
         // TODO: these numbers are arbitrary, must be made to match Substrate
         match protocol {
             NotificationsProtocol::BlockAnnounces { .. } => 64 * 1024,
-            NotificationsProtocol::Transactions { .. } => 4,
-            NotificationsProtocol::Grandpa { .. } => 32,
+            NotificationsProtocol::Transactions { .. } | NotificationsProtocol::Grandpa { .. } => {
+                32
+            }
         }
     }
 
@@ -4104,8 +4105,8 @@ where
                     a
                 })
             }
-            NotificationsProtocol::Transactions { .. } => Vec::new(),
-            NotificationsProtocol::Grandpa { chain_index } => {
+            NotificationsProtocol::Transactions { chain_index, .. }
+            | NotificationsProtocol::Grandpa { chain_index } => {
                 self.chains[chain_index].role.scale_encoding().to_vec()
             }
         };
