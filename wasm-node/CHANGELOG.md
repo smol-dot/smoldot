@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.35 - 2025-05-27
+
 ### Changed
 
 - The handshake of the transactions notifications protocol substream now contains the "role" of the node, similar to what Substrate does and expects. ([#2130](https://github.com/smol-dot/smoldot/pull/2130))
