@@ -430,7 +430,7 @@ define_methods! {
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
-    state_getReadProof() -> (), // TODO:
+    state_getReadProof(keys: Vec<HexString>, at: Option<HashHexString>) -> ReadProof,
     state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion<'a> [chain_getRuntimeVersion],
     state_getStorage(key: HexString, hash: Option<HashHexString>) -> HexString [state_getStorageAt],
     state_getStorageHash() -> () [state_getStorageHashAt], // TODO:
@@ -538,6 +538,33 @@ define_methods! {
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
+}
+
+#[derive(Debug, Clone)]
+pub struct MerkleProof(pub Vec<u8>);
+
+impl serde::Serialize for MerkleProof {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let (_, decoded_proof) = nom::Parser::parse(
+            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
+                |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
+                },
+            )),
+            &self.0,
+        )
+        .unwrap();
+
+        decoded_proof
+            .into_iter()
+            .map(|v| HexString(Vec::from(v)))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1045,6 +1072,12 @@ pub struct SystemHealth {
     pub is_syncing: bool,
     pub peers: u64,
     pub should_have_peers: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadProof {
+    pub at: HashHexString,
+    pub proof: MerkleProof,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
