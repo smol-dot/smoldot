@@ -557,7 +557,7 @@ impl serde::Serialize for MerkleProof {
             )),
             &self.0,
         )
-        .unwrap();
+        .map_err(serde::ser::Error::custom)?;
 
         decoded_proof
             .into_iter()

@@ -42,11 +42,7 @@ use rand_chacha::{
 use smoldot::{
     header,
     informant::HashDisplay,
-    json_rpc::{
-        self,
-        methods::{self, ReadProof},
-        parse,
-    },
+    json_rpc::{self, methods, parse},
     libp2p::{PeerId, multiaddr},
     network::codec,
 };
@@ -3458,7 +3454,19 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 stage: MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
                 request_ty: MultiStageRequestTy::StateGetReadProof { keys },
             } => {
-                let peer = me.network_service.peers_list().await.next().unwrap();
+                // TODO selecting one peer which knows block `blocks_hash` randomly
+                let peer = me.network_service.peers_list().await.next();
+                if peer.is_none() {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id_json,
+                            parse::ErrorResponse::ServerError(-32000, "Internal error"),
+                            None,
+                        ))
+                        .await;
+                }
+                let peer = peer.unwrap();
 
                 let proof_result = me
                     .network_service
@@ -3469,6 +3477,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             block_hash,
                             keys: keys.into_iter(),
                         },
+                        // TODO where to get this from?
                         Duration::from_secs(16),
                     )
                     .await;
@@ -3478,7 +3487,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::state_getReadProof(ReadProof {
+                                methods::Response::state_getReadProof(methods::ReadProof {
                                     at: methods::HashHexString(block_hash),
                                     proof: methods::MerkleProof(merkle_proof.decode().to_owned()),
                                 })
@@ -3486,9 +3495,16 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    Err(ex) => {
-                        println!("Stuff crashed :( {:?}", ex);
-                        // TODO wtf do we do in this case??
+                    Err(error) => {
+                        // All errors are sent back the same way.
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                                None,
+                            ))
+                            .await;
                     }
                 }
             }
