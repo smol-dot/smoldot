@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- A "parse error" JSON-RPC response is no longer erroneously sent back in case of an unrecognized JSON-RPC function name or wrong parameter types.
+
 ## 2.0.35 - 2025-05-27
 
 ### Changed

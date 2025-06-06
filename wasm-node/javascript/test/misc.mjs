@@ -40,6 +40,25 @@ test('malformed JSON-RPC request generates an error', async t => {
     .then(() => client.terminate());
 });
 
+test('invalid JSON-RPC method generates an error', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec })
+    .then((chain) => {
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"this method doesnt exist","params":[]}');
+      return chain;
+    })
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.id === null && parsed.error)
+        t.pass();
+      else
+        t.fail(response);
+    })
+    .then(() => client.terminate());
+});
+
 test('disableJsonRpc option forbids sendJsonRpc', async t => {
   const client = start({ logCallback: () => { } });
   await client
@@ -47,7 +66,7 @@ test('disableJsonRpc option forbids sendJsonRpc', async t => {
     .then((chain) => {
       try {
         chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
-      } catch(error) {
+      } catch (error) {
         t.assert(error instanceof JsonRpcDisabledError);
         t.pass();
       }
@@ -62,7 +81,7 @@ test('disableJsonRpc option forbids nextJsonRpcResponse', async t => {
     .then(async (chain) => {
       try {
         await chain.nextJsonRpcResponse();
-      } catch(error) {
+      } catch (error) {
         t.assert(error instanceof JsonRpcDisabledError);
         t.pass();
       }
