@@ -721,15 +721,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             continue;
                         }
                         Err(methods::ParseClientToServerError::UnknownNotification { .. }) => {
-                            // Invalid method. Immediately return an answer.
-                            let _ = me
-                                .responses_tx
-                                .send(parse::build_error_response(
-                                    "null",
-                                    parse::ErrorResponse::InvalidRequest,
-                                    None,
-                                ))
-                                .await;
+                            // Invalid notification-style request. As per spec, we simply
+                            // ignore them.
                             continue;
                         }
                     };
