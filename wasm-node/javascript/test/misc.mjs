@@ -51,7 +51,7 @@ test('invalid JSON-RPC method generates an error', async t => {
     .then(async (chain) => {
       const response = await chain.nextJsonRpcResponse();
       const parsed = JSON.parse(response);
-      if (parsed.id === null && parsed.error)
+      if (parsed.id === 1 && parsed.error)
         t.pass();
       else
         t.fail(response);
