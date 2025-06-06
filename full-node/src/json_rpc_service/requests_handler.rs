@@ -472,6 +472,9 @@ pub fn spawn_requests_handler(config: Config) {
                                 executor::runtime_call::RuntimeCall::SignatureVerification(req) => {
                                     call = req.verify_and_resume();
                                 }
+                                executor::runtime_call::RuntimeCall::EcdsaPublicKeyRecover(req) => {
+                                    call = req.verify_and_resume();
+                                }
                                 executor::runtime_call::RuntimeCall::Offchain(_) => {
                                     request.fail(service::ErrorResponse::InternalError);
                                     break;
