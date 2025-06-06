@@ -704,7 +704,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
                 // New JSON-RPC request pulled from the channel.
-
                 let (request_id_json, request_parsed) =
                     match methods::parse_jsonrpc_client_to_server(&request_json) {
                         Ok(r) => r,
