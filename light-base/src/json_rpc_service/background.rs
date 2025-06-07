@@ -336,6 +336,9 @@ enum MultiStageRequestTy {
         keys: Vec<methods::HexString>,
     },
     StateGetMetadata,
+    StateGetReadProof {
+        keys: Vec<methods::HexString>,
+    },
     StateGetStorage {
         key: Vec<u8>,
     },
@@ -1361,6 +1364,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 None => MultiStageRequestStage::BlockHashNotKnown,
                             },
                             MultiStageRequestTy::StateGetMetadata,
+                        ));
+                    }
+
+                    methods::MethodCall::state_getReadProof { keys, at } => {
+                        // Because this request requires asynchronous operations, we push it
+                        // to a list of "multi-stage requests" that are processed later.
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            match at {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::StateGetReadProof { keys },
                         ));
                     }
 
@@ -2743,7 +2761,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::offchain_localStorageGet { .. }
                     | methods::MethodCall::offchain_localStorageSet { .. }
                     | methods::MethodCall::state_getPairs { .. }
-                    | methods::MethodCall::state_getReadProof { .. }
                     | methods::MethodCall::state_getStorageHash { .. }
                     | methods::MethodCall::state_getStorageSize { .. }
                     | methods::MethodCall::state_queryStorage { .. }
@@ -3432,6 +3449,66 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             );
                         }
 
+                        let _ = me
+                            .responses_tx
+                            .send(parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                                None,
+                            ))
+                            .await;
+                    }
+                }
+            }
+
+            WakeUpReason::AdvanceMultiStageRequest {
+                request_id_json,
+                stage: MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
+                request_ty: MultiStageRequestTy::StateGetReadProof { keys },
+            } => {
+                // TODO selecting one peer which knows block `blocks_hash` randomly
+                let peer = me.network_service.peers_list().await.next();
+                if peer.is_none() {
+                    let _ = me
+                        .responses_tx
+                        .send(parse::build_error_response(
+                            &request_id_json,
+                            parse::ErrorResponse::ServerError(-32000, "Internal error"),
+                            None,
+                        ))
+                        .await;
+                }
+                let peer = peer.unwrap();
+
+                let proof_result = me
+                    .network_service
+                    .clone()
+                    .storage_proof_request(
+                        peer,
+                        codec::StorageProofRequestConfig {
+                            block_hash,
+                            keys: keys.into_iter(),
+                        },
+                        // TODO where to get this from?
+                        Duration::from_secs(16),
+                    )
+                    .await;
+
+                match proof_result {
+                    Ok(merkle_proof) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::state_getReadProof(methods::ReadProof {
+                                    at: methods::HashHexString(block_hash),
+                                    proof: methods::MerkleProof(merkle_proof.decode().to_owned()),
+                                })
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        // All errors are sent back the same way.
                         let _ = me
                             .responses_tx
                             .send(parse::build_error_response(
