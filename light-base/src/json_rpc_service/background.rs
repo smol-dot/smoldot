@@ -4476,6 +4476,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             closest_descendant_merkle_value: None,
                             ..
                         } => None,
+                        // TODO maybe unreachable? chainhead_v1 doesn't have merkle proof queries.
+                        sync_service::StorageResultItem::MerkleProof { .. } => None,
                     };
 
                     if let Some(item) = item {

@@ -450,6 +450,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     key: request.key,
                     hash: true,
                 },
+                StorageRequestItemTy::MerkleProof => RequestImpl::MerkleProof { key: request.key },
                 StorageRequestItemTy::ClosestDescendantMerkleValue => {
                     RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
@@ -498,6 +499,10 @@ pub enum StorageRequestItemTy {
     /// A [`StorageResultItem::Hash`] will be returned containing the potential hash.
     Hash,
 
+    /// The merkle proof of the storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::MerkleProof`] will be returned containing the potential hash.
+    MerkleProof,
+
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
@@ -534,6 +539,14 @@ pub enum StorageResultItem {
         /// Hash of the storage value of the key, or `None` if there is no storage value
         /// associated with that key.
         hash: Option<[u8; 32]>,
+    },
+    /// Corresponds to a [`StorageRequestItemTy::Hash`].
+    MerkleProof {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        key: Vec<u8>,
+        /// Merkle proof of the storage value of the key, or `None` if there is no storage value
+        /// associated with that key.
+        proof: Vec<Vec<u8>>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
@@ -602,6 +615,9 @@ enum RequestImpl {
     ValueOrHash {
         key: Vec<u8>,
         hash: bool,
+    },
+    MerkleProof {
+        key: Vec<u8>,
     },
     ClosestDescendantMerkleValue {
         key: Vec<u8>,
@@ -684,7 +700,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 }
                             }
                         }
-                        RequestImpl::ValueOrHash { key, .. } => {
+                        RequestImpl::ValueOrHash { key, .. } | RequestImpl::MerkleProof { key } => {
                             if keys.insert(key.clone()) {
                                 max_reponse_nodes += key.len() * 2;
                             }
@@ -920,6 +936,18 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                     .push((request_index, RequestImpl::ValueOrHash { key, hash }));
                             }
                         }
+                    }
+                    RequestImpl::MerkleProof { key } => {
+                        self.available_results.push_back((
+                            request_index,
+                            StorageResultItem::MerkleProof {
+                                key,
+                                proof: decoded_proof
+                                    .iter_raw_proof_entries()
+                                    .map(Vec::from)
+                                    .collect(),
+                            },
+                        ));
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
                         let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());

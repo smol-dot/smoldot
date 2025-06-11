@@ -742,6 +742,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             })
     }
 
+    /// Returns a list of all the already-verified proof entries
+    pub fn iter_raw_proof_entries(&self) -> impl Iterator<Item = &[u8]> {
+        let proof = self.proof.as_ref();
+
+        self.entries
+            .iter()
+            .map(|e| &proof[e.range_in_proof.clone()])
+    }
+
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
     /// If `key` is in the proof, returns `key`.
     pub fn closest_ancestor_in_proof<'a>(
