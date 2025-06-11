@@ -35,6 +35,7 @@ use alloc::{
 use core::{iter, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
+use hashbrown::HashSet;
 use rand_chacha::{
     ChaCha20Rng,
     rand_core::{RngCore as _, SeedableRng as _},
@@ -368,7 +369,7 @@ enum StorageRequestInProgress {
     },
     StateGetReadProof {
         block_hash: [u8; 32],
-        in_progress_results: Vec<(methods::HexString, Vec<methods::HexString>)>,
+        in_progress_results: HashSet<Vec<u8>>,
     },
     StateGetStorage,
 }
@@ -3468,7 +3469,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | MultiStageRequestTy::StateGetStorage { .. }
                     | MultiStageRequestTy::StateGetReadProof { .. }),
             } => {
-                // TODO not sure the best way of working around this.
                 let is_state_get_read_proof =
                     matches!(request_ty, MultiStageRequestTy::StateGetReadProof { .. });
 
@@ -3506,7 +3506,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if is_state_get_read_proof {
                             StorageRequestInProgress::StateGetReadProof {
                                 block_hash,
-                                in_progress_results: Vec::with_capacity(keys.len()),
+                                in_progress_results: HashSet::new(),
                             }
                         } else {
                             StorageRequestInProgress::StateQueryStorageAt {
@@ -3518,9 +3518,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             sync_service::StorageRequestItem {
                                 key: key.0,
                                 ty: if is_state_get_read_proof {
-                                    sync_service::StorageRequestItemTy::Value
-                                } else {
                                     sync_service::StorageRequestItemTy::MerkleProof
+                                } else {
+                                    sync_service::StorageRequestItemTy::Value
                                 },
                             }
                         })),
@@ -3718,7 +3718,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
                     (
                         sync_service::StorageQueryProgress::Progress {
-                            item: sync_service::StorageResultItem::MerkleProof { key, proof },
+                            item: sync_service::StorageResultItem::MerkleProof { proof, .. },
                             query: next,
                             ..
                         },
@@ -3727,13 +3727,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             mut in_progress_results,
                         },
                     ) => {
-                        // Continue finding keys.
-                        // TODO check whether keys come in sorted
-                        // If they do, then in_progress_results should be just Vec<Vec<HexString>>
-                        in_progress_results.push((
-                            methods::HexString(key),
-                            proof.into_iter().map(methods::HexString).collect(),
-                        ));
+                        for entry in proof {
+                            in_progress_results.insert(entry);
+                        }
                         me.background_tasks.push(Box::pin(async move {
                             Event::LegacyApiFunctionStorageRequestProgress {
                                 request_id_json,
@@ -3760,7 +3756,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     at: methods::HashHexString(block_hash),
                                     proof: in_progress_results
                                         .into_iter()
-                                        .map(|(_, v)| v)
+                                        .map(methods::HexString)
                                         .collect(),
                                 })
                                 .to_json_response(&request_id_json),
@@ -4488,7 +4484,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             closest_descendant_merkle_value: None,
                             ..
                         } => None,
-                        // TODO maybe unreachable? chainhead_v1 doesn't have merkle proof queries.
+                        // chainhead_v1 doesn't have merkle proof queries.
                         sync_service::StorageResultItem::MerkleProof { .. } => None,
                     };
 

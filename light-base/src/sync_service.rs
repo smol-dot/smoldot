@@ -500,7 +500,7 @@ pub enum StorageRequestItemTy {
     Hash,
 
     /// The merkle proof of the storage value associated to the [`StorageRequestItem::key`] is requested.
-    /// A [`StorageResultItem::MerkleProof`] will be returned containing the potential hash.
+    /// A [`StorageResultItem::MerkleProof`] will be returned containing the proof.
     MerkleProof,
 
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
@@ -542,10 +542,7 @@ pub enum StorageResultItem {
     },
     /// Corresponds to a [`StorageRequestItemTy::Hash`].
     MerkleProof {
-        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
-        key: Vec<u8>,
-        /// Merkle proof of the storage value of the key, or `None` if there is no storage value
-        /// associated with that key.
+        /// Merkle proof of the storage value of the key.
         proof: Vec<Vec<u8>>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
@@ -773,8 +770,9 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 }
             };
 
+            let proof_bytes = proof.decode();
             let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: proof.decode(),
+                proof: proof_bytes.as_ref(),
             }) {
                 Ok(d) => d,
                 Err(err) => {
@@ -801,7 +799,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         requested_key,
                     } => {
                         // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
-                        match scan.resume_partial(proof.decode()) {
+                        match scan.resume_partial(proof_bytes) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 proof_has_advanced_verification = true;
                                 self.requests_remaining.push((
@@ -937,15 +935,15 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             }
                         }
                     }
-                    RequestImpl::MerkleProof { key } => {
+                    RequestImpl::MerkleProof { .. } => {
+                        // The proof was decoded successfully, it can't be invalid now
+                        let entries =
+                            proof_decode::decode_to_raw_entries(proof_bytes.as_ref()).unwrap();
+
                         self.available_results.push_back((
                             request_index,
                             StorageResultItem::MerkleProof {
-                                key,
-                                proof: decoded_proof
-                                    .iter_raw_proof_entries()
-                                    .map(Vec::from)
-                                    .collect(),
+                                proof: entries.into_iter().map(Vec::from).collect(),
                             },
                         ));
                     }

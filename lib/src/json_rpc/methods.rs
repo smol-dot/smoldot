@@ -1050,7 +1050,7 @@ pub struct SystemHealth {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadProof {
     pub at: HashHexString,
-    pub proof: Vec<Vec<HexString>>,
+    pub proof: Vec<HexString>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -52,6 +52,20 @@ pub struct Config<I> {
     pub proof: I,
 }
 
+pub fn decode_to_raw_entries(proof: &[u8]) -> Result<Vec<&[u8]>, Error> {
+    // TODO: don't use a Vec?
+    let (_, decoded_proof) = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
+        )),
+        proof.as_ref(),
+    )
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
+
+    Ok(decoded_proof)
+}
+
 /// Verifies whether a proof is correct and returns an object that allows examining its content.
 ///
 /// The proof is then stored within the [`DecodedTrieProof`].
@@ -90,17 +104,7 @@ where
     // takes, it is always cause this function to return an error and is actually likely to make
     // the function actually take less time than if it was a legitimate proof.
     let entries_by_merkle_value = {
-        // TODO: don't use a Vec?
-        let (_, decoded_proof) = nom::Parser::parse(
-            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-                crate::util::nom_scale_compact_usize,
-                |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
-                },
-            )),
-            config.proof.as_ref(),
-        )
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
+        let decoded_proof = decode_to_raw_entries(config.proof.as_ref())?;
 
         let entries_by_merkle_value = decoded_proof
             .iter()
@@ -740,15 +744,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         (key, entry)
                     })
             })
-    }
-
-    /// Returns a list of all the already-verified proof entries
-    pub fn iter_raw_proof_entries(&self) -> impl Iterator<Item = &[u8]> {
-        let proof = self.proof.as_ref();
-
-        self.entries
-            .iter()
-            .map(|e| &proof[e.range_in_proof.clone()])
     }
 
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
