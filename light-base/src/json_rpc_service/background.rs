@@ -366,6 +366,10 @@ enum StorageRequestInProgress {
         block_hash: [u8; 32],
         in_progress_results: Vec<(methods::HexString, Option<methods::HexString>)>,
     },
+    StateGetReadProof {
+        block_hash: [u8; 32],
+        in_progress_results: Vec<(methods::HexString, Vec<methods::HexString>)>,
+    },
     StateGetStorage,
 }
 
@@ -3451,66 +3455,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::AdvanceMultiStageRequest {
                 request_id_json,
-                stage: MultiStageRequestStage::BlockInfoKnown { block_hash, .. },
-                request_ty: MultiStageRequestTy::StateGetReadProof { keys },
-            } => {
-                // TODO selecting one peer which knows block `blocks_hash` randomly
-                let peer = me.network_service.peers_list().await.next();
-                if peer.is_none() {
-                    let _ = me
-                        .responses_tx
-                        .send(parse::build_error_response(
-                            &request_id_json,
-                            parse::ErrorResponse::ServerError(-32000, "Internal error"),
-                            None,
-                        ))
-                        .await;
-                }
-                let peer = peer.unwrap();
-
-                let proof_result = me
-                    .network_service
-                    .clone()
-                    .storage_proof_request(
-                        peer,
-                        codec::StorageProofRequestConfig {
-                            block_hash,
-                            keys: keys.into_iter(),
-                        },
-                        // TODO where to get this from?
-                        Duration::from_secs(16),
-                    )
-                    .await;
-
-                match proof_result {
-                    Ok(merkle_proof) => {
-                        let _ = me
-                            .responses_tx
-                            .send(
-                                methods::Response::state_getReadProof(methods::ReadProof {
-                                    at: methods::HashHexString(block_hash),
-                                    proof: methods::MerkleProof(merkle_proof.decode().to_owned()),
-                                })
-                                .to_json_response(&request_id_json),
-                            )
-                            .await;
-                    }
-                    Err(error) => {
-                        // All errors are sent back the same way.
-                        let _ = me
-                            .responses_tx
-                            .send(parse::build_error_response(
-                                &request_id_json,
-                                parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                                None,
-                            ))
-                            .await;
-                    }
-                }
-            }
-
-            WakeUpReason::AdvanceMultiStageRequest {
-                request_id_json,
                 stage:
                     MultiStageRequestStage::BlockInfoKnown {
                         block_hash,
@@ -3521,8 +3465,13 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     request_ty @ (MultiStageRequestTy::StateGetKeys { .. }
                     | MultiStageRequestTy::StateGetKeysPaged { .. }
                     | MultiStageRequestTy::StateQueryStorageAt { .. }
-                    | MultiStageRequestTy::StateGetStorage { .. }),
+                    | MultiStageRequestTy::StateGetStorage { .. }
+                    | MultiStageRequestTy::StateGetReadProof { .. }),
             } => {
+                // TODO not sure the best way of working around this.
+                let is_state_get_read_proof =
+                    matches!(request_ty, MultiStageRequestTy::StateGetReadProof { .. });
+
                 // A storage-related JSON-RPC function can make progress.
                 // Build and start a background task that performs the actual storage request.
                 let (request, storage_request) = match request_ty {
@@ -3552,15 +3501,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
-                    MultiStageRequestTy::StateQueryStorageAt { keys } => (
-                        StorageRequestInProgress::StateQueryStorageAt {
-                            block_hash,
-                            in_progress_results: Vec::with_capacity(keys.len()),
+                    MultiStageRequestTy::StateQueryStorageAt { keys }
+                    | MultiStageRequestTy::StateGetReadProof { keys } => (
+                        if is_state_get_read_proof {
+                            StorageRequestInProgress::StateGetReadProof {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
+                        } else {
+                            StorageRequestInProgress::StateQueryStorageAt {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
                         },
                         either::Right(keys.into_iter().map(|key| {
                             sync_service::StorageRequestItem {
                                 key: key.0,
-                                ty: sync_service::StorageRequestItemTy::Value,
+                                ty: if is_state_get_read_proof {
+                                    sync_service::StorageRequestItemTy::Value
+                                } else {
+                                    sync_service::StorageRequestItemTy::MerkleProof
+                                },
                             }
                         })),
                     ),
@@ -3751,6 +3712,57 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                         changes: in_progress_results,
                                     },
                                 ])
+                                .to_json_response(&request_id_json),
+                            )
+                            .await;
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Progress {
+                            item: sync_service::StorageResultItem::MerkleProof { key, proof },
+                            query: next,
+                            ..
+                        },
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            mut in_progress_results,
+                        },
+                    ) => {
+                        // Continue finding keys.
+                        // TODO check whether keys come in sorted
+                        // If they do, then in_progress_results should be just Vec<Vec<HexString>>
+                        in_progress_results.push((
+                            methods::HexString(key),
+                            proof.into_iter().map(methods::HexString).collect(),
+                        ));
+                        me.background_tasks.push(Box::pin(async move {
+                            Event::LegacyApiFunctionStorageRequestProgress {
+                                request_id_json,
+                                request: StorageRequestInProgress::StateGetReadProof {
+                                    block_hash,
+                                    in_progress_results,
+                                },
+                                progress: next.advance().await,
+                            }
+                        }));
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Finished,
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            in_progress_results,
+                        },
+                    ) => {
+                        // Finished.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::state_getReadProof(methods::ReadProof {
+                                    at: methods::HashHexString(block_hash),
+                                    proof: in_progress_results
+                                        .into_iter()
+                                        .map(|(_, v)| v)
+                                        .collect(),
+                                })
                                 .to_json_response(&request_id_json),
                             )
                             .await;

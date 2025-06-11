@@ -540,33 +540,6 @@ define_methods! {
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 }
 
-#[derive(Debug, Clone)]
-pub struct MerkleProof(pub Vec<u8>);
-
-impl serde::Serialize for MerkleProof {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let (_, decoded_proof) = nom::Parser::parse(
-            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-                crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
-                |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
-                },
-            )),
-            &self.0,
-        )
-        .map_err(serde::ser::Error::custom)?;
-
-        decoded_proof
-            .into_iter()
-            .map(|v| HexString(Vec::from(v)))
-            .collect::<Vec<_>>()
-            .serialize(serializer)
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
@@ -1077,7 +1050,7 @@ pub struct SystemHealth {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadProof {
     pub at: HashHexString,
-    pub proof: MerkleProof,
+    pub proof: Vec<Vec<HexString>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
