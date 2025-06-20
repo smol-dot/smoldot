@@ -540,7 +540,7 @@ pub enum StorageResultItem {
         /// associated with that key.
         hash: Option<[u8; 32]>,
     },
-    /// Corresponds to a [`StorageRequestItemTy::Hash`].
+    /// Corresponds to a [`StorageRequestItemTy::MerkleProof`].
     MerkleProof {
         /// Merkle proof of the storage value of the key.
         proof: Vec<Vec<u8>>,
