@@ -4485,7 +4485,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ..
                         } => None,
                         // chainhead_v1 doesn't have merkle proof queries.
-                        sync_service::StorageResultItem::MerkleProof { .. } => None,
+                        sync_service::StorageResultItem::MerkleProof { .. } => unreachable!(),
                     };
 
                     if let Some(item) = item {
