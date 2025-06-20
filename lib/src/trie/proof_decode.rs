@@ -52,20 +52,6 @@ pub struct Config<I> {
     pub proof: I,
 }
 
-pub fn decode_to_raw_entries(proof: &[u8]) -> Result<Vec<&[u8]>, Error> {
-    // TODO: don't use a Vec?
-    let (_, decoded_proof) = nom::Parser::parse(
-        &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-            crate::util::nom_scale_compact_usize,
-            |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
-        )),
-        proof.as_ref(),
-    )
-    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
-
-    Ok(decoded_proof)
-}
-
 /// Verifies whether a proof is correct and returns an object that allows examining its content.
 ///
 /// The proof is then stored within the [`DecodedTrieProof`].
@@ -104,7 +90,17 @@ where
     // takes, it is always cause this function to return an error and is actually likely to make
     // the function actually take less time than if it was a legitimate proof.
     let entries_by_merkle_value = {
-        let decoded_proof = decode_to_raw_entries(config.proof.as_ref())?;
+        // TODO: don't use a Vec?
+        let (_, decoded_proof) = nom::Parser::parse(
+            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+                crate::util::nom_scale_compact_usize,
+                |num_elems| {
+                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
+                },
+            )),
+            config.proof.as_ref(),
+        )
+        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
 
         let entries_by_merkle_value = decoded_proof
             .iter()
@@ -662,6 +658,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             unreachable!()
                         };
 
+                        let node_value = &self.proof.as_ref()[entry.range_in_proof.clone()];
                         let entry = ProofEntry {
                             merkle_value: if let Some((parent_index, parent_nibble)) =
                                 self.entries[entry_index].parent_entry_index
@@ -678,7 +675,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             } else {
                                 trie_root_hash
                             },
-                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                            node_value,
                             partial_key_nibbles: entry_index_decoded.partial_key,
                             unhashed_storage_value: entry
                                 .storage_value_in_proof
@@ -738,6 +735,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                         StorageValue::None
                                     }
                                 },
+                                node_value,
                             },
                         };
 
@@ -840,9 +838,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         };
 
         loop {
-            let Ok(iter_entry_decoded) =
-                trie_node::decode(&proof[self.entries[iter_entry].range_in_proof.clone()])
-            else {
+            let node_value = &proof[self.entries[iter_entry].range_in_proof.clone()];
+            let Ok(iter_entry_decoded) = trie_node::decode(node_value) else {
                 // Proof has been checked to be entirely decodable.
                 unreachable!()
             };
@@ -858,6 +855,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             children: Children {
                                 children: core::array::from_fn(|_| Child::NoChild),
                             },
+                            node_value,
                         });
                     }
                     (None, Some(a)) => {
@@ -871,6 +869,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         return Ok(TrieNodeInfo {
                             storage_value: StorageValue::None,
                             children: Children { children },
+                            node_value,
                         });
                     }
                     (Some(child_num), None) => {
@@ -902,6 +901,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 children: Children {
                                     children: core::array::from_fn(|_| Child::NoChild),
                                 },
+                                node_value,
                             });
                         }
                     }
@@ -961,6 +961,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                     children
                                 },
                             },
+                            node_value,
                         });
                     }
                 }
@@ -1611,6 +1612,8 @@ pub struct TrieNodeInfo<'a, T> {
     pub storage_value: StorageValue<'a>,
     /// Which children the node has.
     pub children: Children<'a, T>,
+    /// Entry in the proof
+    pub node_value: &'a [u8],
 }
 
 // We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
@@ -1619,6 +1622,7 @@ impl<'a, T> Clone for TrieNodeInfo<'a, T> {
         TrieNodeInfo {
             storage_value: self.storage_value,
             children: self.children.clone(),
+            node_value: self.node_value,
         }
     }
 }

@@ -35,7 +35,6 @@ use alloc::{
 use core::{iter, mem, num::NonZero, pin::Pin, time::Duration};
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream};
-use hashbrown::HashSet;
 use rand_chacha::{
     ChaCha20Rng,
     rand_core::{RngCore as _, SeedableRng as _},
@@ -46,6 +45,7 @@ use smoldot::{
     json_rpc::{self, methods, parse},
     libp2p::{PeerId, multiaddr},
     network::codec,
+    trie::minimize_proof::merge_proofs,
 };
 
 /// Configuration for a JSON-RPC service.
@@ -369,7 +369,7 @@ enum StorageRequestInProgress {
     },
     StateGetReadProof {
         block_hash: [u8; 32],
-        in_progress_results: HashSet<Vec<u8>>,
+        in_progress_results: Vec<Vec<u8>>,
     },
     StateGetStorage,
 }
@@ -3506,7 +3506,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         if is_state_get_read_proof {
                             StorageRequestInProgress::StateGetReadProof {
                                 block_hash,
-                                in_progress_results: HashSet::new(),
+                                in_progress_results: Vec::with_capacity(keys.len()),
                             }
                         } else {
                             StorageRequestInProgress::StateQueryStorageAt {
@@ -3727,9 +3727,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             mut in_progress_results,
                         },
                     ) => {
-                        for entry in proof {
-                            in_progress_results.insert(entry);
-                        }
+                        in_progress_results.push(proof);
                         me.background_tasks.push(Box::pin(async move {
                             Event::LegacyApiFunctionStorageRequestProgress {
                                 request_id_json,
@@ -3752,14 +3750,25 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                methods::Response::state_getReadProof(methods::ReadProof {
-                                    at: methods::HashHexString(block_hash),
-                                    proof: in_progress_results
-                                        .into_iter()
-                                        .map(methods::HexString)
-                                        .collect(),
-                                })
-                                .to_json_response(&request_id_json),
+                                if let Ok(merged_proof) = merge_proofs(&in_progress_results) {
+                                    methods::Response::state_getReadProof(methods::ReadProof {
+                                        at: methods::HashHexString(block_hash),
+                                        proof: merged_proof
+                                            .into_iter()
+                                            .map(methods::HexString)
+                                            .collect(),
+                                    })
+                                    .to_json_response(&request_id_json)
+                                } else {
+                                    parse::build_error_response(
+                                        &request_id_json,
+                                        parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            "A proof could not be decoded",
+                                        ),
+                                        None,
+                                    )
+                                },
                             )
                             .await;
                     }

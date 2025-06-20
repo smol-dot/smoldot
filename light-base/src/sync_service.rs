@@ -41,7 +41,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{codec, service},
-    trie::{self, Nibble, prefix_proof, proof_decode},
+    trie::{self, Nibble, minimize_proof::minimize_proof, prefix_proof, proof_decode},
 };
 
 mod parachain;
@@ -543,7 +543,7 @@ pub enum StorageResultItem {
     /// Corresponds to a [`StorageRequestItemTy::MerkleProof`].
     MerkleProof {
         /// Merkle proof of the storage value of the key.
-        proof: Vec<Vec<u8>>,
+        proof: Vec<u8>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
@@ -935,17 +935,17 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             }
                         }
                     }
-                    RequestImpl::MerkleProof { .. } => {
-                        // The proof was decoded successfully, it can't be invalid now
-                        let entries =
-                            proof_decode::decode_to_raw_entries(proof_bytes.as_ref()).unwrap();
-
-                        self.available_results.push_back((
-                            request_index,
-                            StorageResultItem::MerkleProof {
-                                proof: entries.into_iter().map(Vec::from).collect(),
-                            },
-                        ));
+                    RequestImpl::MerkleProof { key } => {
+                        match minimize_proof(&decoded_proof, &self.main_trie_root_hash, &key) {
+                            Ok(proof) => self.available_results.push_back((
+                                request_index,
+                                StorageResultItem::MerkleProof { proof },
+                            )),
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining
+                                    .push((request_index, RequestImpl::MerkleProof { key }));
+                            }
+                        }
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
                         let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
