@@ -6,6 +6,7 @@ use crate::trie::{
     proof_decode::{DecodedTrieProof, StorageValue},
     proof_encode::ProofBuilder,
 };
+use alloc::vec::Vec;
 
 pub enum MinimizeProofError {
     KeyDoesNotMatch,
