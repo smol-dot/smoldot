@@ -941,7 +941,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 request_index,
                                 StorageResultItem::MerkleProof { proof },
                             )),
-                            Err(proof_decode::IncompleteProofError { .. }) => {
+                            Err(_) => {
                                 self.requests_remaining
                                     .push((request_index, RequestImpl::MerkleProof { key }));
                             }
