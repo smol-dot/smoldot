@@ -430,7 +430,7 @@ define_methods! {
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
-    state_getReadProof() -> (), // TODO:
+    state_getReadProof(keys: Vec<HexString>, at: Option<HashHexString>) -> ReadProof,
     state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion<'a> [chain_getRuntimeVersion],
     state_getStorage(key: HexString, hash: Option<HashHexString>) -> HexString [state_getStorageAt],
     state_getStorageHash() -> () [state_getStorageHashAt], // TODO:
@@ -1045,6 +1045,12 @@ pub struct SystemHealth {
     pub is_syncing: bool,
     pub peers: u64,
     pub should_have_peers: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadProof {
+    pub at: HashHexString,
+    pub proof: Vec<HexString>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

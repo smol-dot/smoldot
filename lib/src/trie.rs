@@ -109,6 +109,7 @@ mod nibble;
 
 pub mod branch_search;
 pub mod calculate_root;
+pub mod minimize_proof;
 pub mod prefix_proof;
 pub mod proof_decode;
 pub mod proof_encode;
