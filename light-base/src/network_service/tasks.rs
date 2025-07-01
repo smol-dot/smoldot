@@ -28,7 +28,7 @@ use smoldot::{libp2p::collection::SubstreamFate, network::service};
 
 /// Asynchronous task managing a specific single-stream connection.
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
-    mut connection: TPlat::Stream,
+    connection: TPlat::Stream,
     address_string: String,
     platform: TPlat,
     connection_id: service::ConnectionId,
@@ -229,7 +229,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
-    mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
+    coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<(
         service::ConnectionId,
         service::ConnectionToCoordinator,
