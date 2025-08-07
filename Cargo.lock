@@ -908,12 +908,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "downcast-rs"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
-
-[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2915,9 +2909,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.40.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a19af97fcb96045dd1d6b4d23e2b4abdbbe81723dbc5c9f016eb52145b320063"
+checksum = "8a704ad18ade65785cea66b7cbbed72549fde9681aa278bec6b8f39faa413351"
 dependencies = [
  "arrayvec 0.7.6",
  "multi-stash",
@@ -2926,41 +2920,31 @@ dependencies = [
  "wasmi_collections",
  "wasmi_core",
  "wasmi_ir",
- "wasmparser 0.221.3",
+ "wasmparser 0.228.0",
 ]
 
 [[package]]
 name = "wasmi_collections"
-version = "0.40.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e80d6b275b1c922021939d561574bf376613493ae2b61c6963b15db0e8813562"
+checksum = "3ef7dafbff1535a7b1172fae58d216d111cd046976d1751f20e1f6186e73182f"
 
 [[package]]
 name = "wasmi_core"
-version = "0.40.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a8c51482cc32d31c2c7ff211cd2bedd73c5bd057ba16a2ed0110e7a96097c33"
+checksum = "c4cac2d53aad1e96a32fb1fb3c13402fac004dcf87a3b6bbe510f29debbaee83"
 dependencies = [
- "downcast-rs",
  "libm",
 ]
 
 [[package]]
 name = "wasmi_ir"
-version = "0.40.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e431a14c186db59212a88516788bd68ed51f87aa1e08d1df742522867b5289a"
+checksum = "8697457fb0d3ed002a943a27b07093b27a455558f7942371c969a0540d6a8f7c"
 dependencies = [
  "wasmi_core",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.221.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d06bfa36ab3ac2be0dee563380147a5b81ba10dd8885d7fbbc9eb574be67d185"
-dependencies = [
- "bitflags",
 ]
 
 [[package]]
@@ -2974,6 +2958,15 @@ dependencies = [
  "indexmap",
  "semver",
  "serde",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.228.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4abf1132c1fdf747d56bbc1bb52152400c70f336870f968b85e89ea422198ae3"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]
