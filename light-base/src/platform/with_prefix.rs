@@ -89,11 +89,11 @@ impl<T: PlatformRef> PlatformRef for WithPrefix<T> {
         )
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         self.inner.client_name()
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         self.inner.client_version()
     }
 

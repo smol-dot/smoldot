@@ -5741,8 +5741,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 }
 
 fn convert_runtime_version_legacy(
-    runtime_spec: &smoldot::executor::CoreVersion,
-) -> methods::RuntimeVersion {
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeVersion<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeVersion {
         spec_name: runtime_spec.spec_name.into(),
@@ -5759,7 +5759,9 @@ fn convert_runtime_version_legacy(
     }
 }
 
-fn convert_runtime_version(runtime_spec: &smoldot::executor::CoreVersion) -> methods::RuntimeSpec {
+fn convert_runtime_version(
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeSpec<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeSpec {
         spec_name: runtime_spec.spec_name.into(),

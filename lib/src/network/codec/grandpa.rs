@@ -148,9 +148,9 @@ pub struct PrevoteRef<'a> {
 
 /// Attempt to decode the given SCALE-encoded Grandpa notification.
 pub fn decode_grandpa_notification(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<GrandpaNotificationRef, DecodeGrandpaNotificationError> {
+) -> Result<GrandpaNotificationRef<'_>, DecodeGrandpaNotificationError> {
     match nom::Parser::parse(
         &mut nom::combinator::all_consuming::<_, nom::error::Error<&[u8]>, _>(
             nom::combinator::complete(grandpa_notification(block_number_bytes)),

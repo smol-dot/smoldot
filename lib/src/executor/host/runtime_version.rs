@@ -89,8 +89,8 @@ pub struct EmbeddedRuntimeVersionApis<'a> {
 ///
 /// This function does not attempt to decode the content of the custom sections.
 pub fn find_encoded_embedded_runtime_version_apis(
-    binary_wasm_module: &[u8],
-) -> Result<EmbeddedRuntimeVersionApis, FindEncodedEmbeddedRuntimeVersionApisError> {
+    binary_wasm_module: &'_ [u8],
+) -> Result<EmbeddedRuntimeVersionApis<'_>, FindEncodedEmbeddedRuntimeVersionApisError> {
     let mut parser =
         nom::combinator::all_consuming(nom::combinator::complete(nom::sequence::preceded(
             (
@@ -194,7 +194,7 @@ impl CoreVersion {
         Ok(CoreVersion(input))
     }
 
-    pub fn decode(&self) -> CoreVersionRef {
+    pub fn decode(&'_ self) -> CoreVersionRef<'_> {
         decode(&self.0).unwrap()
     }
 }
@@ -438,7 +438,7 @@ pub struct CoreVersionApi {
     pub version: u32,
 }
 
-fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
+fn decode(scale_encoded: &'_ [u8]) -> Result<CoreVersionRef<'_>, ()> {
     // See https://spec.polkadot.network/#defn-rt-core-version
     let result: nom::IResult<_, _> = nom::Parser::parse(
         &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
@@ -542,7 +542,7 @@ struct WasmSection<'a> {
 }
 
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section(bytes: &[u8]) -> nom::IResult<&[u8], Option<WasmSection>> {
+fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<WasmSection<'_>>> {
     nom::Parser::parse(
         &mut nom::branch::alt((
             nom::combinator::map(

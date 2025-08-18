@@ -250,11 +250,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         }
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_NAME").into()
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_VERSION").into()
     }
 

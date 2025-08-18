@@ -38,7 +38,9 @@ impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
 }
 
 /// Parses a [`Multiaddr`] into an [`Address`] or [`MultiStreamAddress`].
-pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStreamAddress, Error> {
+pub fn multiaddr_to_address(
+    multiaddr: &'_ Multiaddr,
+) -> Result<AddressOrMultiStreamAddress<'_>, Error> {
     let mut iter = multiaddr.iter().fuse();
 
     let proto1 = iter.next().ok_or(Error::UnknownCombination)?;

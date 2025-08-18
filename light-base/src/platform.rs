@@ -168,11 +168,11 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
-    fn client_name(&self) -> Cow<str>;
+    fn client_name(&'_ self) -> Cow<'_, str>;
 
     /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
-    fn client_version(&self) -> Cow<str>;
+    fn client_version(&'_ self) -> Cow<'_, str>;
 
     /// Returns `true` if [`PlatformRef::connect_stream`] or [`PlatformRef::connect_multistream`]
     /// accepts a connection of the corresponding type.

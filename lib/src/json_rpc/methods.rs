@@ -36,8 +36,8 @@ use hashbrown::HashMap;
 /// On success, returns a JSON-encoded identifier for that request that must be passed back when
 /// emitting the response.
 pub fn parse_jsonrpc_client_to_server(
-    message: &str,
-) -> Result<(&str, MethodCall), ParseClientToServerError> {
+    message: &'_ str,
+) -> Result<(&'_ str, MethodCall<'_>), ParseClientToServerError<'_>> {
     let call_def = parse::parse_request(message).map_err(ParseClientToServerError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
@@ -82,7 +82,9 @@ pub enum ParseClientToServerError<'a> {
 }
 
 /// Parses a JSON notification.
-pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
+pub fn parse_notification(
+    message: &'_ str,
+) -> Result<ServerToClient<'_>, ParseNotificationError<'_>> {
     let call_def = parse::parse_request(message).map_err(ParseNotificationError::JsonRpcParse)?;
     let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
         .map_err(ParseNotificationError::Method)?;

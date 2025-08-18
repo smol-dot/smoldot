@@ -259,7 +259,7 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn prune_ancestors(&mut self, node_index: NodeIndex) -> PruneAncestorsIter<T> {
+    pub fn prune_ancestors(&'_ mut self, node_index: NodeIndex) -> PruneAncestorsIter<'_, T> {
         self.prune_ancestors_inner(node_index, false)
     }
 
@@ -274,15 +274,15 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn prune_uncles(&mut self, node_index: NodeIndex) -> PruneAncestorsIter<T> {
+    pub fn prune_uncles(&'_ mut self, node_index: NodeIndex) -> PruneAncestorsIter<'_, T> {
         self.prune_ancestors_inner(node_index, true)
     }
 
     fn prune_ancestors_inner(
-        &mut self,
+        &'_ mut self,
         node_index: NodeIndex,
         uncles_only: bool,
-    ) -> PruneAncestorsIter<T> {
+    ) -> PruneAncestorsIter<'_, T> {
         let iter = self.first_root.unwrap();
 
         // `first_root` is updated ahead of the removal of the nodes. The update strategy is as

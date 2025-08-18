@@ -235,7 +235,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> chain_information::ValidChainInformationRef<'_> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -244,7 +244,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns the current status of the syncing.
-    pub fn status(&self) -> Status<TSrc> {
+    pub fn status(&'_ self) -> Status<'_, TSrc> {
         // TODO:
         Status::Sync
         /*match &self.inner {
@@ -344,13 +344,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns consensus information about the current best block of the chain.
-    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+    pub fn best_block_consensus(&'_ self) -> chain_information::ChainInformationConsensusRef<'_> {
         todo!() // TODO:
     }
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -362,7 +362,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
-    pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_ancestry_order(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -396,10 +398,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// This function call doesn't modify anything but returns an object that allows actually
     /// inserting the source.
     pub fn prepare_add_source(
-        &mut self,
+        &'_ mut self,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> AddSource<TRq, TSrc, TBl> {
+    ) -> AddSource<'_, TRq, TSrc, TBl> {
         match self
             .all_forks
             .as_mut()
@@ -1068,11 +1070,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`SourceId`] is invalid.
     ///
     pub fn block_announce(
-        &mut self,
+        &'_ mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
+    ) -> BlockAnnounceOutcome<'_, TRq, TSrc, TBl> {
         let Some(&SourceMapping {
             all_forks: inner_source_id,
             ..

@@ -127,7 +127,7 @@ pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
 }
 
 /// Attempt to decode the given SCALE-encoded header.
-pub fn decode(scale_encoded: &[u8], block_number_bytes: usize) -> Result<HeaderRef, Error> {
+pub fn decode(scale_encoded: &'_ [u8], block_number_bytes: usize) -> Result<HeaderRef<'_>, Error> {
     let (header, remainder) = decode_partial(scale_encoded, block_number_bytes)?;
     if !remainder.is_empty() {
         return Err(Error::TooLong);
@@ -141,9 +141,9 @@ pub fn decode(scale_encoded: &[u8], block_number_bytes: usize) -> Result<HeaderR
 /// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
 /// remainder.
 pub fn decode_partial(
-    mut scale_encoded: &[u8],
+    mut scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(HeaderRef, &[u8]), Error> {
+) -> Result<(HeaderRef<'_>, &'_ [u8]), Error> {
     if scale_encoded.len() < 32 + 1 {
         return Err(Error::TooShort);
     }
@@ -901,7 +901,7 @@ pub struct Digest {
 
 impl Digest {
     /// Returns an iterator to the log items in this digest.
-    pub fn logs(&self) -> LogsIter {
+    pub fn logs(&'_ self) -> LogsIter<'_> {
         DigestRef::from(self).logs()
     }
 
@@ -916,7 +916,7 @@ impl Digest {
     }
 
     /// Returns the Babe pre-runtime digest item, if any.
-    pub fn babe_pre_runtime(&self) -> Option<BabePreDigestRef> {
+    pub fn babe_pre_runtime(&'_ self) -> Option<BabePreDigestRef<'_>> {
         DigestRef::from(self).babe_pre_runtime()
     }
 
@@ -924,7 +924,9 @@ impl Digest {
     ///
     /// It is guaranteed that a configuration change is present only if an epoch change is
     /// present too.
-    pub fn babe_epoch_information(&self) -> Option<(BabeNextEpochRef, Option<BabeNextConfig>)> {
+    pub fn babe_epoch_information(
+        &'_ self,
+    ) -> Option<(BabeNextEpochRef<'_>, Option<BabeNextConfig>)> {
         DigestRef::from(self).babe_epoch_information()
     }
 
@@ -1334,9 +1336,9 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
 /// Decodes a single digest log item. On success, returns the item and the data that remains
 /// after the item.
 fn decode_item(
-    mut slice: &[u8],
+    mut slice: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(DigestItemRef, &[u8]), Error> {
+) -> Result<(DigestItemRef<'_>, &'_ [u8]), Error> {
     let index = *slice.first().ok_or(Error::TooShort)?;
     slice = &slice[1..];
 
