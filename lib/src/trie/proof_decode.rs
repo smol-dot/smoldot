@@ -744,6 +744,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
     /// If `key` is in the proof, returns `key`.
+    ///
+    /// Returns `None` if the key is completely outside of the trie (i.e. the trie root is not
+    /// an ancestor of the key).
     pub fn closest_ancestor_in_proof<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
