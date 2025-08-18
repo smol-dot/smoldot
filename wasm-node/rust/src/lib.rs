@@ -105,7 +105,7 @@ fn add_chain(
                 let error = "Wasm node is running low on memory and will prevent any new chain from being added";
                 bindings::chain_initialized(
                     outer_chain_id_u32,
-                    u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(error.as_bytes().as_ptr().addr()).unwrap(),
                     u32::try_from(error.as_bytes().len()).unwrap(),
                 );
                 return;
@@ -142,7 +142,7 @@ fn add_chain(
                         let error = error.to_string();
                         bindings::chain_initialized(
                             outer_chain_id_u32,
-                            u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                            u32::try_from(error.as_bytes().as_ptr().addr()).unwrap(),
                             u32::try_from(error.as_bytes().len()).unwrap(),
                         );
                     return;

@@ -603,7 +603,7 @@ pub(crate) fn get_buffer(buffer_index: u32) -> Box<[u8]> {
         let len = usize::try_from(buffer_size(buffer_index)).unwrap();
 
         let mut buffer = Box::<[u8]>::new_uninit_slice(len);
-        buffer_copy(buffer_index, buffer.as_mut_ptr() as usize as u32);
+        buffer_copy(buffer_index, buffer.as_mut_ptr().addr() as u32);
         buffer.assume_init()
     }
 }
