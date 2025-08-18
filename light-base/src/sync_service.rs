@@ -41,7 +41,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{codec, service},
-    trie::{self, Nibble, minimize_proof::minimize_proof, prefix_proof, proof_decode},
+    trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
 };
 
 mod parachain;
@@ -932,7 +932,11 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         }
                     }
                     RequestImpl::MerkleProof { key } => {
-                        match minimize_proof(&decoded_proof, &self.main_trie_root_hash, &key) {
+                        match minimize_proof::minimize_proof(
+                            &decoded_proof,
+                            &self.main_trie_root_hash,
+                            &key,
+                        ) {
                             Ok(proof) => self.available_results.push_back((
                                 request_index,
                                 StorageResultItem::MerkleProof { proof },

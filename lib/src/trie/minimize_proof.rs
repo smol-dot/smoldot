@@ -1,5 +1,22 @@
+// Smoldot
+// Copyright (C) 2025  Pierre Krieger
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 use hashbrown::HashSet;
-use itertools::Itertools;
+use itertools::Itertools as _;
 
 use crate::trie::{
     bytes_to_nibbles,
@@ -8,8 +25,12 @@ use crate::trie::{
 };
 use alloc::vec::Vec;
 
+/// Error potentially returned by [`minimize_proof`].
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 pub enum MinimizeProofError {
-    KeyDoesNotMatch,
+    /// Desired key can't be found in the proof.
+    KeyNotFound,
+    /// Proof doesn't contain enough information and isn't valid.
     IncompleteProof,
 }
 
@@ -30,7 +51,7 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
             bytes_to_nibbles(key.iter().copied()),
         )
         .map_err(|_| MinimizeProofError::IncompleteProof)?
-        .ok_or(MinimizeProofError::KeyDoesNotMatch)?
+        .ok_or(MinimizeProofError::KeyNotFound)?
         .collect_vec();
 
     // Set the node value of the leaf
@@ -44,20 +65,23 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
     builder.set_node_value(&nibbles, node.node_value, storage_value);
 
     // Query a missing node and provide its value. Stop when the proof is complete.
-    let mut maybe_missing = builder.missing_node_values().next().map(|v| Vec::from(v));
-    while let Some(ref missing) = maybe_missing {
+    loop {
+        let Some(missing) = builder.missing_node_values().next().map(|v| Vec::from(v)) else {
+            break;
+        };
         let value = decoded_proof
             .trie_node_info(trie_root_merkle_value, missing.iter().copied())
             .map_err(|_| MinimizeProofError::IncompleteProof)?
             .node_value;
         builder.set_node_value(&missing, value, None);
-        maybe_missing = builder.missing_node_values().next().map(|v| Vec::from(v));
     }
 
     Ok(builder.build_to_vec())
 }
 
-pub struct ParseError {}
+/// Failed to parse one of the input proofs.
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub struct ParseError();
 
 /// Merges multiple proofs into a single one, removing common entries
 pub fn merge_proofs<'a>(proofs: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, ParseError> {
@@ -73,7 +97,7 @@ pub fn merge_proofs<'a>(proofs: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, ParseErro
                 )),
                 proof,
             )
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ParseError {})?;
+            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ParseError())?;
 
             acc.extend(proof_entries);
             Ok(acc)
