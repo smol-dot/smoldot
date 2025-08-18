@@ -45,41 +45,47 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
 ) -> Result<Vec<u8>, MinimizeProofError> {
     let mut builder = ProofBuilder::new();
 
-    let key_nibbles = bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-
-    // Set the node value of the leaf.
-    let ancestor = if let Some(ancestor_key) = decoded_proof
-        .closest_ancestor_in_proof(trie_root_merkle_value, key_nibbles.iter().copied())
-        .map_err(|_| MinimizeProofError::KeyNotFound)?
-    {
-        decoded_proof
-            .proof_entry(trie_root_merkle_value, ancestor_key)
-            .unwrap()
-    } else {
-        // If the key is completely out of the trie, we have to add the root node in the output.
-        decoded_proof
-            .trie_root_proof_entry(trie_root_merkle_value)
-            .ok_or(MinimizeProofError::KeyNotFound)?
-    };
-    builder.set_node_value(
-        &key_nibbles,
-        ancestor.node_value,
-        match ancestor.trie_node_info.storage_value {
-            StorageValue::Known { value, .. } => Some(value),
-            _ => None,
-        },
-    );
+    let mut key_nibbles_if_first_iter =
+        Some(bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>());
 
     // Query a missing node and provide its value. Stop when the proof is complete.
     loop {
-        let Some(missing) = builder.missing_node_values().next().map(|v| Vec::from(v)) else {
+        let Some(missing) = builder
+            .missing_node_values()
+            .next()
+            .map(|v| Vec::from(v))
+            .or_else(|| key_nibbles_if_first_iter.take())
+        else {
             break;
         };
-        let value = decoded_proof
-            .proof_entry(trie_root_merkle_value, missing.iter().copied())
-            .ok_or(MinimizeProofError::IncompleteProof)?
-            .node_value;
-        builder.set_node_value(&missing, value, None);
+
+        if let Some(ancestor_key) = decoded_proof
+            .closest_ancestor_in_proof(trie_root_merkle_value, missing.iter().copied())
+            .map_err(|_| MinimizeProofError::KeyNotFound)?
+        {
+            let ancestor = decoded_proof
+                .proof_entry(trie_root_merkle_value, ancestor_key)
+                .unwrap();
+            builder.set_node_value(
+                &missing,
+                ancestor.node_value,
+                match ancestor.trie_node_info.storage_value {
+                    StorageValue::Known { value, .. } => Some(value),
+                    _ => None,
+                },
+            );
+        } else {
+            // Add the root node in the output.
+            // This should only ever happen if the input key is completely outside of the trie.
+            debug_assert!(itertools::equal(
+                missing.iter().copied(),
+                bytes_to_nibbles(key.iter().copied())
+            ));
+            let root = decoded_proof
+                .trie_root_proof_entry(trie_root_merkle_value)
+                .ok_or(MinimizeProofError::KeyNotFound)?;
+            builder.set_node_value(&missing, root.node_value, None);
+        };
     }
 
     Ok(builder.build_to_vec())
