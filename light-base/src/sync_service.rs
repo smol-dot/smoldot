@@ -932,16 +932,22 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         }
                     }
                     RequestImpl::MerkleProof { key } => {
-                        match minimize_proof::minimize_proof(
-                            &decoded_proof,
+                        match decoded_proof.trie_node_info(
                             &self.main_trie_root_hash,
-                            &key,
+                            trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
-                            Ok(proof) => self.available_results.push_back((
+                            Ok(_) => self.available_results.push_back((
                                 request_index,
-                                StorageResultItem::MerkleProof { proof },
+                                StorageResultItem::MerkleProof {
+                                    proof: minimize_proof::minimize_proof(
+                                        &decoded_proof,
+                                        &self.main_trie_root_hash,
+                                        &key,
+                                    )
+                                    .unwrap(),
+                                },
                             )),
-                            Err(_) => {
+                            Err(proof_decode::IncompleteProofError { .. }) => {
                                 self.requests_remaining
                                     .push((request_index, RequestImpl::MerkleProof { key }));
                             }
