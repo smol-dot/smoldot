@@ -747,6 +747,31 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         }
     }
 
+    /// Returns the [`ProofEntry`] of the given key.
+    ///
+    /// Returns `None` if the key doesn't have any entry in the proof.
+    ///
+    /// > **Note**: In situations where the key isn't in the proof but the proof contains enough
+    /// >           information about the trie in order to infer some information about that key,
+    /// >           the [`DecodedTrieProof::trie_node_info`] function will be successful whereas
+    /// >           the [`DecodedTrieProof::proof_entry`] function will fail.
+    pub fn proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &'a [u8; 32],
+        key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Option<ProofEntry<'a, T>> {
+        let (entry_index, exact_match) = self
+            .closest_ancestor_in_proof_entry(trie_root_merkle_value, key)
+            .ok()
+            .flatten()?;
+
+        if !exact_match {
+            return None;
+        }
+
+        Some(self.build_proof_entry(trie_root_merkle_value, entry_index))
+    }
+
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
     /// If `key` is in the proof, returns `key`.
     ///
@@ -759,16 +784,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ) -> Result<Option<EntryKeyIter<'a, T>>, IncompleteProofError> {
         Ok(self
             .closest_ancestor_in_proof_entry(trie_root_merkle_value, key)?
-            .map(|idx| EntryKeyIter::new(self, idx)))
+            .map(|(idx, _)| EntryKeyIter::new(self, idx)))
     }
 
     /// Same as [`DecodedTrieProof::closest_ancestor_in_proof`], but returns the entry index
     /// instead of its key.
+    ///
+    /// In addition to the entry index, also returns whether there was an exact match.
     fn closest_ancestor_in_proof_entry<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
-    ) -> Result<Option<usize>, IncompleteProofError> {
+    ) -> Result<Option<(usize, bool)>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // If the proof doesn't contain any entry for the requested trie, then we have no
@@ -797,7 +824,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             // Key is completely outside of the trie.
                             return Ok(None);
                         };
-                        return Ok(Some(parent_entry));
+                        return Ok(Some((parent_entry, false)));
                     }
                     (Some(child_num), None) => {
                         if let Some(_) = iter_entry_decoded.children[usize::from(child_num)] {
@@ -820,13 +847,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             iter_entry += 1;
                         } else {
                             // Key points to non-existing child. Closest ancestor is `iter_entry`.
-                            return Ok(Some(iter_entry));
+                            return Ok(Some((iter_entry, false)));
                         }
                         break;
                     }
                     (None, None) => {
                         // Exact match. Closest ancestor is `iter_entry`.
-                        return Ok(Some(iter_entry));
+                        return Ok(Some((iter_entry, true)));
                     }
                 }
             }
