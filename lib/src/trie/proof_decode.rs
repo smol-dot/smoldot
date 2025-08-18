@@ -758,6 +758,19 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         }
     }
 
+    /// Returns the [`ProofEntry`] of the proof entry whose Merkle value is given as parameter.
+    ///
+    /// The returned [`ProofEntry`] is guaranteed to have no parent.
+    ///
+    /// Returns `None` if the proof doesn't contain any sub-trie with the given Merkle value.
+    pub fn trie_root_proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &'a [u8; 32],
+    ) -> Option<ProofEntry<'a, T>> {
+        let entry_index = *self.trie_roots.get(trie_root_merkle_value)?;
+        Some(self.build_proof_entry(trie_root_merkle_value, entry_index))
+    }
+
     /// Returns the [`ProofEntry`] of the given key.
     ///
     /// Returns `None` if the key doesn't have any entry in the proof.

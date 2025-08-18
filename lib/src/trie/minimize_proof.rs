@@ -34,10 +34,10 @@ pub enum MinimizeProofError {
     IncompleteProof,
 }
 
-/// Minimizes a single-key proof, removing all entries that are not related to
-/// the proof for that key.
+/// Minimizes a single-key proof, removing all entries that are not related to the proof for
+/// that key.
 ///
-/// Returns the resulting proof encoded
+/// Returns the resulting proof, encoded.
 pub fn minimize_proof<T: AsRef<[u8]>>(
     decoded_proof: &DecodedTrieProof<T>,
     trie_root_merkle_value: &[u8; 32],
@@ -48,14 +48,27 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
     let key_nibbles = bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
 
     // Set the node value of the leaf.
-    let node = decoded_proof
-        .proof_entry(trie_root_merkle_value, key_nibbles.iter().copied())
-        .ok_or(MinimizeProofError::KeyNotFound)?;
-    let storage_value = match node.trie_node_info.storage_value {
-        StorageValue::Known { value, .. } => Some(value),
-        _ => None,
+    let ancestor = if let Some(ancestor_key) = decoded_proof
+        .closest_ancestor_in_proof(trie_root_merkle_value, key_nibbles.iter().copied())
+        .map_err(|_| MinimizeProofError::KeyNotFound)?
+    {
+        decoded_proof
+            .proof_entry(trie_root_merkle_value, ancestor_key)
+            .unwrap()
+    } else {
+        // If the key is completely out of the trie, we have to add the root node in the output.
+        decoded_proof
+            .trie_root_proof_entry(trie_root_merkle_value)
+            .ok_or(MinimizeProofError::KeyNotFound)?
     };
-    builder.set_node_value(&key_nibbles, node.node_value, storage_value);
+    builder.set_node_value(
+        &key_nibbles,
+        ancestor.node_value,
+        match ancestor.trie_node_info.storage_value {
+            StorageValue::Known { value, .. } => Some(value),
+            _ => None,
+        },
+    );
 
     // Query a missing node and provide its value. Stop when the proof is complete.
     loop {
