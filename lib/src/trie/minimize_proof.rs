@@ -15,15 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use hashbrown::HashSet;
-use itertools::Itertools as _;
-
 use crate::trie::{
     bytes_to_nibbles,
     proof_decode::{DecodedTrieProof, StorageValue},
     proof_encode::ProofBuilder,
 };
 use alloc::vec::Vec;
+use hashbrown::HashSet;
 
 /// Error potentially returned by [`minimize_proof`].
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -45,24 +43,17 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
 ) -> Result<Vec<u8>, MinimizeProofError> {
     let mut builder = ProofBuilder::new();
 
-    let nibbles = decoded_proof
-        .closest_ancestor_in_proof(
-            trie_root_merkle_value,
-            bytes_to_nibbles(key.iter().copied()),
-        )
-        .map_err(|_| MinimizeProofError::IncompleteProof)?
-        .ok_or(MinimizeProofError::KeyNotFound)?
-        .collect_vec();
+    let key_nibbles = bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
 
-    // Set the node value of the leaf
+    // Set the node value of the leaf.
     let node = decoded_proof
-        .trie_node_info(trie_root_merkle_value, nibbles.iter().cloned())
-        .map_err(|_| MinimizeProofError::IncompleteProof)?;
-    let storage_value = match node.storage_value {
+        .proof_entry(trie_root_merkle_value, key_nibbles.iter().copied())
+        .ok_or(MinimizeProofError::KeyNotFound)?;
+    let storage_value = match node.trie_node_info.storage_value {
         StorageValue::Known { value, .. } => Some(value),
         _ => None,
     };
-    builder.set_node_value(&nibbles, node.node_value, storage_value);
+    builder.set_node_value(&key_nibbles, node.node_value, storage_value);
 
     // Query a missing node and provide its value. Stop when the proof is complete.
     loop {
@@ -70,8 +61,8 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
             break;
         };
         let value = decoded_proof
-            .trie_node_info(trie_root_merkle_value, missing.iter().copied())
-            .map_err(|_| MinimizeProofError::IncompleteProof)?
+            .proof_entry(trie_root_merkle_value, missing.iter().copied())
+            .ok_or(MinimizeProofError::IncompleteProof)?
             .node_value;
         builder.set_node_value(&missing, value, None);
     }
