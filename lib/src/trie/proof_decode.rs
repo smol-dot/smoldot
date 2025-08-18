@@ -653,6 +653,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     }
 
     /// Returns the [`ProofEntry`] of the given proof entry.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `entry_index` is out of range.
+    ///
     fn build_proof_entry<'a>(
         &'a self,
         trie_root_hash: &'a [u8; 32],
@@ -750,8 +755,20 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn closest_ancestor_in_proof<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
-        mut key: impl Iterator<Item = nibble::Nibble>,
+        key: impl Iterator<Item = nibble::Nibble>,
     ) -> Result<Option<EntryKeyIter<'a, T>>, IncompleteProofError> {
+        Ok(self
+            .closest_ancestor_in_proof_entry(trie_root_merkle_value, key)?
+            .map(|idx| EntryKeyIter::new(self, idx)))
+    }
+
+    /// Same as [`DecodedTrieProof::closest_ancestor_in_proof`], but returns the entry index
+    /// instead of its key.
+    fn closest_ancestor_in_proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &[u8; 32],
+        mut key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Result<Option<usize>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // If the proof doesn't contain any entry for the requested trie, then we have no
@@ -780,7 +797,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             // Key is completely outside of the trie.
                             return Ok(None);
                         };
-                        return Ok(Some(EntryKeyIter::new(self, parent_entry)));
+                        return Ok(Some(parent_entry));
                     }
                     (Some(child_num), None) => {
                         if let Some(_) = iter_entry_decoded.children[usize::from(child_num)] {
@@ -803,13 +820,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             iter_entry += 1;
                         } else {
                             // Key points to non-existing child. Closest ancestor is `iter_entry`.
-                            return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                            return Ok(Some(iter_entry));
                         }
                         break;
                     }
                     (None, None) => {
                         // Exact match. Closest ancestor is `iter_entry`.
-                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                        return Ok(Some(iter_entry));
                     }
                 }
             }
