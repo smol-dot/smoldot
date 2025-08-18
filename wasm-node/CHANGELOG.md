@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `state_getReadProof` legacy JSON-RPC function is now properly implemented. ([#2136](https://github.com/smol-dot/smoldot/pull/2136))
+
 ## 2.0.36 - 2025-06-06
 
 ### Fixed
