@@ -611,10 +611,10 @@ where
     /// > **Note**: This function is a shortcut for calling
     /// >           [`BasicPeeringStrategy::unassign_slot_and_ban`] for all existing chains.
     pub fn unassign_slots_and_ban(
-        &mut self,
+        &'_ mut self,
         peer_id: &PeerId,
         when_unban: TInstant,
-    ) -> UnassignSlotsAndBanIter<TChainId, TInstant> {
+    ) -> UnassignSlotsAndBanIter<'_, TChainId, TInstant> {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             return UnassignSlotsAndBanIter {
                 chains: &self.chains,

@@ -252,8 +252,8 @@ impl StorageChanges {
     /// Returns `Some` if and only if [`Config::calculate_trie_changes`] was `true` or if the
     /// [`StorageChanges`] was created using [`StorageChanges::empty`].
     pub fn trie_changes_iter_ordered(
-        &self,
-    ) -> Option<impl Iterator<Item = (Option<&[u8]>, &[Nibble], TrieChange)>> {
+        &'_ self,
+    ) -> Option<impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)>> {
         if !self.calculate_trie_changes {
             return None;
         }
@@ -1268,7 +1268,7 @@ pub struct LogEmit {
 
 impl LogEmit {
     /// Returns the data that the runtime would like to print.
-    pub fn info(&self) -> LogEmitInfo {
+    pub fn info(&'_ self) -> LogEmitInfo<'_> {
         match &self.inner.vm {
             host::HostVm::LogEmit(req) => req.info(),
             // We only create a `LogEmit` if the inner state is `LogEmit`.

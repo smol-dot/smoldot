@@ -198,11 +198,11 @@ impl PlatformRef for Arc<DefaultPlatform> {
         )
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         Cow::Borrowed(&self.client_name)
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         Cow::Borrowed(&self.client_version)
     }
 

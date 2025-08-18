@@ -108,9 +108,9 @@ where
     /// > **Note**: The parameter requires `Self` to be pinned for consistency with
     /// >           [`WithBuffers::wait_read_write_again`].
     pub fn read_write_access(
-        self: Pin<&mut Self>,
+        self: Pin<&'_ mut Self>,
         now: TNow,
-    ) -> Result<ReadWriteAccess<TNow>, &io::Error> {
+    ) -> Result<ReadWriteAccess<'_, TNow>, &'_ io::Error> {
         let this = self.project();
 
         debug_assert!(

@@ -61,7 +61,7 @@ impl From<ValidChainInformation> for ChainInformation {
 
 impl ValidChainInformation {
     /// Gives access to the information.
-    pub fn as_ref(&self) -> ChainInformationRef {
+    pub fn as_ref(&'_ self) -> ChainInformationRef<'_> {
         From::from(&self.inner)
     }
 }

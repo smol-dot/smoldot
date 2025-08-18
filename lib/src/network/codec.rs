@@ -175,7 +175,7 @@ pub fn encode_protocol_name_string(protocol: ProtocolName) -> String {
 /// Decodes a protocol name into its components.
 ///
 /// Returns an error if the protocol name isn't recognized.
-pub fn decode_protocol_name(name: &str) -> Result<ProtocolName, ()> {
+pub fn decode_protocol_name(name: &'_ str) -> Result<ProtocolName<'_>, ()> {
     nom::Parser::parse(
         &mut nom::combinator::all_consuming(nom::branch::alt((
             nom::combinator::map(nom::bytes::complete::tag("/ipfs/id/1.0.0"), |_| {
@@ -264,8 +264,8 @@ fn protocol_ty(name: &str) -> nom::IResult<&str, ProtocolTy> {
 fn protocol_ty_to_real_protocol(
     ty: ProtocolTy,
     genesis_hash: [u8; 32],
-    fork_id: Option<&str>,
-) -> ProtocolName {
+    fork_id: Option<&'_ str>,
+) -> ProtocolName<'_> {
     match ty {
         ProtocolTy::BlockAnnounces => ProtocolName::BlockAnnounces {
             genesis_hash,

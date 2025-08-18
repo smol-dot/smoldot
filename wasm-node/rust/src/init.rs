@@ -128,7 +128,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     unsafe {
         bindings::panic(
-            u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+            u32::try_from(message.as_bytes().as_ptr().addr()).unwrap(),
             u32::try_from(message.as_bytes().len()).unwrap(),
         );
 

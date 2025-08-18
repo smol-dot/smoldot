@@ -249,7 +249,7 @@ impl ChainSpec {
     ///
     /// Bootnode addresses that have failed to be parsed are returned as well in the form of
     /// a [`Bootnode::UnrecognizedFormat`].
-    pub fn boot_nodes(&self) -> impl ExactSizeIterator<Item = Bootnode> {
+    pub fn boot_nodes(&'_ self) -> impl ExactSizeIterator<Item = Bootnode<'_>> {
         // Note that we intentionally don't expose types found in the `libp2p` module in order to
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {
@@ -311,7 +311,7 @@ impl ChainSpec {
     }
 
     /// Gives access to what is known about the storage of the genesis block of the chain.
-    pub fn genesis_storage(&self) -> GenesisStorage {
+    pub fn genesis_storage(&'_ self) -> GenesisStorage<'_> {
         match &self.client_spec.genesis {
             structs::Genesis::Raw(raw) => GenesisStorage::Items(GenesisStorageItems { raw }),
             structs::Genesis::StateRootHash(hash) => GenesisStorage::TrieRootHash(&hash.0),

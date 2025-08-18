@@ -712,16 +712,28 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
                 // New JSON-RPC request pulled from the channel.
-                let Ok((request_id_json, request_parsed)) =
-                    methods::parse_jsonrpc_client_to_server(&request_json)
-                else {
-                    // Request has failed to parse. Immediately return an answer.
-                    let _ = me
-                        .responses_tx
-                        .send(parse::build_parse_error_response())
-                        .await;
-                    continue;
-                };
+                let (request_id_json, request_parsed) =
+                    match methods::parse_jsonrpc_client_to_server(&request_json) {
+                        Ok(r) => r,
+                        Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
+                            // Request has failed to parse. Immediately return an answer.
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_parse_error_response())
+                                .await;
+                            continue;
+                        }
+                        Err(methods::ParseClientToServerError::Method { request_id, error }) => {
+                            // Invalid method or parameters. Immediately return an answer.
+                            let _ = me.responses_tx.send(error.to_json_error(request_id)).await;
+                            continue;
+                        }
+                        Err(methods::ParseClientToServerError::UnknownNotification { .. }) => {
+                            // Invalid notification-style request. As per spec, we simply
+                            // ignore them.
+                            continue;
+                        }
+                    };
 
                 // Print a warning for legacy JSON-RPC API functions.
                 match request_parsed {
@@ -5825,8 +5837,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
 }
 
 fn convert_runtime_version_legacy(
-    runtime_spec: &smoldot::executor::CoreVersion,
-) -> methods::RuntimeVersion {
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeVersion<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeVersion {
         spec_name: runtime_spec.spec_name.into(),
@@ -5843,7 +5855,9 @@ fn convert_runtime_version_legacy(
     }
 }
 
-fn convert_runtime_version(runtime_spec: &smoldot::executor::CoreVersion) -> methods::RuntimeSpec {
+fn convert_runtime_version(
+    runtime_spec: &'_ smoldot::executor::CoreVersion,
+) -> methods::RuntimeSpec<'_> {
     let runtime_spec = runtime_spec.decode();
     methods::RuntimeSpec {
         spec_name: runtime_spec.spec_name.into(),

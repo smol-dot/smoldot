@@ -20,7 +20,7 @@
 use alloc::{borrow::Cow, string::String};
 
 /// Parses a JSON-encoded RPC method call or notification.
-pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
+pub fn parse_request(request_json: &'_ str) -> Result<Request<'_>, ParseError> {
     let serde_request: SerdeRequest = serde_json::from_str(request_json).map_err(ParseError)?;
 
     if let Some(id) = &serde_request.id {
@@ -47,7 +47,7 @@ pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
 }
 
 /// Parses a JSON-encoded RPC response.
-pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
+pub fn parse_response(response_json: &'_ str) -> Result<Response<'_>, ParseError> {
     let error = match serde_json::from_str::<SerdeSuccess>(response_json) {
         Err(err) => err,
         Ok(SerdeSuccess {

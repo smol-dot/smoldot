@@ -997,7 +997,7 @@ impl RequestProcess {
     ///
     /// The request is guaranteed to not be related to subscriptions in any way.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
-    pub fn request(&self) -> methods::MethodCall {
+    pub fn request(&'_ self) -> methods::MethodCall<'_> {
         methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .1
@@ -1124,7 +1124,7 @@ impl SubscriptionStartProcess {
     ///
     /// The request is guaranteed to be a request that starts a subscription.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
-    pub fn request(&self) -> methods::MethodCall {
+    pub fn request(&'_ self) -> methods::MethodCall<'_> {
         methods::parse_jsonrpc_client_to_server(&self.request)
             .unwrap()
             .1

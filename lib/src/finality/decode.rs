@@ -22,9 +22,9 @@ use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
 pub fn decode_grandpa_justification(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<GrandpaJustificationRef, JustificationDecodeError> {
+) -> Result<GrandpaJustificationRef<'_>, JustificationDecodeError> {
     match nom::Parser::parse(
         &mut nom::combinator::complete(nom::combinator::all_consuming::<
             _,
@@ -46,9 +46,9 @@ pub fn decode_grandpa_justification(
 /// Contrary to [`decode_grandpa_justification`], doesn't return an error if the slice is too long
 /// but returns the remainder.
 pub fn decode_partial_grandpa_justification(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(GrandpaJustificationRef, &[u8]), JustificationDecodeError> {
+) -> Result<(GrandpaJustificationRef<'_>, &'_ [u8]), JustificationDecodeError> {
     match nom::Parser::parse(
         &mut nom::combinator::complete(grandpa_justification::<nom::error::Error<&[u8]>>(
             block_number_bytes,
@@ -87,9 +87,9 @@ pub struct GrandpaJustification {
 
 /// Attempt to decode the given SCALE-encoded Grandpa commit.
 pub fn decode_grandpa_commit(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<CommitMessageRef, CommitDecodeError> {
+) -> Result<CommitMessageRef<'_>, CommitDecodeError<'_>> {
     match nom::Parser::parse(
         &mut nom::combinator::all_consuming(commit_message(block_number_bytes)),
         scale_encoded,
@@ -104,9 +104,9 @@ pub fn decode_grandpa_commit(
 /// Contrary to [`decode_grandpa_commit`], doesn't return an error if the slice is too long, but
 /// returns the remainder.
 pub fn decode_partial_grandpa_commit(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<(CommitMessageRef, &[u8]), CommitDecodeError> {
+) -> Result<(CommitMessageRef<'_>, &'_ [u8]), CommitDecodeError<'_>> {
     match nom::Parser::parse(&mut commit_message(block_number_bytes), scale_encoded) {
         Ok((remainder, commit)) => Ok((commit, remainder)),
         Err(err) => Err(CommitDecodeError(err)),
@@ -289,9 +289,9 @@ impl PrecommitRef<'_> {
     ///
     /// Returns the rest of the data alongside with the decoded struct.
     pub fn decode_partial(
-        scale_encoded: &[u8],
+        scale_encoded: &'_ [u8],
         block_number_bytes: usize,
-    ) -> Result<(PrecommitRef, &[u8]), JustificationDecodeError> {
+    ) -> Result<(PrecommitRef<'_>, &'_ [u8]), JustificationDecodeError> {
         match nom::Parser::parse(
             &mut precommit::<nom::error::Error<&[u8]>>(block_number_bytes),
             scale_encoded,

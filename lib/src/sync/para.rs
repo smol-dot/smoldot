@@ -74,9 +74,9 @@ impl OccupiedCoreAssumption {
 /// Attempt to decode the return value of the `ParachainHost_persisted_validation_data` runtime
 /// call.
 pub fn decode_persisted_validation_data_return_value(
-    scale_encoded: &[u8],
+    scale_encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<Option<PersistedValidationDataRef>, Error> {
+) -> Result<Option<PersistedValidationDataRef<'_>>, Error> {
     let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::Parser::parse(
         &mut nom::combinator::all_consuming(crate::util::nom_option_decode(
             persisted_validation_data(block_number_bytes),

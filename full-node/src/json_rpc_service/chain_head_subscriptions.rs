@@ -305,7 +305,7 @@ pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     return_value
 }
 
-fn convert_runtime_spec(runtime: &executor::CoreVersion) -> methods::MaybeRuntimeSpec {
+fn convert_runtime_spec(runtime: &'_ executor::CoreVersion) -> methods::MaybeRuntimeSpec<'_> {
     let runtime = runtime.decode();
     methods::MaybeRuntimeSpec::Valid {
         spec: methods::RuntimeSpec {

@@ -600,8 +600,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: ordering between trie roots unspecified
     // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
-        &self,
-    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue)> {
+        &'_ self,
+    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> {
         self.iter_ordered().filter_map(
             |(
                 EntryKey {

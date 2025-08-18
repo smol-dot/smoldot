@@ -123,10 +123,6 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     pub para_id: u32,
 }
 
-/// Identifier for a blocks request to be performed.
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct BlocksRequestId(usize);
-
 pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
     to_background: async_channel::Sender<ToBackground>,

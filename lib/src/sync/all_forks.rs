@@ -441,7 +441,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> chain_information::ValidChainInformationRef<'_> {
         self.chain.as_chain_information()
     }
 
@@ -486,7 +486,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_unordered()
     }
 
@@ -494,7 +494,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
-    pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn non_finalized_blocks_ancestry_order(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.chain.iter_ancestry_order()
     }
 
@@ -504,10 +506,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// block referenced by `best_block_number` and `best_block_hash`. It returns an enum that
     /// allows performing the actual insertion.
     pub fn prepare_add_source(
-        &mut self,
+        &'_ mut self,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> AddSource<TBl, TRq, TSrc> {
+    ) -> AddSource<'_, TBl, TRq, TSrc> {
         if best_block_number <= self.chain.finalized_block_height() {
             return AddSource::OldBestBlock(AddSourceOldBlock {
                 inner: self,
@@ -768,9 +770,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     pub fn finish_request(
-        &mut self,
+        &'_ mut self,
         request_id: RequestId,
-    ) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
+    ) -> (TRq, FinishRequest<'_, TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -807,11 +809,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Panics if `source_id` is invalid.
     ///
     pub fn block_announce(
-        &mut self,
+        &'_ mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome<TBl, TRq, TSrc> {
+    ) -> BlockAnnounceOutcome<'_, TBl, TRq, TSrc> {
         let announced_header = match header::decode(
             &announced_scale_encoded_header,
             self.chain.block_number_bytes(),

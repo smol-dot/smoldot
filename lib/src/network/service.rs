@@ -4558,7 +4558,7 @@ pub struct EncodedBlockAnnounce {
 
 impl EncodedBlockAnnounce {
     /// Returns the decoded version of the announcement.
-    pub fn decode(&self) -> codec::BlockAnnounceRef {
+    pub fn decode(&'_ self) -> codec::BlockAnnounceRef<'_> {
         codec::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
     }
 }
@@ -4602,7 +4602,7 @@ impl EncodedGrandpaWarpSyncResponse {
     }
 
     /// Returns the decoded version of the warp sync message.
-    pub fn decode(&self) -> codec::GrandpaWarpSyncResponse {
+    pub fn decode(&'_ self) -> codec::GrandpaWarpSyncResponse<'_> {
         match codec::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
             Ok(msg) => msg,
             _ => unreachable!(),
@@ -4656,7 +4656,7 @@ pub struct EncodedBlockAnnounceHandshake {
 
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
-    pub fn decode(&self) -> codec::BlockAnnouncesHandshakeRef {
+    pub fn decode(&'_ self) -> codec::BlockAnnouncesHandshakeRef<'_> {
         codec::decode_block_announces_handshake(self.block_number_bytes, &self.handshake).unwrap()
     }
 }
@@ -4707,7 +4707,7 @@ impl EncodedGrandpaCommitMessage {
     }
 
     /// Returns the decoded version of the commit message.
-    pub fn decode(&self) -> codec::CommitMessageRef {
+    pub fn decode(&'_ self) -> codec::CommitMessageRef<'_> {
         match codec::decode_grandpa_notification(&self.message, self.block_number_bytes) {
             Ok(codec::GrandpaNotificationRef::Commit(msg)) => msg,
             _ => unreachable!(),

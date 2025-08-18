@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.36 - 2025-06-06
+
+### Fixed
+
+- A "parse error" JSON-RPC response is no longer erroneously sent back in case of an unrecognized JSON-RPC function name or wrong parameter types. ([#2138](https://github.com/smol-dot/smoldot/pull/2138))
+
 ## 2.0.35 - 2025-05-27
 
 ### Changed

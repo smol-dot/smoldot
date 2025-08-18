@@ -103,9 +103,9 @@ pub fn encode_block_announce(announce: BlockAnnounceRef) -> impl Iterator<Item =
 
 /// Decodes a block announcement.
 pub fn decode_block_announce(
-    bytes: &[u8],
+    bytes: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
+) -> Result<BlockAnnounceRef<'_>, DecodeBlockAnnounceError> {
     let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
         &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             (
@@ -169,8 +169,8 @@ pub fn encode_block_announces_handshake(
 /// Decodes a SCALE-encoded block announces handshake.
 pub fn decode_block_announces_handshake(
     expected_block_number_bytes: usize,
-    handshake: &[u8],
-) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
+    handshake: &'_ [u8],
+) -> Result<BlockAnnouncesHandshakeRef<'_>, BlockAnnouncesHandshakeDecodeError> {
     let result: Result<_, nom::error::Error<_>> = nom::Parser::parse(
         &mut nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             (

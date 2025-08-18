@@ -194,7 +194,7 @@ impl<TUd> TrieStructure<TUd> {
     /// assert!(trie.root_node().is_some());
     /// assert!(trie.root_node().unwrap().parent().is_none());
     /// ```
-    pub fn root_node(&mut self) -> Option<NodeAccess<TUd>> {
+    pub fn root_node(&'_ mut self) -> Option<NodeAccess<'_, TUd>> {
         Some(self.node_by_index_inner(self.root_index?).unwrap())
     }
 
@@ -258,7 +258,7 @@ impl<TUd> TrieStructure<TUd> {
     ///     _ => unreachable!(),
     /// };
     /// ```
-    pub fn node<TKIter>(&mut self, key: TKIter) -> Entry<TUd, TKIter>
+    pub fn node<TKIter>(&'_ mut self, key: TKIter) -> Entry<'_, TUd, TKIter>
     where
         TKIter: Iterator<Item = Nibble> + Clone,
     {
@@ -312,9 +312,9 @@ impl<TUd> TrieStructure<TUd> {
     /// This method is a shortcut for calling [`TrieStructure::node`] followed with
     /// [`Entry::into_occupied`].
     pub fn existing_node(
-        &mut self,
+        &'_ mut self,
         key: impl Iterator<Item = Nibble> + Clone,
-    ) -> Option<NodeAccess<TUd>> {
+    ) -> Option<NodeAccess<'_, TUd>> {
         if let ExistingNodeInnerResult::Found {
             node_index,
             has_storage_value,
@@ -393,9 +393,9 @@ impl<TUd> TrieStructure<TUd> {
     /// Returns the closest ancestors to the nodes that have been removed, or `None` if that
     /// closest ancestor is not a descendant of the new trie root.
     pub fn remove_prefix(
-        &mut self,
+        &'_ mut self,
         prefix: impl Iterator<Item = Nibble> + Clone,
-    ) -> Option<NodeAccess<TUd>> {
+    ) -> Option<NodeAccess<'_, TUd>> {
         // `ancestor` is the node that doesn't have the prefix but is the common ancestor of all
         // the nodes to remove.
         let (ancestor_index, ancestor_child_nibble) = match self.existing_node_inner(prefix.clone())
@@ -1026,12 +1026,12 @@ impl<TUd> TrieStructure<TUd> {
     /// let mut node = trie.node_by_index(node_index).unwrap();
     /// assert_eq!(*node.user_data(), 12);
     /// ```
-    pub fn node_by_index(&mut self, node_index: NodeIndex) -> Option<NodeAccess<TUd>> {
+    pub fn node_by_index(&'_ mut self, node_index: NodeIndex) -> Option<NodeAccess<'_, TUd>> {
         self.node_by_index_inner(node_index.0)
     }
 
     /// Internal function. Returns the [`NodeAccess`] of the node at the given index.
-    fn node_by_index_inner(&mut self, node_index: usize) -> Option<NodeAccess<TUd>> {
+    fn node_by_index_inner(&'_ mut self, node_index: usize) -> Option<NodeAccess<'_, TUd>> {
         if self.nodes.get(node_index)?.has_storage_value {
             Some(NodeAccess::Storage(StorageNodeAccess {
                 trie: self,
@@ -1247,7 +1247,7 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
     }
 
     /// Returns the parent of this node, or `None` if this is the root node.
-    pub fn parent(&mut self) -> Option<NodeAccess<TUd>> {
+    pub fn parent(&'_ mut self) -> Option<NodeAccess<'_, TUd>> {
         match self {
             NodeAccess::Storage(n) => n.parent(),
             NodeAccess::Branch(n) => n.parent(),
@@ -1268,7 +1268,7 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
     }
 
     /// Returns the child of this node at the given index.
-    pub fn child(&mut self, index: Nibble) -> Option<NodeAccess<TUd>> {
+    pub fn child(&'_ mut self, index: Nibble) -> Option<NodeAccess<'_, TUd>> {
         match self {
             NodeAccess::Storage(n) => n.child(index),
             NodeAccess::Branch(n) => n.child(index),
@@ -1376,7 +1376,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
     }
 
     /// Returns the parent of this node, or `None` if this is the root node.
-    pub fn parent(&mut self) -> Option<NodeAccess<TUd>> {
+    pub fn parent(&'_ mut self) -> Option<NodeAccess<'_, TUd>> {
         let parent_idx = self.trie.nodes.get(self.node_index).unwrap().parent?.0;
         Some(self.trie.node_by_index_inner(parent_idx).unwrap())
     }
@@ -1415,7 +1415,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
     }
 
     /// Returns the child of this node at the given index.
-    pub fn child(&mut self, index: Nibble) -> Option<NodeAccess<TUd>> {
+    pub fn child(&'_ mut self, index: Nibble) -> Option<NodeAccess<'_, TUd>> {
         let child_idx =
             self.trie.nodes.get(self.node_index).unwrap().children[usize::from(u8::from(index))]?;
         Some(self.trie.node_by_index_inner(child_idx).unwrap())
@@ -1751,7 +1751,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
     }
 
     /// Returns the parent of this node, or `None` if this is the root node.
-    pub fn parent(&mut self) -> Option<NodeAccess<TUd>> {
+    pub fn parent(&'_ mut self) -> Option<NodeAccess<'_, TUd>> {
         let parent_idx = self.trie.nodes.get(self.node_index).unwrap().parent?.0;
         Some(self.trie.node_by_index_inner(parent_idx).unwrap())
     }
@@ -1790,7 +1790,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
     }
 
     /// Returns the child of this node at the given index.
-    pub fn child(&mut self, index: Nibble) -> Option<NodeAccess<TUd>> {
+    pub fn child(&'_ mut self, index: Nibble) -> Option<NodeAccess<'_, TUd>> {
         let child_idx =
             self.trie.nodes.get(self.node_index).unwrap().children[usize::from(u8::from(index))]?;
         Some(self.trie.node_by_index_inner(child_idx).unwrap())

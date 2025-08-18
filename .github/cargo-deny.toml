@@ -9,6 +9,7 @@ allow = [
     "GPL-2.0",
     "GPL-3.0",
     "GPL-3.0 WITH Classpath-exception-2.0",
+    "GPL-3.0-or-later WITH Classpath-exception-2.0",
     "CC0-1.0",
     "Zlib",
     "MPL-2.0",
