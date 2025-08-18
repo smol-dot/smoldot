@@ -29,9 +29,9 @@ pub(super) const ZSTD_PREFIX: [u8; 8] = [82, 188, 83, 118, 70, 219, 142, 5];
 ///
 /// The output data shall not be larger than `max_allowed`, to avoid potential zip bombs.
 pub(super) fn zstd_decode_if_necessary(
-    data: &[u8],
+    data: &'_ [u8],
     max_allowed: usize,
-) -> Result<Cow<[u8]>, Error> {
+) -> Result<Cow<'_, [u8]>, Error> {
     if data.starts_with(&ZSTD_PREFIX) {
         Ok(Cow::Owned(zstd_decode(
             &data[ZSTD_PREFIX.len()..],

@@ -246,7 +246,7 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
-    pub fn iter_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn iter_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.blocks
             .iter_unordered()
             .map(move |(_, b)| header::decode(&b.header, self.block_number_bytes).unwrap())
@@ -256,7 +256,7 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
-    pub fn iter_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
+    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> {
         self.blocks
             .iter_ancestry_order()
             .map(move |(_, b)| header::decode(&b.header, self.block_number_bytes).unwrap())
@@ -281,7 +281,7 @@ impl<T> NonFinalizedTree<T> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct that might later be used to
     /// build a new [`NonFinalizedTree`].
-    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> chain_information::ValidChainInformationRef<'_> {
         let attempt = chain_information::ChainInformationRef {
             finalized_block_header: header::decode(
                 &self.finalized_block_header,
@@ -376,7 +376,7 @@ impl<T> NonFinalizedTree<T> {
     }
 
     /// Returns consensus information about the current best block of the chain.
-    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+    pub fn best_block_consensus(&'_ self) -> chain_information::ChainInformationConsensusRef<'_> {
         match (
             &self.finalized_consensus,
             self.blocks_by_best_score

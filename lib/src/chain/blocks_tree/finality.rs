@@ -71,11 +71,11 @@ impl<T> NonFinalizedTree<T> {
     /// verification is nonetheless deterministic.
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
-        &mut self,
+        &'_ mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
         randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+    ) -> Result<FinalityApply<'_, T>, JustificationVerifyError> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
@@ -121,10 +121,10 @@ impl<T> NonFinalizedTree<T> {
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
     pub fn verify_grandpa_commit_message(
-        &mut self,
+        &'_ mut self,
         scale_encoded_commit: &[u8],
         randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, CommitVerifyError> {
+    ) -> Result<FinalityApply<'_, T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
             return Err(CommitVerifyError::NotGrandpa);
@@ -202,9 +202,9 @@ impl<T> NonFinalizedTree<T> {
     /// If necessary, the current best block will be updated to be a descendant of the
     /// newly-finalized block.
     pub fn set_finalized_block(
-        &mut self,
+        &'_ mut self,
         block_hash: &[u8; 32],
-    ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
+    ) -> Result<SetFinalizedBlockIter<'_, T>, SetFinalizedError> {
         let block_index = match self.blocks_by_hash.get(block_hash) {
             Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
@@ -311,9 +311,9 @@ impl<T> NonFinalizedTree<T> {
     /// Panics if `block_index_to_finalize` isn't a valid node in the tree.
     ///
     fn set_finalized_block_inner(
-        &mut self,
+        &'_ mut self,
         block_index_to_finalize: fork_tree::NodeIndex,
-    ) -> SetFinalizedBlockIter<T> {
+    ) -> SetFinalizedBlockIter<'_, T> {
         let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
 
         // Update `self.finality`.

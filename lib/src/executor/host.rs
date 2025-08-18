@@ -3554,7 +3554,7 @@ enum LogEmitInner {
 
 impl LogEmit {
     /// Returns the data that the runtime would like to print.
-    pub fn info(&self) -> LogEmitInfo {
+    pub fn info(&'_ self) -> LogEmitInfo<'_> {
         match self.log_entry {
             LogEmitInner::Num(n) => LogEmitInfo::Num(n),
             LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {

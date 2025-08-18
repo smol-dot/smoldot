@@ -98,7 +98,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
         unsafe {
             bindings::random_get(
-                u32::try_from(buffer.as_mut_ptr() as usize).unwrap(),
+                u32::try_from(buffer.as_mut_ptr().addr()).unwrap(),
                 u32::try_from(buffer.len()).unwrap(),
             )
         }
@@ -126,7 +126,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 let this = self.project();
                 bindings::current_task_entered(
-                    u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(this.name.as_bytes().as_ptr().addr()).unwrap(),
                     u32::try_from(this.name.as_bytes().len()).unwrap(),
                 );
 
@@ -221,9 +221,9 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         if key_values.peek().is_none() {
             bindings::log(
                 log_level,
-                u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(log_target.as_bytes().as_ptr().addr()).unwrap(),
                 u32::try_from(log_target.as_bytes().len()).unwrap(),
-                u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(message.as_bytes().as_ptr().addr()).unwrap(),
                 u32::try_from(message.as_bytes().len()).unwrap(),
             )
         } else {
@@ -242,19 +242,19 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
             bindings::log(
                 log_level,
-                u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(log_target.as_bytes().as_ptr().addr()).unwrap(),
                 u32::try_from(log_target.as_bytes().len()).unwrap(),
-                u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(message_build.as_bytes().as_ptr().addr()).unwrap(),
                 u32::try_from(message_build.as_bytes().len()).unwrap(),
             )
         }
     }
 
-    fn client_name(&self) -> Cow<str> {
+    fn client_name(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_NAME").into()
     }
 
-    fn client_version(&self) -> Cow<str> {
+    fn client_version(&'_ self) -> Cow<'_, str> {
         env!("CARGO_PKG_VERSION").into()
     }
 
@@ -358,7 +358,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         bindings::connection_new(
             connection_id,
-            u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+            u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
             u32::try_from(encoded_address.len()).unwrap(),
         );
 
@@ -428,7 +428,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         bindings::connection_new(
             connection_id,
-            u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+            u32::try_from(encoded_address.as_ptr().addr()).unwrap(),
             u32::try_from(encoded_address.len()).unwrap(),
         );
 
@@ -742,7 +742,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
 
             for buffer in &self.read_write.write_buffers {
                 io_vectors.push(bindings::StreamSendIoVector {
-                    ptr: u32::try_from(buffer.as_ptr() as usize).unwrap(),
+                    ptr: u32::try_from(buffer.as_ptr().addr()).unwrap(),
                     len: u32::try_from(buffer.len()).unwrap(),
                 });
                 total_length += buffer.len();
@@ -757,7 +757,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             bindings::stream_send(
                 self.stream.connection_id,
                 self.stream.stream_id.unwrap_or(0),
-                u32::try_from(io_vectors.as_ptr() as usize).unwrap(),
+                u32::try_from(io_vectors.as_ptr().addr()).unwrap(),
                 u32::try_from(io_vectors.len()).unwrap(),
             );
 

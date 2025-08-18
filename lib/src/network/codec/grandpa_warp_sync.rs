@@ -76,9 +76,9 @@ pub struct DecodeGrandpaWarpSyncResponseError;
 
 /// Decodes a SCALE-encoded GrandPa warp sync response.
 pub fn decode_grandpa_warp_sync_response(
-    encoded: &[u8],
+    encoded: &'_ [u8],
     block_number_bytes: usize,
-) -> Result<GrandpaWarpSyncResponse, DecodeGrandpaWarpSyncResponseError> {
+) -> Result<GrandpaWarpSyncResponse<'_>, DecodeGrandpaWarpSyncResponseError> {
     nom::Parser::parse(
         &mut nom::combinator::all_consuming::<_, (&[u8], nom::error::ErrorKind), _>(
             nom::combinator::map(

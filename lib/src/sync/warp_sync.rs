@@ -542,7 +542,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     }
 
     /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ValidChainInformationRef {
+    pub fn as_chain_information(&'_ self) -> ValidChainInformationRef<'_> {
         // Note: after verifying a warp sync fragment, we are certain that the header targeted by
         // this fragment is indeed part of the chain. However, this is not enough in order to
         // produce a full chain information struct. Such struct can only be produced after the
@@ -590,7 +590,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     }
 
     /// Returns the current status of the warp syncing.
-    pub fn status(&self) -> Status<TSrc> {
+    pub fn status(&'_ self) -> Status<'_, TSrc> {
         match &self.runtime_download {
             RuntimeDownload::NotStarted { .. } => {
                 let finalized_block_hash = self.warped_header_hash;

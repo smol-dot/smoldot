@@ -114,10 +114,6 @@ pub struct Config {
     pub slot_duration_author_ratio: u16,
 }
 
-/// Identifier for a blocks request to be performed.
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct BlocksRequestId(usize);
-
 /// Summary of the state of the [`ConsensusService`].
 #[derive(Debug, Clone)]
 pub struct SyncState {
