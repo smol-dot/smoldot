@@ -52,6 +52,28 @@ pub struct Config<I> {
     pub proof: I,
 }
 
+/// Proof is in an invalid format.
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub struct ParseError();
+
+/// Decomposes the given proof into its entries.
+///
+/// Each entry is a node value.
+///
+/// Doesn't verify anything about the proof except that it can be decomposed into entries.
+pub fn decode_proof(proof: &[u8]) -> Result<impl ExactSizeIterator<Item = &[u8]>, ParseError> {
+    // TODO: don't use Vec?
+    let (_, decoded_proof) = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
+        )),
+        proof,
+    )
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ParseError())?;
+    Ok(decoded_proof.into_iter())
+}
+
 /// Verifies whether a proof is correct and returns an object that allows examining its content.
 ///
 /// The proof is then stored within the [`DecodedTrieProof`].
@@ -90,21 +112,10 @@ where
     // takes, it is always cause this function to return an error and is actually likely to make
     // the function actually take less time than if it was a legitimate proof.
     let entries_by_merkle_value = {
-        // TODO: don't use a Vec?
-        let (_, decoded_proof) = nom::Parser::parse(
-            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-                crate::util::nom_scale_compact_usize,
-                |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
-                },
-            )),
-            config.proof.as_ref(),
-        )
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
+        let decoded_proof = decode_proof(proof_as_ref).map_err(Error::InvalidFormat)?;
+        let decoded_proof_len = decoded_proof.len();
 
         let entries_by_merkle_value = decoded_proof
-            .iter()
-            .copied()
             .enumerate()
             .map(
                 |(proof_entry_num, proof_entry)| -> ([u8; 32], InProgressEntry) {
@@ -139,7 +150,7 @@ where
         // Using a hashmap has the consequence that if multiple proof entries were identical, only
         // one would be tracked. This allows us to make sure that the proof doesn't contain
         // multiple identical entries.
-        if entries_by_merkle_value.len() != decoded_proof.len() {
+        if entries_by_merkle_value.len() != decoded_proof_len {
             return Err(Error::DuplicateProofEntry);
         }
 
@@ -1460,7 +1471,7 @@ impl<'a> fmt::Debug for StorageValue<'a> {
 #[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Proof is in an invalid format.
-    InvalidFormat,
+    InvalidFormat(ParseError),
     /// One of the entries of the proof is disconnected from the root node.
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.

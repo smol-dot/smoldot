@@ -45,7 +45,7 @@ use smoldot::{
     json_rpc::{self, methods, parse},
     libp2p::{PeerId, multiaddr},
     network::codec,
-    trie::minimize_proof::merge_proofs,
+    trie::{minimize_proof, proof_decode},
 };
 
 /// Configuration for a JSON-RPC service.
@@ -3762,12 +3762,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         let _ = me
                             .responses_tx
                             .send(
-                                if let Ok(merged_proof) = merge_proofs(&in_progress_results) {
+                                if let Ok(merged_proof) = minimize_proof::merge_proofs(
+                                    in_progress_results.iter().map(|v| &v[..]),
+                                ) {
+                                    let decoded =
+                                        proof_decode::decode_proof(&merged_proof).unwrap();
                                     methods::Response::state_getReadProof(methods::ReadProof {
                                         at: methods::HashHexString(block_hash),
-                                        proof: merged_proof
-                                            .into_iter()
-                                            .map(methods::HexString)
+                                        proof: decoded
+                                            .map(|e| methods::HexString(e.to_owned()))
                                             .collect(),
                                     })
                                     .to_json_response(&request_id_json)

@@ -17,11 +17,13 @@
 
 use crate::trie::{
     bytes_to_nibbles,
-    proof_decode::{DecodedTrieProof, StorageValue},
+    proof_decode::{self, DecodedTrieProof, StorageValue},
     proof_encode::ProofBuilder,
 };
 use alloc::vec::Vec;
 use hashbrown::HashSet;
+
+pub use proof_decode::ParseError;
 
 /// Error potentially returned by [`minimize_proof`].
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -70,28 +72,24 @@ pub fn minimize_proof<T: AsRef<[u8]>>(
     Ok(builder.build_to_vec())
 }
 
-/// Failed to parse one of the input proofs.
-#[derive(Debug, derive_more::Display, derive_more::Error)]
-pub struct ParseError();
-
-/// Merges multiple proofs into a single one, removing common entries
-pub fn merge_proofs<'a>(proofs: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, ParseError> {
-    proofs
-        .into_iter()
-        .try_fold(HashSet::new(), |mut acc, proof| {
-            let (_, proof_entries) = nom::Parser::parse(
-                &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-                    crate::util::nom_scale_compact_usize,
-                    |num_elems| {
-                        nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
-                    },
-                )),
-                proof,
-            )
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ParseError())?;
-
+/// Merges multiple proofs into a single one, removing common entries.
+pub fn merge_proofs<'a>(mut proofs: impl Iterator<Item = &'a [u8]>) -> Result<Vec<u8>, ParseError> {
+    // Decode each element of `proofs` and collect the entries in a `HashSet`.
+    let entries = proofs.try_fold(
+        HashSet::with_hasher(fnv::FnvBuildHasher::default()),
+        |mut acc, proof| {
+            let proof_entries = proof_decode::decode_proof(&proof)?;
             acc.extend(proof_entries);
             Ok(acc)
-        })
-        .map(|merged_entries| merged_entries.into_iter().map(|v| Vec::from(v)).collect())
+        },
+    )?;
+
+    // Encode the output proof.
+    let mut ret = Vec::with_capacity(8 + entries.iter().map(|e| e.len() + 8).sum::<usize>());
+    ret.extend_from_slice(crate::util::encode_scale_compact_usize(entries.len()).as_ref());
+    for entry in entries {
+        ret.extend_from_slice(crate::util::encode_scale_compact_usize(entry.len()).as_ref());
+        ret.extend_from_slice(entry);
+    }
+    Ok(ret)
 }
