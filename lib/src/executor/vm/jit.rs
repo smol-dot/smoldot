@@ -88,6 +88,8 @@ impl JitPrototype {
         config.wasm_component_model(false);
         config.wasm_wide_arithmetic(false);
         config.wasm_extended_const(false);
+        config.wasm_shared_everything_threads(false);
+        config.wasm_stack_switching(false);
 
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
@@ -121,7 +123,9 @@ impl JitPrototype {
 
                         imports.push(Some(function_index));
                     }
-                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
+                    wasmtime::ExternType::Global(_)
+                    | wasmtime::ExternType::Table(_)
+                    | wasmtime::ExternType::Tag(_) => {
                         return Err(NewErr::ImportTypeNotSupported);
                     }
                     wasmtime::ExternType::Memory(_) => {
@@ -263,7 +267,9 @@ impl JitPrototype {
                             },
                         )));
                     }
-                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
+                    wasmtime::ExternType::Global(_)
+                    | wasmtime::ExternType::Table(_)
+                    | wasmtime::ExternType::Tag(_) => {
                         unreachable!() // Should have been checked earlier.
                     }
                     wasmtime::ExternType::Memory(m) => {
