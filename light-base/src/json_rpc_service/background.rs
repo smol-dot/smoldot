@@ -1206,7 +1206,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
-                        let exists = me.all_heads_subscriptions.remove(&subscription);
+                        let exists = me.all_heads_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
                             .send(
@@ -1217,7 +1217,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                        let exists = me.finalized_heads_subscriptions.remove(&subscription);
+                        let exists = me.finalized_heads_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
                             .send(
@@ -1228,7 +1228,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                        let exists = me.new_heads_subscriptions.remove(&subscription);
+                        let exists = me.new_heads_subscriptions.remove(&*subscription);
                         let _ = me
                             .responses_tx
                             .send(
