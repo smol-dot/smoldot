@@ -45,6 +45,7 @@ use smoldot::{
     json_rpc::{self, methods, parse},
     libp2p::{PeerId, multiaddr},
     network::codec,
+    trie::{minimize_proof, proof_decode},
 };
 
 /// Configuration for a JSON-RPC service.
@@ -336,6 +337,9 @@ enum MultiStageRequestTy {
         keys: Vec<methods::HexString>,
     },
     StateGetMetadata,
+    StateGetReadProof {
+        keys: Vec<methods::HexString>,
+    },
     StateGetStorage {
         key: Vec<u8>,
     },
@@ -362,6 +366,10 @@ enum StorageRequestInProgress {
     StateQueryStorageAt {
         block_hash: [u8; 32],
         in_progress_results: Vec<(methods::HexString, Option<methods::HexString>)>,
+    },
+    StateGetReadProof {
+        block_hash: [u8; 32],
+        in_progress_results: Vec<Vec<u8>>,
     },
     StateGetStorage,
 }
@@ -1361,6 +1369,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                 None => MultiStageRequestStage::BlockHashNotKnown,
                             },
                             MultiStageRequestTy::StateGetMetadata,
+                        ));
+                    }
+
+                    methods::MethodCall::state_getReadProof { keys, at } => {
+                        // Because this request requires asynchronous operations, we push it
+                        // to a list of "multi-stage requests" that are processed later.
+                        me.multistage_requests_to_advance.push_back((
+                            request_id_json.to_owned(),
+                            match at {
+                                Some(methods::HashHexString(block_hash)) => {
+                                    MultiStageRequestStage::BlockHashKnown { block_hash }
+                                }
+                                None => MultiStageRequestStage::BlockHashNotKnown,
+                            },
+                            MultiStageRequestTy::StateGetReadProof { keys },
                         ));
                     }
 
@@ -2743,7 +2766,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::offchain_localStorageGet { .. }
                     | methods::MethodCall::offchain_localStorageSet { .. }
                     | methods::MethodCall::state_getPairs { .. }
-                    | methods::MethodCall::state_getReadProof { .. }
                     | methods::MethodCall::state_getStorageHash { .. }
                     | methods::MethodCall::state_getStorageSize { .. }
                     | methods::MethodCall::state_queryStorage { .. }
@@ -3456,8 +3478,12 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     request_ty @ (MultiStageRequestTy::StateGetKeys { .. }
                     | MultiStageRequestTy::StateGetKeysPaged { .. }
                     | MultiStageRequestTy::StateQueryStorageAt { .. }
-                    | MultiStageRequestTy::StateGetStorage { .. }),
+                    | MultiStageRequestTy::StateGetStorage { .. }
+                    | MultiStageRequestTy::StateGetReadProof { .. }),
             } => {
+                let is_state_get_read_proof =
+                    matches!(request_ty, MultiStageRequestTy::StateGetReadProof { .. });
+
                 // A storage-related JSON-RPC function can make progress.
                 // Build and start a background task that performs the actual storage request.
                 let (request, storage_request) = match request_ty {
@@ -3487,15 +3513,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             ty: sync_service::StorageRequestItemTy::DescendantsHashes,
                         })),
                     ),
-                    MultiStageRequestTy::StateQueryStorageAt { keys } => (
-                        StorageRequestInProgress::StateQueryStorageAt {
-                            block_hash,
-                            in_progress_results: Vec::with_capacity(keys.len()),
+                    MultiStageRequestTy::StateQueryStorageAt { keys }
+                    | MultiStageRequestTy::StateGetReadProof { keys } => (
+                        if is_state_get_read_proof {
+                            StorageRequestInProgress::StateGetReadProof {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
+                        } else {
+                            StorageRequestInProgress::StateQueryStorageAt {
+                                block_hash,
+                                in_progress_results: Vec::with_capacity(keys.len()),
+                            }
                         },
                         either::Right(keys.into_iter().map(|key| {
                             sync_service::StorageRequestItem {
                                 key: key.0,
-                                ty: sync_service::StorageRequestItemTy::Value,
+                                ty: if is_state_get_read_proof {
+                                    sync_service::StorageRequestItemTy::MerkleProof
+                                } else {
+                                    sync_service::StorageRequestItemTy::Value
+                                },
                             }
                         })),
                     ),
@@ -3687,6 +3725,65 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     },
                                 ])
                                 .to_json_response(&request_id_json),
+                            )
+                            .await;
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Progress {
+                            item: sync_service::StorageResultItem::MerkleProof { proof, .. },
+                            query: next,
+                            ..
+                        },
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            mut in_progress_results,
+                        },
+                    ) => {
+                        in_progress_results.push(proof);
+                        me.background_tasks.push(Box::pin(async move {
+                            Event::LegacyApiFunctionStorageRequestProgress {
+                                request_id_json,
+                                request: StorageRequestInProgress::StateGetReadProof {
+                                    block_hash,
+                                    in_progress_results,
+                                },
+                                progress: next.advance().await,
+                            }
+                        }));
+                    }
+                    (
+                        sync_service::StorageQueryProgress::Finished,
+                        StorageRequestInProgress::StateGetReadProof {
+                            block_hash,
+                            in_progress_results,
+                        },
+                    ) => {
+                        // Finished.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                if let Ok(merged_proof) = minimize_proof::merge_proofs(
+                                    in_progress_results.iter().map(|v| &v[..]),
+                                ) {
+                                    let decoded =
+                                        proof_decode::decode_proof(&merged_proof).unwrap();
+                                    methods::Response::state_getReadProof(methods::ReadProof {
+                                        at: methods::HashHexString(block_hash),
+                                        proof: decoded
+                                            .map(|e| methods::HexString(e.to_owned()))
+                                            .collect(),
+                                    })
+                                    .to_json_response(&request_id_json)
+                                } else {
+                                    parse::build_error_response(
+                                        &request_id_json,
+                                        parse::ErrorResponse::ServerError(
+                                            -32000,
+                                            "A proof could not be decoded",
+                                        ),
+                                        None,
+                                    )
+                                },
                             )
                             .await;
                     }
@@ -4411,6 +4508,8 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             closest_descendant_merkle_value: None,
                             ..
                         } => None,
+                        // chainhead_v1 doesn't have merkle proof queries.
+                        sync_service::StorageResultItem::MerkleProof { .. } => unreachable!(),
                     };
 
                     if let Some(item) = item {

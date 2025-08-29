@@ -52,6 +52,28 @@ pub struct Config<I> {
     pub proof: I,
 }
 
+/// Proof is in an invalid format.
+#[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
+pub struct ParseError();
+
+/// Decomposes the given proof into its entries.
+///
+/// Each entry is a node value.
+///
+/// Doesn't verify anything about the proof except that it can be decomposed into entries.
+pub fn decode_proof(proof: &[u8]) -> Result<impl ExactSizeIterator<Item = &[u8]>, ParseError> {
+    // TODO: don't use Vec?
+    let (_, decoded_proof) = nom::Parser::parse(
+        &mut nom::combinator::all_consuming(nom::combinator::flat_map(
+            crate::util::nom_scale_compact_usize,
+            |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
+        )),
+        proof,
+    )
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ParseError())?;
+    Ok(decoded_proof.into_iter())
+}
+
 /// Verifies whether a proof is correct and returns an object that allows examining its content.
 ///
 /// The proof is then stored within the [`DecodedTrieProof`].
@@ -90,21 +112,10 @@ where
     // takes, it is always cause this function to return an error and is actually likely to make
     // the function actually take less time than if it was a legitimate proof.
     let entries_by_merkle_value = {
-        // TODO: don't use a Vec?
-        let (_, decoded_proof) = nom::Parser::parse(
-            &mut nom::combinator::all_consuming(nom::combinator::flat_map(
-                crate::util::nom_scale_compact_usize,
-                |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode)
-                },
-            )),
-            config.proof.as_ref(),
-        )
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
+        let decoded_proof = decode_proof(proof_as_ref).map_err(Error::InvalidFormat)?;
+        let decoded_proof_len = decoded_proof.len();
 
         let entries_by_merkle_value = decoded_proof
-            .iter()
-            .copied()
             .enumerate()
             .map(
                 |(proof_entry_num, proof_entry)| -> ([u8; 32], InProgressEntry) {
@@ -139,7 +150,7 @@ where
         // Using a hashmap has the consequence that if multiple proof entries were identical, only
         // one would be tracked. This allows us to make sure that the proof doesn't contain
         // multiple identical entries.
-        if entries_by_merkle_value.len() != decoded_proof.len() {
+        if entries_by_merkle_value.len() != decoded_proof_len {
             return Err(Error::DuplicateProofEntry);
         }
 
@@ -635,120 +646,180 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn iter_ordered(
         &self,
     ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> {
-        let proof = self.proof.as_ref();
-
         self.trie_roots
             .iter()
             .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .skip(trie_root_entry_index)
-                    .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
-                    .map(|(entry_index, entry)| {
-                        let key = EntryKey {
-                            trie_root_hash,
-                            key: EntryKeyIter::new(self, entry_index),
-                        };
-
-                        let Ok(entry_index_decoded) =
-                            trie_node::decode(&proof[entry.range_in_proof.clone()])
-                        else {
-                            // Proof has been checked to be entirely decodable.
-                            unreachable!()
-                        };
-
-                        let entry = ProofEntry {
-                            merkle_value: if let Some((parent_index, parent_nibble)) =
-                                self.entries[entry_index].parent_entry_index
-                            {
-                                let Ok(parent_decoded) = trie_node::decode(
-                                    &proof[self.entries[parent_index].range_in_proof.clone()],
-                                ) else {
-                                    // Proof has been checked to be entirely decodable.
-                                    unreachable!()
-                                };
-                                parent_decoded.children[usize::from(parent_nibble)]
-                                    .as_ref()
-                                    .unwrap()
-                            } else {
-                                trie_root_hash
+                (0..=self.entries[trie_root_entry_index].child_entries_follow_up)
+                    .map(move |idx| idx + trie_root_entry_index)
+                    .map(|entry_index| {
+                        (
+                            EntryKey {
+                                trie_root_hash,
+                                key: EntryKeyIter::new(self, entry_index),
                             },
-                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
-                            partial_key_nibbles: entry_index_decoded.partial_key,
-                            unhashed_storage_value: entry
-                                .storage_value_in_proof
-                                .as_ref()
-                                .map(|range| &proof[range.clone()]),
-                            trie_node_info: TrieNodeInfo {
-                                children: Children {
-                                    children: {
-                                        let mut children = core::array::from_fn(|_| Child::NoChild);
-                                        let mut i = entry_index + 1;
-                                        for child_num in 0..16 {
-                                            let Some(child_merkle_value) =
-                                                entry_index_decoded.children[child_num]
-                                            else {
-                                                continue;
-                                            };
-                                            if entry.children_present_in_proof_bitmap
-                                                & (1 << child_num)
-                                                != 0
-                                            {
-                                                children[child_num] = Child::InProof {
-                                                    child_key: EntryKeyIter::new(self, i),
-                                                    merkle_value: child_merkle_value,
-                                                };
-                                                i += self.entries[i].child_entries_follow_up;
-                                                i += 1;
-                                            } else {
-                                                children[child_num] = Child::AbsentFromProof {
-                                                    merkle_value: child_merkle_value,
-                                                };
-                                            }
-                                        }
-                                        children
-                                    },
-                                },
-                                storage_value: match (
-                                    entry_index_decoded.storage_value,
-                                    &entry.storage_value_in_proof,
-                                ) {
-                                    (trie_node::StorageValue::Unhashed(value), _) => {
-                                        StorageValue::Known {
-                                            value,
-                                            inline: true,
-                                        }
-                                    }
-                                    (trie_node::StorageValue::Hashed(_), Some(value_range)) => {
-                                        StorageValue::Known {
-                                            value: &proof[value_range.clone()],
-                                            inline: false,
-                                        }
-                                    }
-                                    (trie_node::StorageValue::Hashed(hash), None) => {
-                                        StorageValue::HashKnownValueMissing(hash)
-                                    }
-                                    (trie_node::StorageValue::None, _v) => {
-                                        debug_assert!(_v.is_none());
-                                        StorageValue::None
-                                    }
-                                },
-                            },
-                        };
-
-                        (key, entry)
+                            self.build_proof_entry(trie_root_hash, entry_index),
+                        )
                     })
             })
     }
 
+    /// Returns the [`ProofEntry`] of the given proof entry.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `entry_index` is out of range.
+    ///
+    fn build_proof_entry<'a>(
+        &'a self,
+        trie_root_hash: &'a [u8; 32],
+        entry_index: usize,
+    ) -> ProofEntry<'a, T> {
+        let proof = self.proof.as_ref();
+
+        let entry = &self.entries[entry_index];
+
+        let Ok(entry_index_decoded) = trie_node::decode(&proof[entry.range_in_proof.clone()])
+        else {
+            // Proof has been checked to be entirely decodable.
+            unreachable!()
+        };
+
+        ProofEntry {
+            merkle_value: if let Some((parent_index, parent_nibble)) =
+                self.entries[entry_index].parent_entry_index
+            {
+                let Ok(parent_decoded) =
+                    trie_node::decode(&proof[self.entries[parent_index].range_in_proof.clone()])
+                else {
+                    // Proof has been checked to be entirely decodable.
+                    unreachable!()
+                };
+                parent_decoded.children[usize::from(parent_nibble)]
+                    .as_ref()
+                    .unwrap()
+            } else {
+                trie_root_hash
+            },
+            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+            partial_key_nibbles: entry_index_decoded.partial_key,
+            unhashed_storage_value: entry
+                .storage_value_in_proof
+                .as_ref()
+                .map(|range| &proof[range.clone()]),
+            trie_node_info: TrieNodeInfo {
+                children: Children {
+                    children: {
+                        let mut children = core::array::from_fn(|_| Child::NoChild);
+                        let mut i = entry_index + 1;
+                        for child_num in 0..16 {
+                            let Some(child_merkle_value) = entry_index_decoded.children[child_num]
+                            else {
+                                continue;
+                            };
+                            if entry.children_present_in_proof_bitmap & (1 << child_num) != 0 {
+                                children[child_num] = Child::InProof {
+                                    child_key: EntryKeyIter::new(self, i),
+                                    merkle_value: child_merkle_value,
+                                };
+                                i += self.entries[i].child_entries_follow_up;
+                                i += 1;
+                            } else {
+                                children[child_num] = Child::AbsentFromProof {
+                                    merkle_value: child_merkle_value,
+                                };
+                            }
+                        }
+                        children
+                    },
+                },
+                storage_value: match (
+                    entry_index_decoded.storage_value,
+                    &entry.storage_value_in_proof,
+                ) {
+                    (trie_node::StorageValue::Unhashed(value), _) => StorageValue::Known {
+                        value,
+                        inline: true,
+                    },
+                    (trie_node::StorageValue::Hashed(_), Some(value_range)) => {
+                        StorageValue::Known {
+                            value: &proof[value_range.clone()],
+                            inline: false,
+                        }
+                    }
+                    (trie_node::StorageValue::Hashed(hash), None) => {
+                        StorageValue::HashKnownValueMissing(hash)
+                    }
+                    (trie_node::StorageValue::None, _v) => {
+                        debug_assert!(_v.is_none());
+                        StorageValue::None
+                    }
+                },
+            },
+        }
+    }
+
+    /// Returns the [`ProofEntry`] of the proof entry whose Merkle value is given as parameter.
+    ///
+    /// The returned [`ProofEntry`] is guaranteed to have no parent.
+    ///
+    /// Returns `None` if the proof doesn't contain any sub-trie with the given Merkle value.
+    pub fn trie_root_proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &'a [u8; 32],
+    ) -> Option<ProofEntry<'a, T>> {
+        let entry_index = *self.trie_roots.get(trie_root_merkle_value)?;
+        Some(self.build_proof_entry(trie_root_merkle_value, entry_index))
+    }
+
+    /// Returns the [`ProofEntry`] of the given key.
+    ///
+    /// Returns `None` if the key doesn't have any entry in the proof.
+    ///
+    /// > **Note**: In situations where the key isn't in the proof but the proof contains enough
+    /// >           information about the trie in order to infer some information about that key,
+    /// >           the [`DecodedTrieProof::trie_node_info`] function will be successful whereas
+    /// >           the [`DecodedTrieProof::proof_entry`] function will fail.
+    pub fn proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &'a [u8; 32],
+        key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Option<ProofEntry<'a, T>> {
+        let (entry_index, exact_match) = self
+            .closest_ancestor_in_proof_entry(trie_root_merkle_value, key)
+            .ok()
+            .flatten()?;
+
+        if !exact_match {
+            return None;
+        }
+
+        Some(self.build_proof_entry(trie_root_merkle_value, entry_index))
+    }
+
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
     /// If `key` is in the proof, returns `key`.
+    ///
+    /// Returns `None` if the key is completely outside of the trie (i.e. the trie root is not
+    /// an ancestor of the key).
     pub fn closest_ancestor_in_proof<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
-        mut key: impl Iterator<Item = nibble::Nibble>,
+        key: impl Iterator<Item = nibble::Nibble>,
     ) -> Result<Option<EntryKeyIter<'a, T>>, IncompleteProofError> {
+        Ok(self
+            .closest_ancestor_in_proof_entry(trie_root_merkle_value, key)?
+            .map(|(idx, _)| EntryKeyIter::new(self, idx)))
+    }
+
+    /// Same as [`DecodedTrieProof::closest_ancestor_in_proof`], but returns the entry index
+    /// instead of its key.
+    ///
+    /// In addition to the entry index, also returns whether there was an exact match.
+    fn closest_ancestor_in_proof_entry<'a>(
+        &'a self,
+        trie_root_merkle_value: &[u8; 32],
+        mut key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Result<Option<(usize, bool)>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // If the proof doesn't contain any entry for the requested trie, then we have no
@@ -777,7 +848,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             // Key is completely outside of the trie.
                             return Ok(None);
                         };
-                        return Ok(Some(EntryKeyIter::new(self, parent_entry)));
+                        return Ok(Some((parent_entry, false)));
                     }
                     (Some(child_num), None) => {
                         if let Some(_) = iter_entry_decoded.children[usize::from(child_num)] {
@@ -800,13 +871,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             iter_entry += 1;
                         } else {
                             // Key points to non-existing child. Closest ancestor is `iter_entry`.
-                            return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                            return Ok(Some((iter_entry, false)));
                         }
                         break;
                     }
                     (None, None) => {
                         // Exact match. Closest ancestor is `iter_entry`.
-                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                        return Ok(Some((iter_entry, true)));
                     }
                 }
             }
@@ -1413,7 +1484,7 @@ impl<'a> fmt::Debug for StorageValue<'a> {
 #[derive(Debug, Clone, derive_more::Display, derive_more::Error)]
 pub enum Error {
     /// Proof is in an invalid format.
-    InvalidFormat,
+    InvalidFormat(ParseError),
     /// One of the entries of the proof is disconnected from the root node.
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.

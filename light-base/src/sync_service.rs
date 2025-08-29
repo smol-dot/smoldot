@@ -41,7 +41,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{codec, service},
-    trie::{self, Nibble, prefix_proof, proof_decode},
+    trie::{self, Nibble, minimize_proof, prefix_proof, proof_decode},
 };
 
 mod parachain;
@@ -446,6 +446,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     key: request.key,
                     hash: true,
                 },
+                StorageRequestItemTy::MerkleProof => RequestImpl::MerkleProof { key: request.key },
                 StorageRequestItemTy::ClosestDescendantMerkleValue => {
                     RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
@@ -494,6 +495,10 @@ pub enum StorageRequestItemTy {
     /// A [`StorageResultItem::Hash`] will be returned containing the potential hash.
     Hash,
 
+    /// The merkle proof of the storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::MerkleProof`] will be returned containing the proof.
+    MerkleProof,
+
     /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
     /// itself) that have a storage value is requested.
     ///
@@ -530,6 +535,11 @@ pub enum StorageResultItem {
         /// Hash of the storage value of the key, or `None` if there is no storage value
         /// associated with that key.
         hash: Option<[u8; 32]>,
+    },
+    /// Corresponds to a [`StorageRequestItemTy::MerkleProof`].
+    MerkleProof {
+        /// Merkle proof of the storage value of the key.
+        proof: Vec<u8>,
     },
     /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
@@ -598,6 +608,9 @@ enum RequestImpl {
     ValueOrHash {
         key: Vec<u8>,
         hash: bool,
+    },
+    MerkleProof {
+        key: Vec<u8>,
     },
     ClosestDescendantMerkleValue {
         key: Vec<u8>,
@@ -680,7 +693,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 }
                             }
                         }
-                        RequestImpl::ValueOrHash { key, .. } => {
+                        RequestImpl::ValueOrHash { key, .. } | RequestImpl::MerkleProof { key } => {
                             if keys.insert(key.clone()) {
                                 max_reponse_nodes += key.len() * 2;
                             }
@@ -753,8 +766,9 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                 }
             };
 
+            let proof_bytes = proof.decode();
             let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: proof.decode(),
+                proof: proof_bytes.as_ref(),
             }) {
                 Ok(d) => d,
                 Err(err) => {
@@ -781,7 +795,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         requested_key,
                     } => {
                         // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
-                        match scan.resume_partial(proof.decode()) {
+                        match scan.resume_partial(proof_bytes) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 proof_has_advanced_verification = true;
                                 self.requests_remaining.push((
@@ -914,6 +928,28 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 self.requests_remaining
                                     .push((request_index, RequestImpl::ValueOrHash { key, hash }));
+                            }
+                        }
+                    }
+                    RequestImpl::MerkleProof { key } => {
+                        match decoded_proof.trie_node_info(
+                            &self.main_trie_root_hash,
+                            trie::bytes_to_nibbles(key.iter().copied()),
+                        ) {
+                            Ok(_) => self.available_results.push_back((
+                                request_index,
+                                StorageResultItem::MerkleProof {
+                                    proof: minimize_proof::minimize_proof(
+                                        &decoded_proof,
+                                        &self.main_trie_root_hash,
+                                        &key,
+                                    )
+                                    .unwrap(),
+                                },
+                            )),
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.requests_remaining
+                                    .push((request_index, RequestImpl::MerkleProof { key }));
                             }
                         }
                     }
