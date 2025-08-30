@@ -910,13 +910,13 @@ dependencies = [
 
 [[package]]
 name = "dlmalloc"
-version = "0.2.9"
+version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d01597dde41c0b9da50d5f8c219023d63d8f27f39a27095070fd191fddc83891"
+checksum = "06cdfe340b16dd990c54cce79743613fa09fbb16774f33a77c9fd196f8f3fa30"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
