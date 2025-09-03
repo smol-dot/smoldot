@@ -3079,13 +3079,13 @@ impl SignatureVerification {
             }
             SignatureVerificationAlgorithm::Sr25519V2 => {
                 schnorrkel::PublicKey::from_bytes(self.public_key().as_ref()).map_or(false, |pk| {
-                    pk.verify_simple(
-                        b"substrate",
-                        self.message().as_ref(),
-                        &schnorrkel::Signature::from_bytes(self.signature().as_ref())
-                            .unwrap_or_else(|_| unreachable!()),
+                    schnorrkel::Signature::from_bytes(self.signature().as_ref()).map_or(
+                        false,
+                        |sig| {
+                            pk.verify_simple(b"substrate", self.message().as_ref(), &sig)
+                                .is_ok()
+                        },
                     )
-                    .is_ok()
                 })
             }
             SignatureVerificationAlgorithm::Ecdsa => {
