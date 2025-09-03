@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.38 - 2025-09-03
+
 ### Fixed
 
 - Fix panic when an invalid SR25519 signature is passed to `ext_crypto_sr25519_verify_version_2`. ([#2170](https://github.com/smol-dot/smoldot/pull/2170))
