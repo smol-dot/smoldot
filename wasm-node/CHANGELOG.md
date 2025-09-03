@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic when an invalid SR25519 signature is passed to `ext_crypto_sr25519_verify_version_2`.
+
 ## 2.0.37 - 2025-08-29
 
 ### Changed
