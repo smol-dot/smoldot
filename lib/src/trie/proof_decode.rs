@@ -1315,7 +1315,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             }
 
                             iter_entry += 1;
-                            prefix_match_iter_entry_ancestor_depth += 1;
+                            if prefix_nibble.is_none() {
+                                prefix_match_iter_entry_ancestor_depth += 1;
+                            }
                             if usize::from(key_before_nibble) != child_num {
                                 key_before = either::Right(iter::empty().fuse());
                                 or_equal = true;
