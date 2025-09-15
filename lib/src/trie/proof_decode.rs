@@ -1112,7 +1112,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
         // Indicates the depth of ancestors of `iter_entry` that match `prefix`.
         // For example, if the value is 2, then `iter_entry`'s parent and grandparent match
-        //`prefix`, but `iter_entry`'s grandparent parent does not.
+        // `prefix`, but `iter_entry`'s grandparent parent does not.
         let mut prefix_match_iter_entry_ancestor_depth = 0;
 
         loop {
