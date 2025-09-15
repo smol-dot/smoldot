@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.39 - 2025-09-15
+
 ### Fixed
 
 - Fix panic when executing proofs in some situations caused by the proof analysis not producing a correct value. ([#2176](https://github.com/smol-dot/smoldot/pull/2176))
