@@ -446,7 +446,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             if (!state.instance)
                 break;
-            state.instance.exports.advance_execution();
+            try {
+                state.instance.exports.advance_execution();
+            } catch (_error) {
+                return;
+            }
 
             const afterExec = config.performanceNow();
             const elapsed = afterExec - now;
@@ -550,7 +554,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
             }
             state.bufferIndices[2] = potentialRelayChainsEncoded
-            const chainId = state.instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, 2);
+            let chainId;
+            try {
+                chainId = state.instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : jsonRpcMaxPendingRequests, jsonRpcMaxSubscriptions, 2);
+            } catch (_error) {
+                eventCallback({ ty: "add-chain-id-allocated", chainId: 0 });
+                eventCallback({ ty: "add-chain-result", chainId: 0, success: false, error: "Smoldot has crashed" });
+                return;
+            }
 
             delete state.bufferIndices[0]
             delete state.bufferIndices[1]
@@ -562,7 +573,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         removeChain: (chainId: number): void => {
             if (!state.instance)
                 return;
-            state.instance.exports.remove_chain(chainId);
+            try {
+                state.instance.exports.remove_chain(chainId);
+            } catch (_error) {
+                return;
+            }
         },
 
         shutdownExecutor: (): void => {
