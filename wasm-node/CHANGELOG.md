@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix panic when executing proofs in some situations caused by the proof analysis not producing a correct value. ([#2176](https://github.com/smol-dot/smoldot/pull/2176))
+- When smoldot panics, this will now lead to exceptions being thrown from the public API in most situations, rather than the whole JavaScript process terminating. ([#2177](https://github.com/smol-dot/smoldot/pull/2177))
 
 ## 2.0.38 - 2025-09-03
 
