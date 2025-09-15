@@ -153,7 +153,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             eventCallback({ ty: "wasm-panic", message, currentTask: state.currentTask });
             state.onShutdownExecutorOrWasmPanic();
             state.onShutdownExecutorOrWasmPanic = () => { };
-            throw new Error();
+            throw new Error("Smoldot has panicked");
         },
 
         chain_initialized: (chainId: number, errorMsgPtr: number, errorMsgLen: number) => {
@@ -390,7 +390,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 const bufPtr = buffer.readUInt32LE(mem, ptr + 8 * i);
                 const bufLen = buffer.readUInt32LE(mem, ptr + 8 * i + 4);
                 data.push(mem.slice(bufPtr, bufPtr + bufLen));
-            } 
+            }
 
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             eventCallback({ ty: "stream-send", connectionId, streamId, data });
