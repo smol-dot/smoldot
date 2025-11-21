@@ -55,8 +55,6 @@ macro_rules! host_functions {
 }
 
 host_functions! {
-    ext_transaction_index_index_version_1,
-    ext_transaction_index_renew_version_1,
     ext_storage_set_version_1,
     ext_storage_get_version_1,
     ext_storage_read_version_1,
@@ -158,6 +156,8 @@ host_functions! {
     ext_logging_log_version_1,
     ext_logging_max_level_version_1,
     ext_panic_handler_abort_on_panic_version_1,
+    ext_transaction_index_index_version_1,
+    ext_transaction_index_renew_version_1,
 }
 
 impl HostFunction {
