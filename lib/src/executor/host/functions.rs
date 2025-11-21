@@ -342,10 +342,10 @@ impl HostFunction {
                 crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
             }
             HostFunction::ext_transaction_index_index_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, <TODO>) => ())
+                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I32) => ())
             }
             HostFunction::ext_transaction_index_renew_version_1 => {
-                crate::signature!((vm::ValueType::I32, <TODO>) => ())
+                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => ())
             }
             HostFunction::ext_offchain_index_set_version_1 => {
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
