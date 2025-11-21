@@ -1846,6 +1846,22 @@ impl ReadyToRun {
                         .chain(iter::once(&r3.to_le_bytes())),
                 )
             }
+            HostFunction::ext_transaction_index_index_version_1 => {
+                // For now, implement as no-op. The transaction data pointer is consumed but not used.
+                let _tx_ptr = expect_pointer_size_raw!(0);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
+            HostFunction::ext_transaction_index_renew_version_1 => {
+                // For now, implement as no-op. The transaction data pointer is consumed but not used.
+                let _tx_ptr = expect_pointer_size_raw!(0);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
             HostFunction::ext_offchain_index_set_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);

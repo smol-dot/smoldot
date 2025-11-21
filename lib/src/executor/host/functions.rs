@@ -55,6 +55,8 @@ macro_rules! host_functions {
 }
 
 host_functions! {
+    ext_transaction_index_index_version_1,
+    ext_transaction_index_renew_version_1,
     ext_storage_set_version_1,
     ext_storage_get_version_1,
     ext_storage_read_version_1,
@@ -338,6 +340,12 @@ impl HostFunction {
             }
             HostFunction::ext_hashing_twox_256_version_1 => {
                 crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
+            }
+            HostFunction::ext_transaction_index_index_version_1 => {
+                crate::signature!((vm::ValueType::I64) => ())
+            }
+            HostFunction::ext_transaction_index_renew_version_1 => {
+                crate::signature!((vm::ValueType::I64) => ())
             }
             HostFunction::ext_offchain_index_set_version_1 => {
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
