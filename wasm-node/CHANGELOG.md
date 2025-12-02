@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `ext_transaction_index_index_version_1` and `ext_transaction_index_renew_version_1` host functions as no-op. ([#2189](https://github.com/smol-dot/smoldot/pull/2189))
+
 ## 2.0.39 - 2025-09-15
 
 ### Fixed
