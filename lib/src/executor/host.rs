@@ -2290,6 +2290,22 @@ impl ReadyToRun {
                     },
                 }
             }
+            HostFunction::ext_transaction_index_index_version_1 => {
+                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
+                let _tx_ptr = expect_pointer_size_raw!(0);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
+            HostFunction::ext_transaction_index_renew_version_1 => {
+                // TODO: this is currently a no-op; because not all the parameters are verified, this might lead to consensus issues
+                let _tx_ptr = expect_pointer_size_raw!(0);
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
         }
     }
 }
