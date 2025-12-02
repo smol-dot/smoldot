@@ -1,0 +1,16 @@
+{
+  "types": "../dist/mjs/bytecode-browser.d.ts",
+  "module": "../dist/mjs/worker-browser.js",
+  "exports": {
+    ".": {
+      "node": {
+        "import": "../dist/mjs/bytecode-nodejs.js",
+        "require": "../dist/cjs/bytecode-nodejs.js"
+      },
+      "default": {
+        "import": "../dist/mjs/bytecode-browser.js",
+        "require": "../dist/cjs/bytecode-browser.js"
+      }
+    }
+  }
+}
