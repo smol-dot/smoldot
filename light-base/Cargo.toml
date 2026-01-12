@@ -28,7 +28,7 @@ futures-util = { version = "0.3.27", default-features = false, features = ["allo
 hashbrown = { version = "0.15.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 itertools = { version = "0.14.0", default-features = false, features = ["use_alloc"] }
-lru = { version = "0.12.0", default-features = false, features = ["hashbrown"] } # The `hashbrown` feature brings no-std compatibility.
+lru = { version = "0.16.3", default-features = false, features = ["hashbrown"] } # The `hashbrown` feature brings no-std compatibility.
 pin-project = "1.1.5"
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
