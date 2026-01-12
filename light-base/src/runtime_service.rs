@@ -660,9 +660,9 @@ pub enum RuntimeCallInaccessibleError {
     InvalidCallProof(proof_decode::Error),
     /// One or more entries are missing from the downloaded call proof.
     MissingProofEntry,
-    /// Failed to download a storage proof from the network (storage-on-demand mode).
+    /// Failed to download a storage proof from the network.
     StorageRequest(network_service::StorageProofRequestError),
-    /// Failed to download a child storage proof from the network (storage-on-demand mode).
+    /// Failed to download a child storage proof from the network.
     ChildStorageRequest(network_service::ChildStorageProofRequestError),
 }
 
