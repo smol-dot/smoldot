@@ -155,7 +155,7 @@ pub struct ChildStorageProofRequestConfig<TChildTrie, TKeysIter> {
     pub keys: TKeysIter,
 }
 
-// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/sync/src/schema/api.v1.proto
+// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
 // for protocol definition (RemoteReadChildRequest message).
 
 /// Builds the bytes corresponding to a child storage proof request.
