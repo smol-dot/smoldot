@@ -2968,9 +2968,8 @@ enum Tree<TPlat: PlatformRef> {
 
 /// Threshold in bytes above which we use the storage-on-demand approach instead of
 /// call proof requests. This avoids exceeding protocol limits for large transactions.
-/// The light protocol has a 1 MiB request size limit, so we use 900 KiB to leave
-/// room for the protobuf encoding overhead (block hash, method name, etc.).
-const CALL_PROOF_REQUEST_PARAMETERS_SIZE_THRESHOLD: usize = 900 * 1024;
+const CALL_PROOF_REQUEST_PARAMETERS_SIZE_THRESHOLD: usize =
+    smoldot::network::codec::LIGHT_PROTOCOL_REQUEST_MAX_SIZE.saturating_sub(1024);
 
 /// See [`Background::progress_runtime_call_requests`].
 enum ProgressRuntimeCallRequest {

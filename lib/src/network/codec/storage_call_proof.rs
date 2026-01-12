@@ -19,6 +19,9 @@ use crate::util::protobuf;
 
 use alloc::{borrow::Cow, vec::Vec};
 
+/// Maximum size in bytes for light protocol requests (1 MiB).
+pub const LIGHT_PROTOCOL_REQUEST_MAX_SIZE: usize = 1024 * 1024;
+
 /// Description of a storage proof request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageProofRequestConfig<TKeysIter> {
