@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Statement Chat</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    body {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+    }
+    h1 {
+      color: #e94560;
+      margin-bottom: 10px;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .status.connecting { background: #f39c12; color: #000; }
+    .status.connected { background: #27ae60; color: #fff; }
+    .status.error { background: #e74c3c; color: #fff; }
+
+    .topic-section {
+      background: #16213e;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .topic-section label {
+      display: block;
+      margin-bottom: 8px;
+      color: #aaa;
+    }
+    .topic-section input {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 5px;
+      background: #0f3460;
+      color: #fff;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .topic-section button {
+      padding: 10px 20px;
+      background: #e94560;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .topic-section button:hover {
+      background: #ff6b6b;
+    }
+    .topic-section button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+
+    .messages {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 15px;
+      min-height: 300px;
+      max-height: 400px;
+      overflow-y: auto;
+      margin-bottom: 20px;
+    }
+    .message {
+      padding: 10px;
+      margin-bottom: 10px;
+      border-radius: 5px;
+      background: #0f3460;
+    }
+    .message.sent {
+      background: #1a4a1a;
+      border-left: 3px solid #27ae60;
+    }
+    .message.received {
+      background: #0f3460;
+      border-left: 3px solid #3498db;
+    }
+    .message .meta {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 5px;
+    }
+    .message .content {
+      word-break: break-word;
+    }
+    .no-messages {
+      color: #666;
+      text-align: center;
+      padding: 40px;
+    }
+
+    .send-section {
+      display: flex;
+      gap: 10px;
+    }
+    .send-section input {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 5px;
+      background: #16213e;
+      color: #fff;
+      font-size: 14px;
+    }
+    .send-section button {
+      padding: 12px 24px;
+      background: #e94560;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .send-section button:hover {
+      background: #ff6b6b;
+    }
+    .send-section button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+
+    .log {
+      margin-top: 20px;
+      padding: 10px;
+      background: #0a0a15;
+      border-radius: 5px;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+    .log-entry {
+      margin: 2px 0;
+      color: #888;
+    }
+    .log-entry.error { color: #e74c3c; }
+    .log-entry.info { color: #3498db; }
+  </style>
+</head>
+<body>
+  <h1>Statement Chat</h1>
+  <p style="color: #888; margin-bottom: 20px;">
+    A simple chat using the statement distribution protocol
+  </p>
+
+  <div id="status" class="status connecting">Initializing...</div>
+
+  <div class="topic-section">
+    <label>Topic (32-byte hex hash):</label>
+    <input type="text" id="topicInput" placeholder="0x0000000000000000000000000000000000000000000000000000000000000001" />
+    <button id="subscribeBtn" disabled>Subscribe to Topic</button>
+  </div>
+
+  <div class="messages" id="messages">
+    <div class="no-messages">No messages yet. Subscribe to a topic and start chatting!</div>
+  </div>
+
+  <div class="send-section">
+    <input type="text" id="messageInput" placeholder="Type your message..." disabled />
+    <button id="sendBtn" disabled>Send</button>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <script type="module" src="/dist/main.js"></script>
+</body>
+</html>

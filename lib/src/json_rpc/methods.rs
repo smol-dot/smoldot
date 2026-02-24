@@ -462,6 +462,14 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> Cow<'a, str>,
 
+    // Statement store methods for statement distribution protocol.
+    /// Submit a new statement to the store and broadcast to peers.
+    statement_submit(encoded: HexString) -> StatementSubmitResult,
+    /// Subscribe to statements matching the given topics. Returns subscription ID.
+    statement_subscribe(topics: Vec<HashHexString>) -> Cow<'a, str>,
+    /// Unsubscribe from statement notifications.
+    statement_unsubscribe(subscription: String) -> bool,
+
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_v1_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
@@ -540,6 +548,9 @@ define_methods! {
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
     sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
+
+    // Statement notification sent when a statement matching subscribed topics is received.
+    statement_notification(subscription: Cow<'a, str>, statement: HexString) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -985,6 +996,20 @@ pub enum NodeRole {
     Full,
     #[serde(rename = "Authority")]
     Authority,
+}
+
+/// Result of submitting a statement to the statement store.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StatementSubmitResult {
+    /// Statement was accepted and will be broadcast to peers.
+    #[serde(rename = "ok_broadcast")]
+    OkBroadcast,
+    /// Statement was accepted but will not be broadcast (e.g., duplicate).
+    #[serde(rename = "ok_ignore")]
+    OkIgnore,
+    /// Statement was invalid or rejected.
+    #[serde(rename = "error")]
+    Error(String),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

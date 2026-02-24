@@ -1,0 +1,17 @@
+{
+  "name": "statement-chat",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun build main.ts --outdir=dist --target=browser --splitting",
+    "dev": "bun run build && bun run server.ts"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.0.0",
+    "polkadot-api": "^1.23.1",
+    "smoldot": "file:../../wasm-node/javascript"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

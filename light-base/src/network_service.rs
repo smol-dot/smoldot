@@ -73,7 +73,10 @@ use smoldot::{
 };
 
 pub use codec::{CallProofRequestConfig, Role};
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use service::{
+    ChainId, EncodedMerkleProof, EncodedStatementNotification, PeerId, QueueNotificationError,
+    StatementProtocolConfig,
+};
 
 mod tasks;
 
@@ -134,6 +137,10 @@ pub struct ConfigChain {
     /// Must be `Some` if and only if the chain uses the GrandPa networking protocol. Contains the
     /// number of the finalized block at the time of the initialization.
     pub grandpa_protocol_finalized_block_height: Option<u64>,
+
+    /// If `Some`, enables the statement store protocol. Contains the topics that we are
+    /// interested in receiving statements for.
+    pub statement_protocol_config: Option<service::StatementProtocolConfig>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -242,6 +249,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 genesis_hash: config.genesis_block_hash,
                 role: Role::Light,
                 allow_inbound_block_requests: false,
+                statement_protocol_config: config.statement_protocol_config,
                 user_data: Chain {
                     log_name: config.log_name,
                     block_number_bytes: config.block_number_bytes,
@@ -552,6 +560,26 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx.await.unwrap()
     }
 
+    /// See [`service::ChainNetwork::gossip_send_statements`].
+    pub async fn send_statements(
+        self: Arc<Self>,
+        target: &PeerId,
+        notification: Vec<u8>,
+    ) -> Result<(), QueueNotificationError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.messages_tx
+            .send(ToBackgroundChain::SendStatements {
+                target: target.clone(),
+                notification,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Marks the given peers as belonging to the given chain, and adds some addresses to these
     /// peers to the address book.
     ///
@@ -636,6 +664,11 @@ pub enum Event {
     GrandpaCommitMessage {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
+    },
+    /// Received a statement notification from the network.
+    StatementNotification {
+        peer_id: PeerId,
+        statements: service::EncodedStatementNotification,
     },
 }
 
@@ -794,6 +827,11 @@ enum ToBackgroundChain {
         target: PeerId,
         scale_encoded_header: Vec<u8>,
         is_best: bool,
+        result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    SendStatements {
+        target: PeerId,
+        notification: Vec<u8>,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
     Discover {
@@ -1716,6 +1754,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(
                 chain_id,
+                ToBackgroundChain::SendStatements {
+                    target,
+                    notification,
+                    result,
+                },
+            ) => {
+                let send_result =
+                    task.network
+                        .gossip_send_statements(&target, chain_id, notification);
+                let _ = result.send(send_result);
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
                 ToBackgroundChain::Discover {
                     list,
                     important_nodes,
@@ -2610,6 +2661,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send =
                     Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementNotification {
+                chain_id,
+                peer_id,
+                statements,
+            }) => {
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some((
+                    chain_id,
+                    Event::StatementNotification {
+                        peer_id,
+                        statements,
+                    },
+                ));
             }
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?

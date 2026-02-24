@@ -402,6 +402,7 @@ impl NetworkService {
                         },
                     ),
                     allow_inbound_block_requests: true,
+                    statement_protocol_config: None,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
                         database: chain.database,
@@ -2097,6 +2098,9 @@ async fn background_task(mut inner: Inner) {
                         HashDisplay(message.decode().target_hash),
                     ),
                 );
+            }
+            WakeUpReason::NetworkEvent(service::Event::StatementNotification { .. }) => {
+                // Statements are not relevant to full node, ignore them.
             }
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 inner.log_callback.log(

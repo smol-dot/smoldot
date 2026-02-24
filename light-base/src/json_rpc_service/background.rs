@@ -219,6 +219,12 @@ struct Background<TPlat: PlatformRef> {
     /// The values are list of keys.
     state_get_keys_paged_cache:
         lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+
+    /// Active statement subscriptions. Maps subscription ID to list of topics to filter by.
+    statement_subscriptions: hashbrown::HashMap<String, Vec<[u8; 32]>, fnv::FnvBuildHasher>,
+
+    /// Receiver for network events (statements from peers).
+    network_events_rx: Option<async_channel::Receiver<network_service::Event>>,
 }
 
 /// State of the subscription towards the runtime service.
@@ -563,7 +569,15 @@ pub(super) async fn run<TPlat: PlatformRef>(
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: false,
         platform: config.platform,
+        statement_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        network_events_rx: None,
     };
+
+    // Subscribe to network events for receiving statements
+    me.network_events_rx = Some(me.network_service.subscribe().await);
 
     loop {
         // Yield at every loop in order to provide better tasks granularity.
@@ -595,6 +609,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             StartStorageSubscriptionsUpdates,
             NotifyFinalizedHeads,
             NotifyNewHeadsRuntimeSubscriptions(Option<[u8; 32]>),
+            NetworkStatementReceived(Vec<u8>),
         }
 
         // Wait until there is something to do.
@@ -686,6 +701,24 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.next_garbage_collection = Box::pin(me.platform.sleep(Duration::from_secs(10)));
                 WakeUpReason::GarbageCollection
             })
+            .or(async {
+                // Poll for network events (incoming statements)
+                let Some(rx) = &me.network_events_rx else {
+                    return future::pending().await;
+                };
+                loop {
+                    let Ok(event) = rx.recv().await else {
+                        return future::pending().await;
+                    };
+                    if let network_service::Event::StatementNotification { statements, .. } = event
+                    {
+                        return WakeUpReason::NetworkStatementReceived(
+                            statements.as_encoded().to_vec(),
+                        );
+                    }
+                    // Ignore other events and continue polling
+                }
+            })
             .await
         };
 
@@ -708,6 +741,35 @@ pub(super) async fn run<TPlat: PlatformRef>(
                 me.multistage_requests_to_advance.shrink_to_fit();
                 me.block_headers_pending.shrink_to_fit();
                 me.block_runtimes_pending.shrink_to_fit();
+                me.statement_subscriptions.shrink_to_fit();
+            }
+
+            WakeUpReason::NetworkStatementReceived(notification_data) => {
+                // Received statements from a peer. Decode and notify matching subscriptions.
+                if let Ok(statements) = codec::decode_statement_notification(&notification_data) {
+                    for statement in statements {
+                        let encoded = codec::encode_statement(&statement);
+
+                        // Check each subscription for topic match
+                        for (sub_id, sub_topics) in &me.statement_subscriptions {
+                            let matches = if sub_topics.is_empty() {
+                                true
+                            } else {
+                                statement.topics.iter().any(|st| sub_topics.contains(st))
+                            };
+
+                            if matches {
+                                let notification =
+                                    methods::ServerToClient::statement_notification {
+                                        subscription: Cow::Borrowed(sub_id),
+                                        statement: methods::HexString(encoded.clone()),
+                                    }
+                                    .to_json_request_object_parameters(None);
+                                let _ = me.responses_tx.send(notification).await;
+                            }
+                        }
+                    }
+                }
             }
 
             WakeUpReason::IncomingJsonRpcRequest(request_json) => {
@@ -840,7 +902,10 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     | methods::MethodCall::transactionWatch_v1_unwatch { .. }
                     | methods::MethodCall::sudo_network_unstable_watch { .. }
                     | methods::MethodCall::sudo_network_unstable_unwatch { .. }
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
+                    | methods::MethodCall::statement_submit { .. }
+                    | methods::MethodCall::statement_subscribe { .. }
+                    | methods::MethodCall::statement_unsubscribe { .. } => {}
                 }
 
                 // Actual requests handler.
@@ -1708,6 +1773,62 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .responses_tx
                             .send(
                                 methods::Response::system_version((&me.system_version).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    // Statement RPC methods.
+                    methods::MethodCall::statement_submit { encoded } => {
+                        // Broadcast to all connected peers
+                        let network = me.network_service.clone();
+                        let peers: Vec<_> = network.peers_list().await.collect();
+                        for peer in peers {
+                            let _ = network
+                                .clone()
+                                .send_statements(&peer, encoded.0.clone())
+                                .await;
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_submit(
+                                    methods::StatementSubmitResult::OkBroadcast,
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_subscribe { topics } => {
+                        // Generate subscription ID
+                        let subscription_id: String = {
+                            let mut id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut id);
+                            hex::encode(id)
+                        };
+
+                        // Store subscription with topics
+                        let topic_bytes: Vec<[u8; 32]> = topics.into_iter().map(|t| t.0).collect();
+                        me.statement_subscriptions
+                            .insert(subscription_id.clone(), topic_bytes);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_subscribe(Cow::Owned(subscription_id))
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::statement_unsubscribe { subscription } => {
+                        let existed = me.statement_subscriptions.remove(&subscription).is_some();
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::statement_unsubscribe(existed)
                                     .to_json_response(request_id_json),
                             )
                             .await;
