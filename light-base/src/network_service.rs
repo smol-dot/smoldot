@@ -957,6 +957,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
             NextRecentConnectionRestore,
+            NotificationRetryReady,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
             MessageFromConnection {
@@ -970,6 +971,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             EventSendersReady,
             StartDiscovery(ChainId),
         }
+
+        let notification_retry_time = task.network.next_notification_retry_time().cloned();
 
         let wake_up_reason = {
             let message_received = async {
@@ -998,7 +1001,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
                     && task.pending_new_subscriptions.is_empty())
-                .then(|| task.network.next_event())
+                .then(|| task.network.next_event(&task.platform.now()))
                 .flatten()
                 {
                     WakeUpReason::NetworkEvent(event)
@@ -1110,6 +1113,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let ((_, chain_id), _) = next_discovery.remove_entry();
                 WakeUpReason::StartDiscovery(chain_id)
             };
+            let notification_retry = async {
+                if let Some(retry_time) = notification_retry_time {
+                    task.platform.sleep_until(retry_time).await;
+                    WakeUpReason::NotificationRetryReady
+                } else {
+                    future::pending().await
+                }
+            };
 
             message_for_chain_received
                 .or(message_received)
@@ -1118,6 +1129,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
                 .or(start_discovery)
+                .or(notification_retry)
                 .await
         };
 
@@ -2542,6 +2554,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
                 unreachable!()
             }
+            WakeUpReason::NetworkEvent(service::Event::GossipInboundResult {
+                peer_id,
+                chain_id,
+                outcome,
+            }) => {
+                log!(
+                    &task.platform,
+                    Debug,
+                    "network",
+                    "gossip-in-result",
+                    chain = &task.network[chain_id].log_name,
+                    peer_id,
+                    ?outcome,
+                );
+            }
             WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
                 peer_id,
                 substream_id,
@@ -2645,6 +2672,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::NextRecentConnectionRestore => {
                 task.num_recent_connection_opening =
                     task.num_recent_connection_opening.saturating_sub(1);
+            }
+            WakeUpReason::NotificationRetryReady => {
+                // The event loop will restart, calling next_event() which
+                // processes ready pending retries at the top.
             }
             WakeUpReason::CanStartConnect(expected_peer_id) => {
                 let Some(multiaddr) = task

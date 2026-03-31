@@ -413,6 +413,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks,
                     slab_insertion: self.shared.sources.vacant_entry(),
                     warp_sync: &mut self.warp_sync,
+                    best_block_number,
                     marker: PhantomData,
                 })
             }
@@ -421,6 +422,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks,
                     slab_insertion: self.shared.sources.vacant_entry(),
                     warp_sync: &mut self.warp_sync,
+                    best_block_number,
                     marker: PhantomData,
                 })
             }
@@ -429,6 +431,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks,
                     slab_insertion: self.shared.sources.vacant_entry(),
                     warp_sync: &mut self.warp_sync,
+                    best_block_number,
                     marker: PhantomData,
                 })
             }
@@ -437,6 +440,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks,
                     slab_insertion: self.shared.sources.vacant_entry(),
                     warp_sync: &mut self.warp_sync,
+                    best_block_number,
                     marker: PhantomData,
                 })
             }
@@ -1485,6 +1489,7 @@ pub struct AddSourceOldBlock<'a, TRq, TSrc, TBl> {
     all_forks:
         all_forks::AddSourceOldBlock<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    best_block_number: u64,
     marker: PhantomData<TRq>,
 }
 
@@ -1503,7 +1508,10 @@ impl<'a, TRq, TSrc, TBl> AddSourceOldBlock<'a, TRq, TSrc, TBl> {
             .add_source(AllForksSourceExtra { outer_source_id });
 
         let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
-            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+            Some(warp_sync.add_source(
+                WarpSyncSourceExtra { outer_source_id },
+                self.best_block_number,
+            ))
         } else {
             None
         };
@@ -1526,6 +1534,7 @@ pub struct AddSourceKnown<'a, TRq, TSrc, TBl> {
     all_forks:
         all_forks::AddSourceKnown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    best_block_number: u64,
     marker: PhantomData<TRq>,
 }
 
@@ -1552,7 +1561,10 @@ impl<'a, TRq, TSrc, TBl> AddSourceKnown<'a, TRq, TSrc, TBl> {
             .add_source(AllForksSourceExtra { outer_source_id });
 
         let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
-            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+            Some(warp_sync.add_source(
+                WarpSyncSourceExtra { outer_source_id },
+                self.best_block_number,
+            ))
         } else {
             None
         };
@@ -1575,6 +1587,7 @@ pub struct AddSourceUnknown<'a, TRq, TSrc, TBl> {
     all_forks:
         all_forks::AddSourceUnknown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    best_block_number: u64,
     marker: PhantomData<TRq>,
 }
 
@@ -1601,7 +1614,10 @@ impl<'a, TRq, TSrc, TBl> AddSourceUnknown<'a, TRq, TSrc, TBl> {
         );
 
         let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
-            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+            Some(warp_sync.add_source(
+                WarpSyncSourceExtra { outer_source_id },
+                self.best_block_number,
+            ))
         } else {
             None
         };

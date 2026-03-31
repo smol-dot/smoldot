@@ -577,9 +577,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         // Errors of type `JustificationEngineMismatch` indicate that the chain
                         // uses a finality engine that smoldot doesn't recognize. This is a benign
                         // error that shouldn't lead to a ban.
+                        // Errors of type `UnknownTargetBlock` can happen during initial sync when
+                        // a justification targets a block not yet chain-verified from genesis.
+                        // This is benign and shouldn't lead to a ban.
                         if !matches!(
                             error,
                             all::JustificationVerifyError::JustificationEngineMismatch
+                                | all::JustificationVerifyError::FinalityVerify(
+                                    smoldot::chain::blocks_tree::FinalityVerifyError::UnknownTargetBlock { .. }
+                                )
                         ) {
                             log!(
                                 &task.platform,

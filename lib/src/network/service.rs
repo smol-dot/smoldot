@@ -233,10 +233,22 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
         NotificationsSubstreamState,
         collection::SubstreamId,
     )>,
+
+    /// Pending outbound notification substream retries. When a Tx/Grandpa substream
+    /// is refused, a retry entry is stored here with a delay. On each `next_event()`
+    /// call, entries whose timer has elapsed are processed.
+    pending_notification_out_retries: Vec<PendingNotificationOutRetry<TNow>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PeerIndex(usize);
+
+struct PendingNotificationOutRetry<TNow> {
+    retry_after: TNow,
+    protocol: NotificationsProtocol,
+    peer_index: PeerIndex,
+    connection_id: collection::ConnectionId,
+}
 
 struct Chain<TChain> {
     /// See [`ChainConfig::block_number_bytes`].
@@ -379,6 +391,7 @@ where
             ),
             connections_by_peer_id: BTreeSet::new(),
             notification_substreams_by_peer_id: BTreeSet::new(),
+            pending_notification_out_retries: Vec::new(),
             gossip_desired_peers_by_chain: BTreeSet::new(),
             gossip_desired_peers: BTreeSet::new(),
             unconnected_desired: hashbrown::HashSet::with_capacity_and_hasher(
@@ -1135,8 +1148,106 @@ where
         self.inner.inject_connection_message(connection_id, message)
     }
 
+    /// Returns the earliest time at which a pending notification substream retry
+    /// should be processed, or `None` if no retries are pending.
+    /// The caller should use this to set up an async timer to wake the event loop.
+    pub fn next_notification_retry_time(&self) -> Option<&TNow> {
+        self.pending_notification_out_retries
+            .iter()
+            .map(|r| &r.retry_after)
+            .min()
+    }
+
     /// Returns the next event produced by the service.
-    pub fn next_event(&mut self) -> Option<Event<TConn>> {
+    pub fn next_event(&mut self, now: &TNow) -> Option<Event<TConn>> {
+        // Process pending notification substream retries whose timers have elapsed.
+        let mut retry_idx = 0;
+        while retry_idx < self.pending_notification_out_retries.len() {
+            if *now < self.pending_notification_out_retries[retry_idx].retry_after {
+                retry_idx += 1;
+                continue;
+            }
+
+            let retry = self.pending_notification_out_retries.swap_remove(retry_idx);
+
+            // Skip if connection is shutting down.
+            if self
+                .inner
+                .connection_state(retry.connection_id)
+                .shutting_down
+            {
+                continue;
+            }
+
+            // Verify the block announce substream is still open for this peer.
+            let chain_index = match retry.protocol {
+                NotificationsProtocol::Transactions { chain_index }
+                | NotificationsProtocol::Grandpa { chain_index } => chain_index,
+                _ => continue,
+            };
+            let has_block_announce = self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        retry.peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::MIN,
+                        SubstreamId::MIN,
+                    )
+                        ..=(
+                            NotificationsProtocol::BlockAnnounces { chain_index },
+                            retry.peer_index,
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::MAX,
+                            SubstreamId::MAX,
+                        ),
+                )
+                .any(|(_, _, _, state, _)| {
+                    matches!(state, NotificationsSubstreamState::Open { .. })
+                });
+            if !has_block_announce {
+                continue;
+            }
+
+            // Re-open the outbound notification substream.
+            let new_substream_id = self.inner.open_out_notifications(
+                retry.connection_id,
+                codec::encode_protocol_name_string(match retry.protocol {
+                    NotificationsProtocol::Transactions { .. } => {
+                        codec::ProtocolName::Transactions {
+                            genesis_hash: self.chains[chain_index].genesis_hash,
+                            fork_id: self.chains[chain_index].fork_id.as_deref(),
+                        }
+                    }
+                    NotificationsProtocol::Grandpa { .. } => codec::ProtocolName::Grandpa {
+                        genesis_hash: self.chains[chain_index].genesis_hash,
+                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                    },
+                    _ => unreachable!(),
+                }),
+                self.notifications_protocol_handshake_timeout(retry.protocol),
+                self.notifications_protocol_handshake(retry.protocol),
+                self.notifications_protocol_max_handshake_size(retry.protocol),
+            );
+            let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                retry.protocol,
+                retry.peer_index,
+                SubstreamDirection::Out,
+                NotificationsSubstreamState::Pending,
+                new_substream_id,
+            ));
+            debug_assert!(_was_inserted);
+            let _prev_value = self.substreams.insert(
+                new_substream_id,
+                SubstreamInfo {
+                    connection_id: retry.connection_id,
+                    protocol: Some(Protocol::Notifications(retry.protocol)),
+                },
+            );
+            debug_assert!(_prev_value.is_none());
+        }
+
         loop {
             let inner_event = self.inner.next_event()?;
             match inner_event {
@@ -2075,10 +2186,10 @@ where
                                     .is_some()
                             );
 
-                            // If the substream failed to open, we simply try again.
-                            // Trying again means that we might be hammering the remote with
-                            // substream requests, however as of the writing of this text this is
-                            // necessary in order to bypass an issue in Substrate.
+                            // If the substream failed to open, schedule a retry after
+                            // a delay. This avoids hammering the remote with substream
+                            // requests, which on WebRTC can starve the connection and
+                            // prevent other traffic from flowing.
                             // Note that in the situation where the connection is shutting down,
                             // we don't re-open the substream on a different connection, but
                             // that's ok as the block announces substream should be closed soon.
@@ -2087,52 +2198,14 @@ where
                                     continue;
                                 }
 
-                                let new_substream_id = self.inner.open_out_notifications(
-                                    connection_id,
-                                    codec::encode_protocol_name_string(match substream_protocol {
-                                        NotificationsProtocol::Transactions { .. } => {
-                                            codec::ProtocolName::Transactions {
-                                                genesis_hash: self.chains[chain_index].genesis_hash,
-                                                fork_id: self.chains[chain_index]
-                                                    .fork_id
-                                                    .as_deref(),
-                                            }
-                                        }
-                                        NotificationsProtocol::Grandpa { .. } => {
-                                            codec::ProtocolName::Grandpa {
-                                                genesis_hash: self.chains[chain_index].genesis_hash,
-                                                fork_id: self.chains[chain_index]
-                                                    .fork_id
-                                                    .as_deref(),
-                                            }
-                                        }
-                                        _ => unreachable!(),
-                                    }),
-                                    self.notifications_protocol_handshake_timeout(
-                                        substream_protocol,
-                                    ),
-                                    self.notifications_protocol_handshake(substream_protocol),
-                                    self.notifications_protocol_max_handshake_size(
-                                        substream_protocol,
-                                    ),
-                                );
-                                let _was_inserted =
-                                    self.notification_substreams_by_peer_id.insert((
-                                        substream_protocol,
+                                self.pending_notification_out_retries.push(
+                                    PendingNotificationOutRetry {
+                                        retry_after: now.clone() + Duration::from_secs(2),
+                                        protocol: substream_protocol,
                                         peer_index,
-                                        SubstreamDirection::Out,
-                                        NotificationsSubstreamState::Pending,
-                                        new_substream_id,
-                                    ));
-                                debug_assert!(_was_inserted);
-                                let _prev_value = self.substreams.insert(
-                                    new_substream_id,
-                                    SubstreamInfo {
                                         connection_id,
-                                        protocol: substream_info.protocol,
                                     },
                                 );
-                                debug_assert!(_prev_value.is_none());
                                 continue;
                             }
 
@@ -2146,6 +2219,12 @@ where
                                 substream_id,
                             ));
                             debug_assert!(_was_inserted);
+
+                            // Clear any pending retries on success.
+                            self.pending_notification_out_retries.retain(|r| {
+                                !(r.protocol == substream_protocol
+                                    && r.peer_index == peer_index)
+                            });
 
                             // In case of Grandpa, we immediately send a neighbor packet with
                             // the current local state.
@@ -2283,6 +2362,17 @@ where
                                 debug_assert!(_was_inserted);
                             }
 
+                            // Clear pending retries for Tx/Grandpa substreams on gossip
+                            // disconnect.
+                            self.pending_notification_out_retries.retain(|r| {
+                                !matches!(
+                                    r.protocol,
+                                    NotificationsProtocol::Transactions { chain_index: ci }
+                                    | NotificationsProtocol::Grandpa { chain_index: ci }
+                                    if ci == chain_index && r.peer_index == peer_index
+                                )
+                            });
+
                             // The transactions and Grandpa protocols are tied to the block
                             // announces substream. As such, we also close any transactions or
                             // grandpa substream, either pending or fully opened.
@@ -2388,52 +2478,22 @@ where
                         }
 
                         // The transactions and grandpa protocols are tied to the block announces
-                        // substream. If there is a block announce substream with the peer, we try
-                        // to reopen these two substreams.
+                        // substream. If there is a block announce substream with the peer, we
+                        // schedule a retry after a delay to reopen these substreams.
                         NotificationsProtocol::Transactions { .. }
                         | NotificationsProtocol::Grandpa { .. } => {
-                            // Don't actually try to reopen if the connection is shutting down.
-                            // Note that we don't try to reopen on a different connection, as the
-                            // block announces substream will very soon be closed too anyway.
                             if self.inner.connection_state(connection_id).shutting_down {
                                 continue;
                             }
 
-                            let new_substream_id = self.inner.open_out_notifications(
-                                connection_id,
-                                codec::encode_protocol_name_string(match substream_protocol {
-                                    NotificationsProtocol::Transactions { chain_index } => {
-                                        codec::ProtocolName::Transactions {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        }
-                                    }
-                                    NotificationsProtocol::Grandpa { chain_index } => {
-                                        codec::ProtocolName::Grandpa {
-                                            genesis_hash: self.chains[chain_index].genesis_hash,
-                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                        }
-                                    }
-                                    _ => unreachable!(),
-                                }),
-                                self.notifications_protocol_handshake_timeout(substream_protocol),
-                                self.notifications_protocol_handshake(substream_protocol),
-                                self.notifications_protocol_max_handshake_size(substream_protocol),
-                            );
-                            self.substreams.insert(
-                                new_substream_id,
-                                SubstreamInfo {
+                            self.pending_notification_out_retries.push(
+                                PendingNotificationOutRetry {
+                                    retry_after: now.clone() + Duration::from_secs(2),
+                                    protocol: substream_protocol,
+                                    peer_index,
                                     connection_id,
-                                    protocol: Some(Protocol::Notifications(substream_protocol)),
                                 },
                             );
-                            self.notification_substreams_by_peer_id.insert((
-                                substream_protocol,
-                                peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::Pending,
-                                new_substream_id,
-                            ));
                         }
                     }
                 }
@@ -2508,7 +2568,11 @@ where
                         self.inner.reject_in_notifications(substream_id);
                         let _was_removed = self.substreams.remove(&substream_id);
                         debug_assert!(_was_removed.is_some());
-                        continue;
+                        return Some(Event::GossipInboundResult {
+                            peer_id: self.peers[peer_index.0].clone(),
+                            chain_id: ChainId(chain_index),
+                            outcome: GossipInboundOutcome::RejectedDuplicate,
+                        });
                     }
 
                     // If an outgoing block announces notifications protocol (either pending or
@@ -2549,7 +2613,11 @@ where
                             self.notifications_protocol_handshake(substream_protocol),
                             self.notifications_protocol_max_notification_size(substream_protocol),
                         );
-                        continue;
+                        return Some(Event::GossipInboundResult {
+                            peer_id: self.peers[peer_index.0].clone(),
+                            chain_id: ChainId(chain_index),
+                            outcome: GossipInboundOutcome::Accepted,
+                        });
                     }
 
                     // It is forbidden to cold-open a substream other than the block announces
@@ -2561,7 +2629,11 @@ where
                         self.inner.reject_in_notifications(substream_id);
                         let _was_removed = self.substreams.remove(&substream_id);
                         debug_assert!(_was_removed.is_some());
-                        continue;
+                        return Some(Event::GossipInboundResult {
+                            peer_id: self.peers[peer_index.0].clone(),
+                            chain_id: ChainId(chain_index),
+                            outcome: GossipInboundOutcome::RejectedColdOpen,
+                        });
                     }
 
                     // Update the local state and return the event.
@@ -4424,10 +4496,32 @@ pub enum Event<TConn> {
         /// This [`SubstreamId`] is considered dead and no longer valid.
         substream_id: SubstreamId,
     },
+
+    /// An inbound notification substream was received from a remote peer and has been
+    /// processed. This is a diagnostic event indicating the outcome.
+    GossipInboundResult {
+        /// Peer that opened the inbound substream.
+        peer_id: PeerId,
+        /// Chain of the notification substream.
+        chain_id: ChainId,
+        /// Outcome of processing the inbound substream.
+        outcome: GossipInboundOutcome,
+    },
     /*Transactions {
         peer_id: PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+/// See [`Event::GossipInboundResult`].
+#[derive(Debug)]
+pub enum GossipInboundOutcome {
+    /// Auto-accepted because an outbound substream already exists.
+    Accepted,
+    /// Rejected because a duplicate inbound substream already exists.
+    RejectedDuplicate,
+    /// Rejected because non-block-announces substreams cannot be cold-opened.
+    RejectedColdOpen,
 }
 
 /// See [`Event::ProtocolError`].

@@ -137,6 +137,13 @@ export interface ConnectionConfig {
     address: instance.ParsedMultiaddr,
 
     /**
+     * Optional callback for platform-level diagnostic logging.
+     * Uses the same signature as the smoldot log callback:
+     * level 1=error, 2=warn, 3=info, 4=debug, 5=trace.
+     */
+    logCallback?: (level: number, target: string, message: string) => void;
+
+    /**
      * Callback called when a multistream connection knows information about its handshake. Should
      * be called as soon as possible.
      *
@@ -342,6 +349,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 const connectionId = event.connectionId;
                 state.connections.set(connectionId, platformBindings.connect({
                     address: event.address,
+                    logCallback,
                     onConnectionReset(message) {
                         if (state.instance.status !== "ready")
                             throw new Error();

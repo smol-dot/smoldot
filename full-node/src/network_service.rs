@@ -869,11 +869,14 @@ async fn background_task(mut inner: Inner) {
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
             StartKademliaDiscoveries,
+            NotificationRetryReady,
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
             },
         }
+
+        let notification_retry_time = inner.network.next_notification_retry_time().cloned();
 
         let wake_up_reason = async {
             inner
@@ -890,7 +893,7 @@ async fn background_task(mut inner: Inner) {
             let num_pending_out_attempts = &inner.num_pending_out_attempts;
             async move {
                 if let Some(event) = (event_senders_ready && event_pending_send.is_none())
-                    .then(|| network.next_event())
+                    .then(|| network.next_event(&Instant::now()))
                     .flatten()
                 {
                     WakeUpReason::NetworkEvent(event)
@@ -986,6 +989,14 @@ async fn background_task(mut inner: Inner) {
                 socket_addr,
             }
         })
+        .or(async {
+            if let Some(retry_time) = notification_retry_time {
+                smol::Timer::at(retry_time).await;
+                WakeUpReason::NotificationRetryReady
+            } else {
+                future::pending().await
+            }
+        })
         .await;
 
         match wake_up_reason {
@@ -1066,6 +1077,10 @@ async fn background_task(mut inner: Inner) {
                 )));
             }
 
+            WakeUpReason::NotificationRetryReady => {
+                // The event loop will restart, calling next_event() which
+                // processes ready pending retries at the top.
+            }
             WakeUpReason::StartKademliaDiscoveries => {
                 for chain_id in inner.network.chains().collect::<Vec<_>>() {
                     let random_peer_id =
@@ -1777,6 +1792,19 @@ async fn background_task(mut inner: Inner) {
                 // All `GossipInDesired` are immediately accepted or rejected, meaning
                 // that this event can't happen.
                 unreachable!()
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipInboundResult {
+                peer_id,
+                chain_id,
+                outcome,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "gossip-in-result; chain={}; peer_id={peer_id}; outcome={outcome:?}",
+                        inner.network[chain_id].log_name,
+                    ),
+                );
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,

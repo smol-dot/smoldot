@@ -194,6 +194,17 @@ function connect(config: ConnectionConfig): Connection {
         const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
             config.address;
 
+        // Log helper: routes through smoldot's log system if available, falls back to console.
+        const log = (level: number, message: string) => {
+            if (config.logCallback) {
+                config.logCallback(level, 'webrtc-platform', message);
+            } else if (level <= 2) {
+                console.warn('[webrtc-platform] ' + message);
+            } else {
+                console.debug('[webrtc-platform] ' + message);
+            }
+        };
+
         const state: {
             // Note that `pc` can be the connection, but also null or undefined.
             // `undefined` means "certificate generation in progress", while `null` means "opening must
@@ -208,11 +219,19 @@ function connect(config: ConnectionConfig): Connection {
             // Set to `true` before any outbound substream is open. Used to detect when the first
             // substream is opened.
             isFirstOutSubstream: boolean,
+            // Set to `true` after the first SDP offer/answer exchange completes.
+            // In webrtc-direct, re-negotiation is never needed because the SDP answer
+            // is static (derived from the remote's multiaddress and certificate).
+            hasNegotiated: boolean,
+            // Counter for inbound data channels received (for diagnostics).
+            inboundChannelCount: number,
         } = {
             pc: undefined,
             dataChannels: new Map(),
             nextStreamId: 0,
             isFirstOutSubstream: true,
+            hasNegotiated: false,
+            inboundChannelCount: 0,
         };
 
         // Kills all the JavaScript objects (the connection and all its substreams), ensuring that no
@@ -250,18 +269,34 @@ function connect(config: ConnectionConfig): Connection {
             state.nextStreamId += 1;
             dataChannel.binaryType = 'arraybuffer';
 
+            log(4, `addChannel; streamId=${streamId}, direction=${direction}, channelId=${dataChannel.id}, readyState=${dataChannel.readyState}`);
+
             let isOpen = { value: false };
 
             dataChannel.onopen = () => {
-                console.assert(!isOpen.value, "substream opened twice")
+                if (isOpen.value) return; // Already handled below
                 isOpen.value = true;
+                log(4, `channel-open; streamId=${streamId}, direction=${direction}, channelId=${dataChannel.id}`);
                 config.onStreamOpened(streamId, direction);
                 config.onWritableBytes(65536, streamId);
             };
 
+            // The data channel may already be in the "open" state by the time we
+            // register the onopen handler (e.g., for inbound channels negotiated
+            // while we were processing other events). In that case the onopen event
+            // will never fire, so we must notify smoldot immediately.
+            if (dataChannel.readyState === "open") {
+                isOpen.value = true;
+                log(4, `channel-already-open; streamId=${streamId}, direction=${direction}, channelId=${dataChannel.id}`);
+                config.onStreamOpened(streamId, direction);
+                config.onWritableBytes(65536, streamId);
+            }
+
             dataChannel.onerror = dataChannel.onclose = (event) => {
                 // Note that Firefox doesn't support <https://developer.mozilla.org/en-US/docs/Web/API/RTCErrorEvent>.
                 const message = (event instanceof RTCErrorEvent) ? event.error.toString() : "RTCDataChannel closed";
+
+                log(isOpen.value ? 4 : 2, `channel-${isOpen.value ? 'closed' : 'failed'}; streamId=${streamId}, direction=${direction}, channelId=${dataChannel.id}, message=${message}`);
 
                 if (!isOpen.value) {
                     // Substream wasn't opened yet and thus has failed to open. The API has no
@@ -369,13 +404,28 @@ function connect(config: ConnectionConfig): Connection {
             // Therefore we don't care about events concerning the fact that the connection is now fully
             // open.
             state.pc.onconnectionstatechange = (_event) => {
+                log(4, `connection-state-change; state=${state.pc!.connectionState}`);
                 if (state.pc!.connectionState == "closed" || state.pc!.connectionState == "disconnected" || state.pc!.connectionState == "failed") {
                     killAllJs();
                     config.onConnectionReset("WebRTC state transitioned to " + state.pc!.connectionState);
                 }
             };
 
+            state.pc.oniceconnectionstatechange = (_event) => {
+                log(4, `ice-connection-state-change; state=${state.pc!.iceConnectionState}`);
+            };
+
             state.pc.onnegotiationneeded = async (_event) => {
+                // In webrtc-direct, the SDP answer is static (derived from the remote
+                // peer's multiaddress and certificate hash). Re-negotiation after the
+                // initial exchange is never needed and can disrupt the SCTP association,
+                // causing pending inbound DCEP OPEN messages to be silently lost.
+                if (state.hasNegotiated) {
+                    log(5, 'negotiation-needed; already negotiated, ignoring');
+                    return;
+                }
+                log(4, 'negotiation-needed; starting initial SDP exchange');
+
                 // Create a new offer and set it as local description.
                 let sdpOffer = (await state.pc!.createOffer()).sdp!;
                 // We check that the locally-generated SDP offer has a data channel with the UDP
@@ -461,10 +511,13 @@ function connect(config: ConnectionConfig): Connection {
                     "a=candidate:1 1 UDP 1 " + targetIp + " " + String(targetPort) + " typ host" + "\n";
 
                 await state.pc!.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+                state.hasNegotiated = true;
+                log(4, 'negotiation-needed; SDP exchange complete');
             };
 
             state.pc.ondatachannel = ({ channel }) => {
-                // TODO: is the substream maybe already open? according to the Internet it seems that no but it's unclear
+                state.inboundChannelCount += 1;
+                log(4, `ondatachannel; channelId=${channel.id}, readyState=${channel.readyState}, inboundCount=${state.inboundChannelCount}`);
                 addChannel(channel, 'inbound')
             };
 
@@ -509,8 +562,10 @@ function connect(config: ConnectionConfig): Connection {
                 // per the libp2p WebRTC specification.
                 // TODO: adjusting the options based on the first substream is a bit hacky
                 const opts = state.isFirstOutSubstream ? { negotiated: true, id: 0 } : {};
+                log(4, `openOutSubstream; first=${state.isFirstOutSubstream}, opts=${JSON.stringify(opts)}`);
                 state.isFirstOutSubstream = false;
-                addChannel(state.pc!.createDataChannel("", opts), 'outbound')
+
+                addChannel(state.pc!.createDataChannel("", opts), 'outbound');
             }
         };
 
