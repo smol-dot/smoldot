@@ -2108,8 +2108,59 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_blake2_256_verify_proof_version_1
+            | HostFunction::ext_trie_blake2_256_verify_proof_version_2 => {
+                let state_version = if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_verify_proof_version_2
+                ) {
+                    expect_state_version!(4)
+                } else {
+                    TrieEntryVersion::V0
+                };
+
+                let root = expect_pointer_constant_size!(0, 32);
+                let proof = expect_pointer_size!(1).as_ref().to_vec();
+                let key = expect_pointer_size!(2).as_ref().to_vec();
+                let value = expect_pointer_size!(3).as_ref().to_vec();
+
+                let outcome =
+                    match trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                        proof: &proof,
+                    }) {
+                        Ok(decoded) => match decoded
+                            .trie_node_info(&root, trie::bytes_to_nibbles(key.iter().copied()))
+                        {
+                            Ok(info) => match info.storage_value {
+                                trie::proof_decode::StorageValue::Known {
+                                    value: found_value,
+                                    ..
+                                } => found_value == &value[..],
+                                trie::proof_decode::StorageValue::HashKnownValueMissing(hash) => {
+                                    // The proof contains only the hash of the value.
+                                    // This happens with state version V1 where values
+                                    // >= 33 bytes are stored as their blake2b hash.
+                                    // Verify by hashing the expected value and comparing.
+                                    matches!(state_version, TrieEntryVersion::V1)
+                                        && *hash
+                                            == <[u8; 32]>::try_from(
+                                                blake2_rfc::blake2b::blake2b(32, &[], &value)
+                                                    .as_bytes(),
+                                            )
+                                            .unwrap_or_else(|_| unreachable!())
+                                }
+                                trie::proof_decode::StorageValue::None => false,
+                            },
+                            Err(_) => false,
+                        },
+                        Err(_) => false,
+                    };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if outcome { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {

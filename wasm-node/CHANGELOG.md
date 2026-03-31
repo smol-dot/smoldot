@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `ext_trie_blake2_256_verify_proof_version_1` and `ext_trie_blake2_256_verify_proof_version_2` host functions. ([#2221](https://github.com/smol-dot/smoldot/pull/2221))
+
 ### Fixed
 
 - Fix execution proofs with inputs bigger than 1MiB failing due to protocol limits. Smoldot now uses storage-on-demand for large inputs. ([#2196](https://github.com/smol-dot/smoldot/pull/2196))
