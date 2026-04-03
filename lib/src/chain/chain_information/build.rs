@@ -837,6 +837,9 @@ impl ChainInformationBuild {
                 runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
                 }
+                runtime_call::RuntimeCall::EcdsaPublicKeyRecover(sig) => {
+                    call = sig.verify_and_resume();
+                }
                 runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                     // Do nothing.
                     call = req.resume();
