@@ -1584,10 +1584,25 @@ impl Inner {
                 }
             }
 
-            if matches!(self.vm, host::HostVm::Finished(_))
-                && !self.offchain_storage_changes.is_empty()
-            {
-                return RuntimeCall::OffchainStorageSet(OffchainStorageSet { inner: self });
+            if matches!(self.vm, host::HostVm::Finished(_)) {
+                if !self
+                    .pending_storage_changes
+                    .offchain_storage_changes
+                    .is_empty()
+                {
+                    self.offchain_storage_changes.extend(
+                        self.pending_storage_changes
+                            .offchain_storage_changes
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone())),
+                    );
+                    self.pending_storage_changes
+                        .offchain_storage_changes
+                        .clear();
+                }
+                if !self.offchain_storage_changes.is_empty() {
+                    return RuntimeCall::OffchainStorageSet(OffchainStorageSet { inner: self });
+                }
             }
 
             match self.vm {
