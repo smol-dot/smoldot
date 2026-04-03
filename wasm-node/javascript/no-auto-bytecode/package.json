@@ -1,0 +1,16 @@
+{
+  "types": "../dist/mjs/no-auto-bytecode-browser.d.ts",
+  "module": "../dist/mjs/no-auto-bytecode-browser.js",
+  "exports": {
+    ".": {
+      "node": {
+        "import": "../dist/mjs/no-auto-bytecode-nodejs.js",
+        "require": "../dist/cjs/no-auto-bytecode-nodejs.js"
+      },
+      "default": {
+        "import": "../dist/mjs/no-auto-bytecode-browser.js",
+        "require": "../dist/cjs/no-auto-bytecode-browser.js"
+      }
+    }
+  }
+}
