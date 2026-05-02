@@ -1672,6 +1672,14 @@ async fn run_background<TPlat: PlatformRef>(
                     (tx, pending_subscription.max_pinned_blocks.get() - 1),
                 );
 
+                // The chain object can be dropped concurrently; if so, the
+                // weak reference no longer upgrades and the original task is
+                // shutting down. Drop the response silently rather than
+                // panicking — the receiver is going away anyway.
+                let Some(to_background) = background.to_background_tx.upgrade() else {
+                    continue;
+                };
+
                 let _ = pending_subscription.result_tx.send(SubscribeAll {
                     finalized_block_scale_encoded_header: finalized_block
                         .scale_encoded_header
@@ -1686,7 +1694,7 @@ async fn run_background<TPlat: PlatformRef>(
                     new_blocks: Subscription {
                         subscription_id,
                         channel: Box::pin(new_blocks_channel),
-                        to_background: background.to_background_tx.upgrade().unwrap(),
+                        to_background,
                     },
                 });
             }
