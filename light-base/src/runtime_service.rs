@@ -1675,7 +1675,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // The chain object can be dropped concurrently; if so, the
                 // weak reference no longer upgrades and the original task is
                 // shutting down. Drop the response silently rather than
-                // panicking — the receiver is going away anyway.
+                // panicking, the receiver is going away anyway.
                 let Some(to_background) = background.to_background_tx.upgrade() else {
                     continue;
                 };
