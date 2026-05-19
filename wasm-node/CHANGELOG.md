@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fix `ext_trie_blake2_256_verify_proof_version_*` rejecting valid Substrate compact Merkle proofs. The implementation added in #2221 used the regular proof decoder, which can't reconstruct path children that Substrate's `sp_trie::generate_trie_proof` omits.
 - Fix execution proofs with inputs bigger than 1MiB failing due to protocol limits. Smoldot now uses storage-on-demand for large inputs. ([#2196](https://github.com/smol-dot/smoldot/pull/2196))
 
 ## 2.0.40 - 2025-12-02
